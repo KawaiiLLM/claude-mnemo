@@ -1243,7 +1243,7 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     // 77 draft edges are E6 instances. The TYPE half (E3) is still silent,
     // which is what `vocabularyConformance` below pins directly.
     expect(text.startsWith(
-      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains\n" +
+      "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains\n" +
         "77 error(s)\n",
     )).toBe(true);
     expect(text).toContain(

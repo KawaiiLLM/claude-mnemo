@@ -210,7 +210,13 @@ describe("tickets 15/22 — the duties are exactly three, and none of them is a 
     expect(duties).toContain(
       "Three things, and nothing else: the EDGES of the turns in your writable",
     );
-    expect(duties).toContain("set, a severed lane's DISPOSITION, and this SESSION's own two fields.");
+    // TICKET 04: the duty is still one of the three, and its own bullet is
+    // still where it is explained — but the preamble now says up front that it
+    // is never required, so a run does not carry an obligation forward from
+    // the first line it reads to the last.
+    expect(duties).toContain(
+      "set, a severed lane's DISPOSITION — never required, see duty 2 — and this",
+    );
     expect(duties).toContain("task and never attach one.");
     // Exactly three numbered duties, and they are these three.
     expect([...duties.matchAll(/^\d+\. [A-Z]/gm)].map((match) => match[0])).toEqual([
@@ -1866,6 +1872,53 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
             "and is recorded; a landing turn with genuinely no external " +
             "upstream is itself the compound, at zero hops.",
         ),
+      )
+      // SETTLEMENT-GATE-TAXONOMY TICKET 04 amendment (user ruling
+      // [S15069/T2274]): the mandatory-disposition mechanism above is WITHDRAWN
+      // — a severed lane is a warning naming its stitch target, `justify` is
+      // never required, and both round-trip-buying moves are named and
+      // forbidden. Job 166 was abandoned after 21 refused commits on the
+      // sentence this replaces. The phase-connectivity paragraph that follows
+      // it is untouched, which is why the needle stops where it does.
+      .replace(
+        words(
+          "A lane this window wrote a member or edge into owes more than a " +
+            "read of the WARNING: when Report 2 shows it SEVERED within the " +
+            "scope view, EDGE FIRST — read the disconnected pieces' candidate " +
+            "turns to their full text (page through the lane with " +
+            "`recall(id=\"E<n>/#<tag>\")` until every page is covered — a " +
+            "partial read does not qualify) and write the stitching edge a " +
+            "genuine use-relation supports; adjacency is not use, and a " +
+            "chronology bridge invented to silence the warning is worse than " +
+            "the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
+            "next `lane_check` no longer reports that fracture, and nothing " +
+            "further is owed for it. If no stitch is genuine, call " +
+            "`remember(justify, id, tag, representative, otherRepresentative, " +
+            "reason)` naming BOTH components' current representative turns " +
+            "(lane_check's SEVERED report names them) and why none of the " +
+            "seven relation words applies — refused unless you have fully " +
+            "recalled the lane AND hold a full-content grant on " +
+            "`otherRepresentative`, which is what makes \"you read it first\" " +
+            "checkable rather than merely asked for. `commit` REFUSES while " +
+            "any fracture this window touched carries neither a stitch nor a " +
+            "justify; a lane this window never touched owes nothing here, and " +
+            "a topology change (your own later stitch, a further split) " +
+            "invalidates an old justify automatically.",
+        ),
+        words(
+          "A lane this window wrote a member or edge into is named again at " +
+            "the end of `lane_check` and on your commit receipt when it is " +
+            "SEVERED, with the pieces' representative turns as a stitch " +
+            "target. IT BLOCKS NOTHING and there is no disposition to file. " +
+            "Write a stitching edge ONLY where the turns you are already " +
+            "reading make a genuine use-relation true; adjacency is not use, " +
+            "and a chronology bridge invented to clear the line is worse than " +
+            "the line. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
+            "next `lane_check` no longer reports that fracture. If no stitch " +
+            "is genuine, leave the fracture standing and commit: do not call " +
+            "`justify`, do not re-read the lane to satisfy the warning, and do " +
+            "not delay the commit over it.",
+        ),
       );
 
     // FINAL REVIEW, FINDING 1: FORM LANES leaves the finalization pass, which
@@ -2311,17 +2364,42 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
   // TICKET 17 (round-3 peer P0-1): E3 stopped blocking the stage-2 terminal
   // commit for EVERY provenance, not only a removed-side citer — the
   // teaching here generalizes with it (addendum folded in by ticket 15).
-  test("the preview lag is taught as an authority fact, not a checker bug: the gate is the truth, for EVERY provenance", () => {
+  // SETTLEMENT-GATE-TAXONOMY TICKET 04 INVERTS THE FIRST HALF. The preview lag
+  // is GONE — one rule builds both lists — so a prompt that still taught "the
+  // two surfaces disagree, believe the gate" would be teaching a divergence
+  // the code no longer has, and a run taught it keeps behaving under it. The
+  // E3 half is untouched: the class is still not this pass's debt.
+  test("the two surfaces are taught as AGREEING, and E3 is taught as shown-but-not-blocking", () => {
     const prompt = renderStageTwoPrompt();
 
-    expect(prompt).toContain("One disagreement between the two surfaces is expected, and the GATE is");
+    expect(prompt).not.toContain("One disagreement between the two surfaces is expected");
+    expect(prompt).not.toContain("the preview lists more than the gate refuses over");
+    expect(prompt).toContain("THE TWO SURFACES AGREE, by construction");
     expect(prompt).toContain("An E3 anywhere in your writable set");
     expect(prompt).toContain("is NOT this pass's debt");
     expect(prompt).toContain("a note field no edge pass holds the pen for");
     expect(prompt).toContain("the NEXT window's stage-1 debt, reached");
-    expect(prompt).toContain("`lane_check` does not, and still prints every E3 as actionable");
+    expect(prompt).toContain("under");
+    expect(prompt).toContain("as a finding this run cannot repair");
     expect(prompt).toContain("Do not chase it, and do not retype a turn to silence it.");
     expect(prompt).toContain("E4 and E6 anchored on that same turn ARE yours");
+  });
+
+  // TICKET 04's other half of the same teaching: the warnings header is now
+  // TRUE, and the severed lane — the one warning `commit` used to refuse over
+  // — is named as blocking nothing, with both round-trip-buying moves
+  // explicitly withdrawn.
+  test("the severed lane is taught as a warning that blocks nothing, and justify is withdrawn", () => {
+    const prompt = renderStageTwoPrompt();
+
+    expect(prompt).toContain("EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING");
+    expect(prompt).toContain("IT BLOCKS NOTHING and there is no disposition to file.");
+    expect(prompt).toContain("`justify` IS NEVER REQUIRED");
+    expect(prompt).toContain("`commit` does not refuse over a severed lane");
+    // The obligation this replaced must be GONE, not merely contradicted a few
+    // lines later by a softer sentence.
+    expect(prompt).not.toContain("`commit` REFUSES while");
+    expect(prompt).not.toContain("carries neither a stitch nor a justify");
   });
 
   test("the session narrative is stated as THIS pass's write, at this commit", () => {

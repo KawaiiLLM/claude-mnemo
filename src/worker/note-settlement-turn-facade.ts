@@ -533,12 +533,20 @@ export interface SettlementTurnWriteOutcome {
   /**
    * Severed-lane over-blocking fix: the (turn, tag) pairs THIS CALL actually
    * landed — one entry per tag in a landed `tags` write, plus one entry per
-   * PLACED side (tail or head) of every edge this call attached or restated.
-   * `[]` for a call that touched neither (a pure prose write, a session
-   * narrative, a rejected relation). Consumed by
+   * side (tail or head) of every edge this call attached, restated or
+   * retracted. `[]` for a call that touched neither (a pure prose write, a
+   * session narrative, a rejected relation). Consumed by
    * `note-settlement-direct-write.ts`'s touch accumulator, never read
    * anywhere else — this is not a general-purpose "what did this call touch"
    * receipt, only the lane-disposition gate's own input.
+   *
+   * SETTLEMENT-GATE-TAXONOMY TICKET 04: an UNPLACED side now contributes an
+   * entry with the `''` lane sentinel rather than being skipped. Both readers
+   * of this list stay correct — the disposition gate looks a touch up by a real
+   * lane tag and can never match `''`, while the judgment seam reads only the
+   * TURN ids. The skip was the one gap in "which turns did this run write at":
+   * a DRAFT edge is precisely an E6, and an E6 the run creates on a far
+   * writable turn is exactly the finding it must still be judged on.
    */
   laneTouches: Array<{ turnId: number; tag: string }>;
   /**
@@ -1064,10 +1072,13 @@ export function evaluateSettlementTurnWrite(
 
   // Severed-lane over-blocking fix: the (turn, tag) pairs this call itself
   // lands, collected as each mutation below actually applies rather than
-  // re-derived from the input after the fact — a rejected write, a yielded
-  // field or a draft (unplaced) edge side never reaches this list. A landed
-  // `tags` write adds one entry per tag below; a landed edge side adds its
-  // own once `attachTurnRelations` reports which rows actually landed.
+  // re-derived from the input after the fact — a rejected write or a yielded
+  // field never reaches this list. A landed `tags` write adds one entry per
+  // tag below; a landed edge side adds its own once `attachTurnRelations`
+  // reports which rows actually landed. Ticket 04: a DRAFT (unplaced) side is
+  // recorded with the `''` sentinel rather than skipped — see `laneTouches` on
+  // the outcome type for which reader that serves and why the other is
+  // unaffected.
   const laneTouches: Array<{ turnId: number; tag: string }> = [];
   // Ticket 04: the lane-addressed half — see `laneKeyTouches`' own doc on the
   // outcome type for why a tag REMOVAL cannot ride the list above.
@@ -1512,13 +1523,13 @@ export function evaluateSettlementTurnWrite(
     // over a fracture this run had just created, with neither stitch nor
     // justify. Both endpoints keep their lane tags across a retraction, so
     // both stay members of the lane and the `(turn, tag)` shape resolves
-    // normally. Same two skips as the attach side: an unplaced side carries
-    // `''`, and a segment-kind cited side carries no turn id.
+    // normally. ONE skip remains, the same one the attach side keeps (ticket
+    // 04 removed the other): a segment-kind cited side carries no turn id at
+    // all, so there is nothing to record. An unplaced side carries `''` and IS
+    // recorded, under that sentinel.
     for (const edge of result.deleted) {
-      if (edge.tailTag !== "") {
-        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
-      }
-      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+      laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      if (edge.cited.kind === "turn") {
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }
@@ -1684,13 +1695,12 @@ export function evaluateSettlementTurnWrite(
     // restatement is still this call asserting the edge, not new work, and
     // ticket 02's own "a genuine stitch self-evidences" wording never says
     // the stitch has to be first-time. An unplaced (draft, E6) side carries
-    // `''` and is skipped; a segment-kind cited side carries no turn id at
-    // all and is skipped the same way.
+    // `''` and is recorded under that sentinel (ticket 04 — it is the E6 this
+    // run just created, and the judgment seam has to know the run wrote here);
+    // a segment-kind cited side carries no turn id at all and is skipped.
     for (const edge of [...attached.written, ...attached.restated]) {
-      if (edge.tailTag !== "") {
-        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
-      }
-      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+      laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      if (edge.cited.kind === "turn") {
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }

@@ -14,11 +14,7 @@ import {
   workerRecallInputShape,
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
-import {
-  claimWriterId,
-  settlementTurnPermissions,
-  type SettlementProvenanceIndex,
-} from "../db/write-gate";
+import { claimWriterId, type SettlementProvenanceIndex } from "../db/write-gate";
 import type { runWriteTransaction } from "../db/database";
 import {
   getNoteSettlementJob,
@@ -70,9 +66,14 @@ import {
 } from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
+  LANE_CHECK_WARNING_NOTICE,
   projectLaneCheckerResultByScope,
   renderLaneCheckerReportsPaged,
 } from "../shared/lane-checker-render";
+import {
+  classifySettlementFinding,
+  type SettlementFindingContext,
+} from "./note-settlement-finding-class";
 import { evaluatePhaseConnectivity, type PhaseConnectivityFinding } from "../shared/phase-connectivity";
 import { parseTurnAddress } from "../mcp/note";
 import { resolveClaudeCodeExecutablePath } from "./claude-executable";
@@ -137,7 +138,7 @@ import {
  *      can widen this run past what stage 1 froze.
  *   2. ITS AUTHORITY IS PER PROVENANCE. A `removed-side-citer` holds relation
  *      writes only, and the terminal gate blocks it on E4/E6 but never on E3 —
- *      see `blocksUnderProvenance`.
+ *      see `classifySettlementFinding`, the one rule.
  *   3. ITS COMMIT IS THE ONLY PUBLICATION. `done`, the cursor advance, the era
  *      grant and the final metrics are all here, in one CAS transaction, and
  *      the stage-1 transition deliberately writes none of them.
@@ -499,22 +500,35 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "while an EDGE error (E4, E6) anchored inside your writable range remains, " +
   "so repair those (retag, retract and re-add) and re-run. An error " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
-  "THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the " +
-  "truth: an E3 anywhere — on a window turn as much as on a turn you may " +
-  "write RELATIONS on only — prints here as actionable and does NOT block " +
-  "your commit, because setting a turn's `type` is a note field no edge pass " +
-  "holds the pen for. It is the first pass's debt, and a later window reaches " +
-  "it through its own lookback. Do not chase it and do not try to retype a " +
+  "THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER — one rule builds " +
+  "both, so this preview can neither hide a row commit will refuse nor show " +
+  "you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is " +
+  "NOT in it: setting a turn's `type` is a note field no edge pass holds the " +
+  "pen for, so it is printed below, under the warnings, as a finding this run " +
+  "cannot repair. It is the first pass's debt, and a later window reaches it " +
+  "through its own lookback. Do not chase it and do not try to retype a " +
   "turn to silence it; the call is refused. " +
-  "Everything after the ERRORS block is WARNINGS: aspirational facts, " +
-  "never enforced. Report 1: per-lane statistics (members, edge counts, who " +
+  "Everything after the ERRORS block is WARNINGS: nothing under that header " +
+  "blocks anything, so read them, act only where the material you already " +
+  "hold supports it, and never spend a round trip on one. Report 1: " +
+  "per-lane statistics (members, edge counts, who " +
   "cites a member from outside " +
   "— grounds, consume-class use, or testimony; a lane cited only by " +
   "consume is still ADOPTED, not unused). A lane has NO state: open/closed " +
-  "and the single terminus they were computed from are gone. Report 2: " +
+  "and the single terminus they were computed from are gone. Its `coverage` " +
+  "line says whether the members listed are the WHOLE lane or a slice of it, " +
+  "with both counts — a slice is normal (your window is not the lane) and is " +
+  "never something to repair, but a judgment made as if the slice were the " +
+  "lane would be wrong. Report 2: " +
   "connectivity over each " +
   "lane's OWN edges — those whose two sides both name it; a provisional lane " +
-  "(0-1 members) is not judged. Report 3: cross-lane coupling, each lane's " +
+  "(0-1 members) is not judged. A SEVERED lane this run touched is named " +
+  "again at the very end, as a LANE DISPOSITION warning carrying the count " +
+  "and each fracture's stitch target. It does NOT block `commit` and it asks " +
+  "for no `justify`: write a stitch only where a truthful relation is already " +
+  "supported by what you are reading, and leave an honest fracture standing " +
+  "otherwise — a bridge invented to clear a line is worse than the fracture. " +
+  "Report 3: cross-lane coupling, each lane's " +
   "crossings counted in three groups, no threshold and no verdict. Report " +
   "4b: structural bypass candidates — a direct edge and a longer route " +
   "between the same two turns, both shown, neither marked for deletion, " +
@@ -604,9 +618,15 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "repair is that turn's `type`, and no edge pass holds that pen (your `note` " +
   "refuses the field). It is the first pass's debt; a later window meets it " +
   "again through its own lookback, and the first pass's own transition gate " +
-  "is what normally stops one reaching you at all. `lane_check` still prints " +
-  "it as actionable, and the refusal above still counts it — this gate is the " +
-  "truth about what blocks. " +
+  "is what normally stops one reaching you at all. `lane_check` prints it " +
+  "under the WARNINGS, which is the same class this gate gives it — the two " +
+  "surfaces run one rule. " +
+  "A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is " +
+  "left in two or more pieces rides the SUCCESSFUL receipt as a warning with " +
+  "its count and its stitch target, and there is nothing you owe for it: no " +
+  "`justify`, no retry, no delay. Connectivity is a quality goal, not a legal " +
+  "state, and two writable endpoints do not mean any of the seven relation " +
+  "words is true between them. " +
   // Staged settlement (spec Rev 5, §Shape numbers v1): what a SUCCESSFUL
   // commit hands back, so the run knows the numbers exist and are not
   // something it must compute or restate itself.
@@ -752,10 +772,10 @@ export interface SettlementProjectionScope {
   /**
    * The SAME ids, each carrying the SET of provenance classes that put it
    * there — ticket 04's frozen `note_settlement_writable_turns` snapshot,
-   * consumed read-only. Read by the terminal gate's per-provenance filter
-   * (`blocksUnderProvenance` below) and by nothing else here: the PROJECTION is
-   * unaffected, since what the loader loads has never depended on why an id is
-   * writable.
+   * consumed read-only. Read by the ONE classification rule
+   * (`worker/note-settlement-finding-class.ts`, condition 3) and by nothing
+   * else here: the PROJECTION is unaffected, since what the loader loads has
+   * never depended on why an id is writable.
    *
    * Optional, and absent means "every writable id carries full authority" —
    * the pre-staging behaviour, which is also the correct reading for a job that
@@ -857,6 +877,14 @@ interface SettlementLaneEvaluation {
   result: LaneCheckerResult;
   /** The projection's own turns, so an anchor can be spelled as an `S<n>/T<m>` address. */
   turns: LaneCheckerTurnInput[];
+  /**
+   * THIS RUN'S JUDGMENT PREDICATE (ticket 04), carried out so the classifier
+   * asks the SAME closure that decided what entered `result` — one definition,
+   * two askers, exactly as ticket 03 arranged for the projection itself. A
+   * second membership test built from the same inputs is how a preview and a
+   * verdict come apart.
+   */
+  judged: (turnId: number) => boolean;
 }
 
 /**
@@ -892,12 +920,45 @@ interface SettlementLaneEvaluation {
  *      unprojected value and could therefore demand a repair for a lane the
  *      same tool result had just declined to describe.
  *
+ * TICKET 04 CLOSES THE HOLE TICKET 02 OPENED, inside filter 1. A writable turn
+ * OUTSIDE the judgment set — a deadlock-guard closure endpoint, a citer 90
+ * prompts back — is still writable, so a run could DIRTY it (mint a draft edge,
+ * orphan a side tag) and commit clean, because its own new finding anchored
+ * where nothing may be judged. The fix is authorship, not authority:
+ *
+ *   - **Authority is NOT intersected with the judgment set**, and that is the
+ *     reading a reader will assume, so it is named. Those turns are writable
+ *     for one reason: this job's own stage-1 projection made their edges stale
+ *     and the citing turn is the ONLY turn that can repair them. Narrowing
+ *     authority to the judgment window would reinstate exactly the deadlock the
+ *     closure exists to break, and the spec's judgment window is explicit that
+ *     it "never grants anything" — it decides what may be JUDGED, not what may
+ *     be written.
+ *   - **Writing at a turn re-admits it as an anchor, whatever the distance.**
+ *     The judgment set exists so a run is not judged on somebody else's debt; a
+ *     finding sitting where this run just wrote is not somebody else's debt at
+ *     any distance. And it can never deadlock: whatever the run wrote, it can
+ *     retract, so condition 3 of the classification rule holds by construction.
+ *
+ * `authoredTurnIds` is the durable touch ledger's own answer
+ * (`RunLaneTouches.turnIds`), so it survives the attempt boundary — attempt A
+ * dirties a closure turn and dies, attempt B is still judged on it.
+ *
+ * ITS LIMIT, stated because the other reading is available: this re-admits by
+ * WHERE THE RUN WROTE, not by what the run CAUSED. A run that empties a tag on
+ * an endpoint turn can orphan an E4 anchored at a citing turn it never wrote,
+ * and that stays out of judgment. Answering "did this run cause this finding"
+ * is debt-id scoping, which this gate has never done and does not start doing
+ * here; "where did this run write" is bounded, durable and decidable.
+ *
  * Everything downstream — the paged render, the disposition gate, the commit
  * refusal — consumes the value this returns and filters nothing further.
  */
 function evaluateWindowLanes(
   db: Database,
   scope: SettlementProjectionScope,
+  /** `RunLaneTouches.turnIds`. Omitted by the direct-call test seams, which model no run and therefore no authorship. */
+  authoredTurnIds?: ReadonlySet<number>,
 ): SettlementLaneEvaluation {
   const projection = loadLaneCheckScope(db, {
     kind: "turns",
@@ -907,19 +968,23 @@ function evaluateWindowLanes(
   // Ticket 09 (D9): the loader's own per-SEGMENT registry/membership counts
   // go straight through as the fourth argument — the proliferation warning
   // must never be inferred from this window's projection (peer P1-11).
+  // Ticket 04 adds the fifth: each widened lane's WHOLE declared membership, so
+  // report 1's coverage line can say that what it lists is a slice.
   const result = checkLanes(
     projection.turns,
     projection.edges,
     projection.outOfVocabularyEdges,
     projection.segmentFacts,
+    projection.laneMemberTotals,
   );
+  const judged = (turnId: number): boolean =>
+    anchorsInJudgment(projection.roles, turnId) || authoredTurnIds?.has(turnId) === true;
   return {
+    judged,
     result: projectLaneCheckerResultByScope(
       {
         ...result,
-        errors: result.errors.filter((error) =>
-          anchorsInJudgment(projection.roles, error.anchorId),
-        ),
+        errors: result.errors.filter((error) => judged(error.anchorId)),
       },
       scope.writableTurnIds,
     ),
@@ -1069,14 +1134,33 @@ function renderPhaseConnectivityReport(
  * demanded a disposition for. Both halves read one value now, and the fix is
  * structural: there is no scope argument here to get wrong, because there is
  * no projection step here at all.
+ *
+ * TICKET 04: THIS FUNCTION NO LONGER DECIDES WHETHER A FRACTURE BLOCKS. Every
+ * fracture it finds is handed to `classifySettlementFinding` — the one rule —
+ * and lands in whichever bucket that answers. Under the frozen rule a fracture
+ * is a WARNING (connectivity is a quality goal, not a legal post-state; and a
+ * writable pair does not imply a truthful relation), so `blocking` is empty in
+ * practice and `commit` no longer refuses over a lane disposition. The
+ * `blocking` bucket and its callers' refusal branches are DELIBERATELY LEFT
+ * REACHABLE: they are what makes the demotion a property of the rule rather
+ * than of this function, and flipping the rule's fracture arm turns the
+ * demotion fixtures red at the commit verdict, which is where the behaviour
+ * actually lives.
  */
 function evaluateLaneDispositionGate(
   db: Database,
   evaluation: SettlementLaneEvaluation,
   runTouches: RunLaneTouches,
+  scope: SettlementProjectionScope,
 ): { blocking: string[]; warnings: string[] } {
   const { result } = evaluation;
   const blocking: string[] = [];
+  const fractureWarnings: string[] = [];
+  const findingContext: SettlementFindingContext = {
+    writableTurnIds: scope.writableTurnIds,
+    ...(scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {}),
+    anchorsInJudgment: evaluation.judged,
+  };
   const segmentsSeen = new Set<number>();
   for (const component of result.components) {
     if (component.componentCount <= 1) {
@@ -1118,6 +1202,27 @@ function evaluateLaneDispositionGate(
         `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" — severed fracture ` +
         `${turnAddressFor(db, fracture.representativeA)} <-> ` +
         `${turnAddressFor(db, fracture.representativeB)}`;
+      // THE ONE RULE, ASKED (ticket 04). Whether this fracture blocks is not a
+      // decision this loop is entitled to make.
+      const findingClass = classifySettlementFinding(
+        {
+          kind: "lane-fracture",
+          segmentId,
+          tag: component.key.tag,
+          representativeA: fracture.representativeA,
+          representativeB: fracture.representativeB,
+        },
+        findingContext,
+      );
+      if (findingClass === "warning") {
+        // A warning names the STITCH TARGET and nothing else — no verb, no
+        // "owes", no `justify`. The block-level notice
+        // (`LANE_CHECK_WARNING_NOTICE`) carries the contract once; repeating an
+        // instruction per line is how a warning starts reading like a queue,
+        // which is the round trip this batch exists to remove.
+        fractureWarnings.push(`${fractureText} (stitch target)`);
+        continue;
+      }
       // TICKET 08 decision 3: a justification that EXISTS but was granted on
       // evidence that has since moved is not the same refusal as no
       // justification at all — the caller has to know that its own earlier
@@ -1138,6 +1243,18 @@ function evaluateLaneDispositionGate(
     }
   }
   const warnings: string[] = [];
+  // ONE BLOCK, headed by the verbatim notice (spec, "Warning wording"). Emitted
+  // as a single string so the notice can never be separated from the findings
+  // it governs by a consumer that joins the list differently.
+  if (fractureWarnings.length > 0) {
+    warnings.push(
+      [
+        `LANE DISPOSITION — ${fractureWarnings.length} severed fracture(s) in lane(s) this run touched:`,
+        ...fractureWarnings.map((line) => `  ${line}`),
+        LANE_CHECK_WARNING_NOTICE,
+      ].join("\n"),
+    );
+  }
   for (const segmentId of segmentsSeen) {
     const rate = computeDuplicateReasonRate(db, segmentId);
     if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
@@ -1278,77 +1395,62 @@ function renderBlockingErrorsByOrigin(
 }
 
 /**
- * THE PER-PROVENANCE TERMINAL FILTER (staged-settlement spec Rev 5,
- * §Per-provenance gate filter). One error instance, two questions:
+ * THE GRAMMAR FINDINGS, SPLIT BY THE ONE RULE (settlement-gate-taxonomy ticket
+ * 04). `commit`'s refusal list and `lane_check`'s two sections are the SAME
+ * split, computed here and read by both, so a run cannot be shown one class and
+ * judged on another.
  *
- *   1. does it anchor inside this dispatch's writable set at all (the original
- *      filter, unchanged — an error anchored outside blocks its OWN window);
- *   2. can the authority THIS job holds over that anchor actually repair it?
- *
- * Question 2 is new and it exists because of one shape. A `removed-side-citer`
- * is in the writable set for a debt: this job's stage-1 projection removed a
- * lane from a turn the citer's edge points at, so the edge's side attribution
- * is stale and the citing turn is the only one that can fix it. That grants
- * RELATION writes and nothing else — the citer's note fields belong to whatever
- * window owns them.
- *
- * So the classes split by the authority each one NEEDS, which the checker's own
- * definitions already fix (`shared/lane-checker.ts`, module header):
- *
- *   - **E3 NEVER BLOCKS HERE, FOR ANY PROVENANCE** (ticket 17, reviewer ruling
- *     on round-3 finding P0-1). It is an empty or out-of-vocabulary turn
- *     `type`, anchored AT THE TURN ITSELF, and its only repair is writing that
- *     turn's `type` — a NOTE FIELD. Stage 2 holds no field authority ANYWHERE:
- *     the `note` face's allowlist (`STAGE_TWO_TURN_NOTE_FIELDS`) refuses
- *     `type` on a window member exactly as it refuses it on a removed-side
- *     citer, so the provenance the anchor carries makes no difference to
- *     whether this job could discharge the debt. It could not.
- *
- *     An earlier revision blocked window-provenance E3 on the reasoning that
- *     stage 1's transition gate never hands over an unfinished type, so the
- *     class was dormant. It is not dormant: after the transition, another
- *     legitimate writer — the main agent's own public `note`, whose schema
- *     accepts `type: []` (`mcp/definitions.ts`) — can empty a window turn's
- *     type, and a stage-2 retry resumes at `edges` without re-running stage 1.
- *     That made a concurrently-triggerable TERMINAL TRAP: refuse, refuse,
- *     refuse, window abandoned, and nothing repaired by the abandonment.
- *
- *     Enforcement lives where the authority lives. Stage 1's transition gate
- *     (`evaluateStageOneTransitionGate`) already refuses to hand over a turn
- *     with an unfinished type, and a type emptied AFTER the transition is the
- *     NEXT window's stage-1 debt, reached through its lookback. The class is
- *     still REPORTED here and by `lane_check` — narrowing the blocking set is
- *     not hiding the fact.
- *   - **E4 and E6 need `relations`.** Both anchor at an edge's CITING turn and
- *     both are discharged by retracting the edge or re-placing its sides, which
- *     is precisely what every provenance class authorizes. (E4's other repair —
- *     tagging the ENDPOINT — needs field authority over a different turn, so it
- *     is not the repair this anchor's own authority guarantees; the retraction
- *     is, and one legal repair is what makes an error repairable.)
- *
- * The `relations` question is still asked rather than assumed: every provenance
- * class carries it today, but the rule is `settlementWritePermissions`' to
- * state, reached through `settlementTurnPermissions` and never restated here
- * (spec reviewer guardrail 1: the old mutually-exclusive three-way helper is
- * not the model). A provenance added tomorrow without relation authority gets
- * the right answer for free.
- *
- * This is NOT debt-id scoping. Nothing here asks whether an error is one this
- * job's removal CAUSED; it asks what the job can repair, which is the same
- * repairability principle the anchor filter itself already applies, evaluated
- * one level finer.
+ * THE RULE ITSELF LIVES IN `note-settlement-finding-class.ts` and nothing here
+ * restates it. This function's whole job is to ask it once per instance and to
+ * put the answer in a bucket. What used to live here was
+ * `blocksUnderProvenance`, whose hand-written carve-out ("E3 never blocks
+ * here") was the spec's second written contradiction: `lane_check` printed the
+ * class under `## ERRORS` and this gate silently removed it. The rule's third
+ * condition covers it now — an E3's only repair is a `type` field write and the
+ * edge pass holds no such pen — so the carve-out is gone rather than moved, and
+ * the render shows the class on the side the gate actually treats it.
  */
-function blocksUnderProvenance(
+function classifyEvaluationErrors(
+  evaluation: SettlementLaneEvaluation,
   scope: SettlementProjectionScope,
-  error: LaneCheckerError,
-): boolean {
-  if (!scope.writableTurnIds.has(error.anchorId)) {
-    return false;
+): { blocking: LaneCheckerError[]; informational: LaneCheckerError[] } {
+  const context: SettlementFindingContext = {
+    writableTurnIds: scope.writableTurnIds,
+    ...(scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {}),
+    anchorsInJudgment: evaluation.judged,
+  };
+  const blocking: LaneCheckerError[] = [];
+  const informational: LaneCheckerError[] = [];
+  for (const error of evaluation.result.errors) {
+    if (classifySettlementFinding({ kind: "grammar-error", error }, context) === "blocking-error") {
+      blocking.push(error);
+    } else {
+      informational.push(error);
+    }
   }
-  if (error.class === "E3") {
-    return false;
-  }
-  return settlementTurnPermissions(scope.writableProvenance, error.anchorId).relations;
+  return { blocking, informational };
+}
+
+/**
+ * The same rule, in the shape `renderLaneCheckerReportsPaged` asks for — an
+ * ADAPTER, not a second answer: it forwards to `classifySettlementFinding` per
+ * instance and translates the class name into the render's own two words. The
+ * render is a shared, pure module and cannot see a run's judgment set or its
+ * authority, which is exactly why it asks rather than decides.
+ */
+function laneCheckErrorClassifier(
+  evaluation: SettlementLaneEvaluation,
+  scope: SettlementProjectionScope,
+): (error: LaneCheckerError) => "blocking" | "informational" {
+  const context: SettlementFindingContext = {
+    writableTurnIds: scope.writableTurnIds,
+    ...(scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {}),
+    anchorsInJudgment: evaluation.judged,
+  };
+  return (error) =>
+    classifySettlementFinding({ kind: "grammar-error", error }, context) === "blocking-error"
+      ? "blocking"
+      : "informational";
 }
 
 /**
@@ -1378,12 +1480,12 @@ function blocksUnderProvenance(
  *     scoping a single bad out-of-window edge pins a window on a
  *     permanently failing commit, the terminal-state trap (spec "Anchoring
  *     and repairability", the burned window_start precedent S15069/T1410).
- *     Staged settlement adds the SECOND question, same principle one level
+ *     Staged settlement added the SECOND question, same principle one level
  *     finer: can this job's authority over that anchor repair this CLASS of
- *     error — see `blocksUnderProvenance`. Ticket 17 carried that question to
- *     its conclusion: a turn-TYPE debt (E3) is unrepairable by an edge pass on
- *     ANY provenance, so it never blocks here, and stage 1's transition gate is
- *     where type authority — and therefore type enforcement — lives.
+ *     error. TICKET 04 folded both questions, and the judgment question with
+ *     them, into ONE RULE — `classifySettlementFinding` — so this gate no
+ *     longer holds a filter of its own at all; it renders whichever instances
+ *     that rule classed blocking.
  *   - **`result.errors` is uncapped and so is this list.** The checker's
  *     RENDER caps for display; the data does not, because an instance that
  *     sorted past a cap would slip the gate and the window would commit
@@ -1408,10 +1510,12 @@ export function evaluateSettlementCommitGate(
   // seam that needs a legacy fallback must not reach the production tool
   // path").
   scopeProvenance?: SettlementScopeProvenance,
+  /** Ticket 04: `RunLaneTouches.turnIds`. A direct-call seam that models no run passes none, and no finding is re-admitted by authorship. */
+  authoredTurnIds?: ReadonlySet<number>,
 ): string | null {
   return renderSettlementCommitGateRefusal(
     db,
-    evaluateWindowLanes(db, scope),
+    evaluateWindowLanes(db, scope, authoredTurnIds),
     scope,
     scopeProvenance,
   );
@@ -1429,8 +1533,7 @@ function renderSettlementCommitGateRefusal(
   scope: SettlementProjectionScope,
   scopeProvenance?: SettlementScopeProvenance,
 ): string | null {
-  const { result } = evaluation;
-  const blocking = result.errors.filter((error) => blocksUnderProvenance(scope, error));
+  const { blocking, informational } = classifyEvaluationErrors(evaluation, scope);
   if (blocking.length === 0) {
     return null;
   }
@@ -1443,8 +1546,10 @@ function renderSettlementCommitGateRefusal(
   // the preview's own default projection has dropped those rows since
   // settlement-ergonomics ticket 06, so the count named errors the agent could
   // not see anywhere. Ticket 17's remainder below survives because it names a
-  // class (E3) that IS inside the writable set and IS shown by the preview.
-  const beyondAuthority = result.errors.length - blocking.length;
+  // class (E3) that IS inside the writable set and IS shown by the preview —
+  // and since ticket 04 the preview shows it on the WARNING side, which is the
+  // side this line has always described it from.
+  const beyondAuthority = informational.length;
   return [
     `Commit refused — ${blocking.length} error(s) the grammar forbids still anchor inside your ` +
       "writable set. NOTHING was committed and this is NOT a failed attempt: repair these " +
@@ -1754,7 +1859,8 @@ export function createNoteSettlementSdkQuery(
         // taken at one instant inside the terminal transaction — never two
         // independent looks at a graph a write could move between them.
         const scope = projectionScope();
-        const evaluation = evaluateWindowLanes(db, scope);
+        const runTouches = writes.getRunLaneTouches();
+        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -1765,15 +1871,14 @@ export function createNoteSettlementSdkQuery(
           terminalGateVerdict = { ok: false, refusal };
           return terminalGateVerdict;
         }
-        // THE MANDATORY-DISPOSITION GATE (severed-lane ticket 02,
-        // [S15069/T1951]) — unlike ticket 01's phase-connectivity walk this is
-        // NOT gated off: the ticket ratified the refusal itself, so it runs
-        // the moment this machinery ships.
-        const disposition = evaluateLaneDispositionGate(
-          db,
-          evaluation,
-          writes.getRunLaneTouches(),
-        );
+        // THE LANE DISPOSITION PASS (severed-lane ticket 02, [S15069/T1951]).
+        // It was a MANDATORY gate; settlement-gate-taxonomy ticket 04 (user
+        // ruling T2274) demoted its findings to warnings through the one
+        // classification rule, so what normally comes back now is
+        // `warnings` — carried onto the SUCCESSFUL commit's receipt below.
+        // The refusal branch under it is not dead: it renders whatever the rule
+        // classes blocking, and that is where the demotion is actually observable.
+        const disposition = evaluateLaneDispositionGate(db, evaluation, runTouches, scope);
         if (disposition.blocking.length > 0) {
           terminalGateVerdict = {
             ok: false,
@@ -2184,15 +2289,25 @@ export function createNoteSettlementSdkQuery(
             // scoped it to `scopeProvenance.window`, which hid an error
             // anchored on a declared-lookback or closure turn by default and
             // then refused the commit over it.
-            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
+            const scope = projectionScope();
+            const runTouches = writes.getRunLaneTouches();
+            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const { result, turns } = evaluation;
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
             // own doc for why a SEPARATE entry point exists rather than a
             // change to `renderLaneCheckerReports` itself (the CLI/console
             // still call that one, unbounded, on purpose).
+            //
+            // TICKET 04: the render is handed THE SAME class predicate the
+            // commit gate obeys, so the ERRORS section it prints is exactly the
+            // list `commit` would refuse over and the demoted findings sit
+            // under the warnings header. The preview cannot show one class and
+            // the verdict judge another.
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
+              classifyError: laneCheckErrorClassifier(evaluation, scope),
             });
             // Ticket 01 (phase connectivity, report-only) + ticket 02 (lane
             // disposition, MANDATORY at `commit` — shown here too so the
@@ -2216,13 +2331,14 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { result, turns },
-                writes.getRunLaneTouches(),
+                evaluation,
+                runTouches,
+                scope,
               );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [
-                    `LANE DISPOSITION (ticket 02 — MANDATORY at commit; ${disposition.blocking.length} ` +
+                    `LANE DISPOSITION (blocking at commit; ${disposition.blocking.length} ` +
                       "fracture(s) touched by this run still owe a disposition):",
                     ...disposition.blocking.map((line) => `  ${line}`),
                   ].join("\n"),
@@ -2701,7 +2817,8 @@ export function createUnifiedNoteSettlementSdkQuery(
         // taken at one instant inside the terminal transaction — never two
         // independent looks at a graph a write could move between them.
         const scope = projectionScope();
-        const evaluation = evaluateWindowLanes(db, scope);
+        const runTouches = writes.getRunLaneTouches();
+        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -2712,11 +2829,7 @@ export function createUnifiedNoteSettlementSdkQuery(
           terminalGateVerdict = { ok: false, refusal };
           return terminalGateVerdict;
         }
-        const disposition = evaluateLaneDispositionGate(
-          db,
-          evaluation,
-          writes.getRunLaneTouches(),
-        );
+        const disposition = evaluateLaneDispositionGate(db, evaluation, runTouches, scope);
         if (disposition.blocking.length > 0) {
           terminalGateVerdict = {
             ok: false,
@@ -3218,10 +3331,14 @@ export function createUnifiedNoteSettlementSdkQuery(
             if (projectionFailure !== null) {
               return textResult(projectionFailure);
             }
-            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
+            const scope = projectionScope();
+            const runTouches = writes.getRunLaneTouches();
+            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
+              classifyError: laneCheckErrorClassifier(evaluation, scope),
             });
             const extraSections: string[] = [];
             if ((args.page ?? 1) === 1) {
@@ -3237,13 +3354,14 @@ export function createUnifiedNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { result, turns },
-                writes.getRunLaneTouches(),
+                evaluation,
+                runTouches,
+                scope,
               );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [
-                    `LANE DISPOSITION (MANDATORY at commit; ${disposition.blocking.length} ` +
+                    `LANE DISPOSITION (blocking at commit; ${disposition.blocking.length} ` +
                       "fracture(s) touched by this run still owe a disposition):",
                     ...disposition.blocking.map((line) => `  ${line}`),
                   ].join("\n"),

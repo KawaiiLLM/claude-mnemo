@@ -390,7 +390,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     };
     const text = renderLaneCheckerReports(withErrors);
     expect(text).toContain(
-      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
+      "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains",
     );
     expect(text).toContain("3 error(s)");
     expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");

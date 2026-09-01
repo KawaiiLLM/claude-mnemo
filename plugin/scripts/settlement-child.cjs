@@ -41090,11 +41090,15 @@ function loadLaneCheckScope(db, scope) {
   const laneMemberIds = /* @__PURE__ */ new Set();
   const membersByLaneToken = /* @__PURE__ */ new Map();
   const boundaryMemberIds = /* @__PURE__ */ new Set();
+  const laneMemberTotals = [];
   for (const laneKey of involvedLaneKeys) {
     const token = laneKeyToken(laneKey);
     const scannedMembers = new Set(
       laneKey.segment === DEFAULT_SEGMENT ? [] : loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)
     );
+    if (laneKey.segment !== DEFAULT_SEGMENT) {
+      laneMemberTotals.push({ key: laneKey, declaredMemberCount: scannedMembers.size });
+    }
     const candidates = loadEdgesForTag(db, laneKey.tag);
     const owningSegments = candidates.length === 0 ? /* @__PURE__ */ new Map() : loadOwningSegments(
       db,
@@ -41285,7 +41289,8 @@ function loadLaneCheckScope(db, scope) {
     involvedLaneKeys,
     outOfVocabularyEdges,
     segmentFacts,
-    roles: { judgment, evidence, boundary }
+    roles: { judgment, evidence, boundary },
+    laneMemberTotals
   };
 }
 
@@ -48982,6 +48987,7 @@ function recordLaneTouch(db, record3) {
   ).run(record3.jobId, record3.kind, record3.entityId, record3.laneTag, record3.createdAtEpoch);
 }
 function loadRunLaneTouches(db, jobId) {
+  const turnIds = /* @__PURE__ */ new Set();
   const turnTagPairs = /* @__PURE__ */ new Set();
   const laneKeys = /* @__PURE__ */ new Set();
   for (const row of db.query(
@@ -48989,12 +48995,15 @@ function loadRunLaneTouches(db, jobId) {
          FROM lane_run_touches WHERE job_id = ?`
   ).all(jobId)) {
     if (row.touchKind === "turn-tag") {
-      turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+      turnIds.add(row.entityId);
+      if (row.laneTag !== "") {
+        turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+      }
     } else {
       laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
     }
   }
-  return { turnTagPairs, laneKeys };
+  return { turnIds, turnTagPairs, laneKeys };
 }
 function recordLaneDispositionJustification(db, justification) {
   db.query(
@@ -53289,7 +53298,7 @@ function errorDetail(error49) {
   if (error49.class === "E3") return "";
   return error49.tags.join(",");
 }
-function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
+function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = [], laneMemberTotals = []) {
   const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
   const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
     outOfVocabularyFromEdges,
@@ -53304,9 +53313,23 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
   const laneStats = [];
   const componentReports = [];
+  const declaredMembersByToken = new Map(
+    laneMemberTotals.map((total) => [
+      laneToken(total.key.segment, total.key.tag),
+      total.declaredMemberCount
+    ])
+  );
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    laneStats.push(
+      buildLaneStats(
+        lane,
+        memberIds,
+        turnById,
+        vocabEdges,
+        declaredMembersByToken.get(laneToken(lane.key.segment, lane.key.tag))
+      )
+    );
     const component = buildComponentReport(lane, memberIds);
     if (component !== null) {
       componentReports.push(component);
@@ -53348,7 +53371,7 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
     errors
   };
 }
-function buildLaneStats(lane, memberIds, turnById, allEdges) {
+function buildLaneStats(lane, memberIds, turnById, allEdges, declaredMemberCount) {
   const phases = /* @__PURE__ */ new Set();
   for (const member of lane.members) {
     const turn = turnById.get(member.id);
@@ -53384,13 +53407,22 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
     edgeEndpointIds.add(edge.citedId);
   }
   const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  const membership = declaredMemberCount === void 0 ? void 0 : { loaded: lane.members.length, declared: declaredMemberCount };
+  const truncatedMembership = membership !== void 0 && membership.declared > membership.loaded;
+  const coverage = {
+    status: missingTurnIds.length > 0 || truncatedMembership ? "partial" : "whole",
+    missingTurnIds
+  };
+  if (membership !== void 0) {
+    coverage.membership = membership;
+  }
   return {
     key: lane.key,
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
     citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
-    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
+    coverage
   };
 }
 
@@ -53437,8 +53469,9 @@ function renderStatsReport(lane, addresses) {
   lines.push(
     "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
   );
+  const membership = lane.coverage.membership;
   lines.push(
-    "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")" : "")
+    "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")" : "") + (membership === void 0 ? "" : " -- " + membership.loaded + " of " + membership.declared + " declared member(s) loaded" + (membership.declared > membership.loaded ? "; the members above are a SLICE of this lane, not all of it" : ""))
   );
   return lines;
 }
@@ -53504,6 +53537,9 @@ function renderLaneError(error49, addresses) {
       return head + renderEdgeArrow(error49.citingId, error49.relation, error49.citedId, addresses) + ": DRAFT edge -- " + (error49.unsettledSides.length === 2 ? "neither side names a lane" : "the " + error49.unsettledSides[0] + " side names no lane (the " + (error49.unsettledSides[0] === "tail" ? "head" : "tail") + " side is {" + error49.tags.join(",") + "})");
   }
 }
+var LANE_CHECK_WARNING_NOTICE = "WARNING \u2014 informational; does not block commit. Do not call justify or delay commit. Add a stitch only if a truthful relation is already supported by the material you are processing.";
+var WARNINGS_SECTION_HEADER = "## WARNINGS -- informational; nothing below this line blocks commit";
+var ERRORS_SECTION_HEADER = "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains";
 var MAX_AGGREGATE_ADDRESS_SAMPLES = 5;
 function aggregateAddressLine(addresses) {
   const shown = addresses.slice(0, MAX_AGGREGATE_ADDRESS_SAMPLES);
@@ -53609,22 +53645,34 @@ function projectLaneCheckerResultByScope(result, actionableTurnIds) {
 function renderBlock(...lines) {
   return { lines };
 }
-function buildLaneCheckerBlocks(result, addresses) {
+function buildLaneCheckerBlocks(result, addresses, classifyError) {
   const blocks = [];
-  blocks.push(
-    renderBlock(
-      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains"
-    )
-  );
-  if (result.errors.length === 0) {
+  const blocking = [];
+  const informational = [];
+  for (const error49 of result.errors) {
+    (classifyError(error49) === "blocking" ? blocking : informational).push(error49);
+  }
+  blocks.push(renderBlock(ERRORS_SECTION_HEADER));
+  if (blocking.length === 0) {
     blocks.push(renderBlock("(none)"));
   } else {
-    blocks.push(renderBlock(result.errors.length + " error(s)"));
-    for (const error49 of result.errors) {
+    blocks.push(renderBlock(blocking.length + " error(s)"));
+    for (const error49 of blocking) {
       blocks.push(renderBlock(renderLaneError(error49, addresses)));
     }
   }
-  blocks.push(renderBlock("", "## WARNINGS -- the three principles' facts below; aspirations, never enforced"));
+  blocks.push(renderBlock("", WARNINGS_SECTION_HEADER, LANE_CHECK_WARNING_NOTICE));
+  if (informational.length > 0) {
+    blocks.push(
+      renderBlock(
+        "",
+        "## Grammar findings this run cannot repair -- " + informational.length + " finding(s); shown, never blocking"
+      )
+    );
+    for (const error49 of informational) {
+      blocks.push(renderBlock(renderLaneError(error49, addresses)));
+    }
+  }
   blocks.push(renderBlock("", "## Report 1 -- lane statistics"));
   if (result.lanes.length === 0) {
     blocks.push(renderBlock("(no lanes in scope)"));
@@ -53793,7 +53841,11 @@ var LANE_CHECK_DEFAULT_PAGE_BUDGET = 2e4;
 function renderLaneCheckerReportsPaged(result, anchorAddresses, options) {
   const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
   const requestedPage = options?.page ?? 1;
-  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
+  const blocks = buildLaneCheckerBlocks(
+    result,
+    anchorAddresses,
+    options?.classifyError ?? (() => "blocking")
+  );
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;
   const index = requestedPage - 1;
@@ -53805,6 +53857,42 @@ function renderLaneCheckerReportsPaged(result, anchorAddresses, options) {
     page: requestedPage,
     pageCount
   };
+}
+
+// src/worker/note-settlement-finding-class.ts
+function violatesStagePostStateInvariant(finding) {
+  switch (finding.kind) {
+    case "grammar-error":
+      return true;
+    case "lane-fracture":
+      return false;
+  }
+}
+function anchorsInThisRunsJudgment(finding, context) {
+  switch (finding.kind) {
+    case "grammar-error":
+      return context.anchorsInJudgment(finding.error.anchorId);
+    case "lane-fracture":
+      return context.anchorsInJudgment(finding.representativeA) || context.anchorsInJudgment(finding.representativeB);
+  }
+}
+function hasBoundedLegalHonestRepair(finding, context) {
+  switch (finding.kind) {
+    case "grammar-error": {
+      if (!context.writableTurnIds.has(finding.error.anchorId)) {
+        return false;
+      }
+      if (finding.error.class === "E3") {
+        return false;
+      }
+      return settlementTurnPermissions(context.writableProvenance, finding.error.anchorId).relations;
+    }
+    case "lane-fracture":
+      return false;
+  }
+}
+function classifySettlementFinding(finding, context) {
+  return violatesStagePostStateInvariant(finding) && anchorsInThisRunsJudgment(finding, context) && hasBoundedLegalHonestRepair(finding, context) ? "blocking-error" : "warning";
 }
 
 // src/shared/phase-connectivity.ts
@@ -55028,10 +55116,8 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     }
     retracted = result.deleted.length;
     for (const edge of result.deleted) {
-      if (edge.tailTag !== "") {
-        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
-      }
-      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+      laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      if (edge.cited.kind === "turn") {
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }
@@ -55121,10 +55207,8 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       restored
     };
     for (const edge of [...attached.written, ...attached.restated]) {
-      if (edge.tailTag !== "") {
-        laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
-      }
-      if (edge.headTag !== "" && edge.cited.kind === "turn") {
+      laneTouches.push({ turnId: edge.citing.id, tag: edge.tailTag });
+      if (edge.cited.kind === "turn") {
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }
@@ -55364,6 +55448,7 @@ function createSettlementDirectWriteEngine(options) {
   let lastCommitMetrics = null;
   const touchedTurnTagPairs = /* @__PURE__ */ new Set();
   const touchedLaneKeys = /* @__PURE__ */ new Set();
+  const touchedTurnIds = /* @__PURE__ */ new Set();
   function persistTurnWriteTouches(outcome, nowEpoch) {
     for (const touch of outcome.laneTouches) {
       recordLaneTouch(db, {
@@ -55413,7 +55498,10 @@ function createSettlementDirectWriteEngine(options) {
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
     for (const touch of evaluation.outcome.laneTouches) {
-      touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+      touchedTurnIds.add(touch.turnId);
+      if (touch.tag !== "") {
+        touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+      }
     }
     for (const touch of evaluation.outcome.laneKeyTouches) {
       touchedLaneKeys.add(laneTouchSegmentTagKey(touch.segmentId, touch.tag));
@@ -55555,6 +55643,7 @@ function createSettlementDirectWriteEngine(options) {
     getRunLaneTouches: () => {
       const durable = loadRunLaneTouches(db, context.jobId);
       return {
+        turnIds: /* @__PURE__ */ new Set([...durable.turnIds, ...touchedTurnIds]),
         turnTagPairs: /* @__PURE__ */ new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
         laneKeys: /* @__PURE__ */ new Set([...durable.laneKeys, ...touchedLaneKeys])
       };
@@ -56763,9 +56852,9 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   // NO `scope` (settlement-gate-taxonomy ticket 03) — see the doc comment
   // above. One projection, no widening to ask for.
 };
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the truth: an E3 anywhere \u2014 on a window turn as much as on a turn you may write RELATIONS on only \u2014 prints here as actionable and does NOT block your commit, because setting a turn's `type` is a note field no edge pass holds the pen for. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and it asks for no `justify`: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION = 'Also takes `impressions` (array): ONE entry per impression container this run touched, and nothing else \u2014 a touched container with no judgment is a rejected payload, not a silent skip, and a container you were not shown is not yours to rewrite. Each entry is `{ id, baseRevision, decision }` \u2014 `id` is the container address exactly as printed ("E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` is the revision you were shown, and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE new impression), a retain carries none. The whole set is fenced together: any container whose revision moved, or any lane whose settled membership moved, rejects the ENTIRE commit and reprints the current coordinates \u2014 read them and decide again. A refusal costs no attempt. A payload over 256 KiB is refused deterministically: regenerate SHORTER (compress prose, drop non-essential claims) but never omit a judgment and never demote a required replace to a retain.';
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` still prints it as actionable, and the refusal above still counts it \u2014 this gate is the truth about what blocks. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no `justify`, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
 var SETTLEMENT_COMMIT_INPUT_SHAPE = {
   report: external_exports.string(),
   impressions: external_exports.array(
@@ -56808,7 +56897,7 @@ var SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE = "SYSTEM / PROJECTION FAILURE \
 function settlementScopeProvenanceFailure(scopeProvenance) {
   return scopeProvenance === void 0 ? SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE : null;
 }
-function evaluateWindowLanes(db, scope) {
+function evaluateWindowLanes(db, scope, authoredTurnIds) {
   const projection = loadLaneCheckScope(db, {
     kind: "turns",
     turnIds: [...scope.writableTurnIds],
@@ -56818,15 +56907,16 @@ function evaluateWindowLanes(db, scope) {
     projection.turns,
     projection.edges,
     projection.outOfVocabularyEdges,
-    projection.segmentFacts
+    projection.segmentFacts,
+    projection.laneMemberTotals
   );
+  const judged = (turnId) => anchorsInJudgment(projection.roles, turnId) || authoredTurnIds?.has(turnId) === true;
   return {
+    judged,
     result: projectLaneCheckerResultByScope(
       {
         ...result,
-        errors: result.errors.filter(
-          (error49) => anchorsInJudgment(projection.roles, error49.anchorId)
-        )
+        errors: result.errors.filter((error49) => judged(error49.anchorId))
       },
       scope.writableTurnIds
     ),
@@ -56875,9 +56965,15 @@ function renderPhaseConnectivityReport(db, findings) {
     ...lines
   ].join("\n");
 }
-function evaluateLaneDispositionGate(db, evaluation, runTouches) {
+function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
   const { result } = evaluation;
   const blocking = [];
+  const fractureWarnings = [];
+  const findingContext = {
+    writableTurnIds: scope.writableTurnIds,
+    ...scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {},
+    anchorsInJudgment: evaluation.judged
+  };
   const segmentsSeen = /* @__PURE__ */ new Set();
   for (const component of result.components) {
     if (component.componentCount <= 1) {
@@ -56907,12 +57003,35 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches) {
         continue;
       }
       const fractureText = `[LANE-DISPOSITION] E${segmentId} lane "${component.key.tag}" \u2014 severed fracture ${turnAddressFor3(db, fracture.representativeA)} <-> ${turnAddressFor3(db, fracture.representativeB)}`;
+      const findingClass = classifySettlementFinding(
+        {
+          kind: "lane-fracture",
+          segmentId,
+          tag: component.key.tag,
+          representativeA: fracture.representativeA,
+          representativeB: fracture.representativeB
+        },
+        findingContext
+      );
+      if (findingClass === "warning") {
+        fractureWarnings.push(`${fractureText} (stitch target)`);
+        continue;
+      }
       blocking.push(
         disposition.status === "stale" ? `${fractureText} has a justify on record, but the content it was granted on has MOVED since: ${disposition.moved.map((entry) => turnAddressFor3(db, entry.turnId)).join(", ")} was written after that justify landed, so the disposition no longer describes what it judged. Re-read that representative whole and justify the fracture again.` : `${fractureText} has no stitching edge and no justify on record. Stitch it (write any of the seven relations across it), or call remember(justify, id, tag, representative, otherRepresentative, reason) naming both representatives.`
       );
     }
   }
   const warnings = [];
+  if (fractureWarnings.length > 0) {
+    warnings.push(
+      [
+        `LANE DISPOSITION \u2014 ${fractureWarnings.length} severed fracture(s) in lane(s) this run touched:`,
+        ...fractureWarnings.map((line) => `  ${line}`),
+        LANE_CHECK_WARNING_NOTICE
+      ].join("\n")
+    );
+  }
   for (const segmentId of segmentsSeen) {
     const rate = computeDuplicateReasonRate(db, segmentId);
     if (rate && rate.rate > DUPLICATE_REASON_ANOMALY_RATE) {
@@ -56984,22 +57103,37 @@ function renderBlockingErrorsByOrigin(db, blocking, provenance) {
   }
   return lines;
 }
-function blocksUnderProvenance(scope, error49) {
-  if (!scope.writableTurnIds.has(error49.anchorId)) {
-    return false;
+function classifyEvaluationErrors(evaluation, scope) {
+  const context = {
+    writableTurnIds: scope.writableTurnIds,
+    ...scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {},
+    anchorsInJudgment: evaluation.judged
+  };
+  const blocking = [];
+  const informational = [];
+  for (const error49 of evaluation.result.errors) {
+    if (classifySettlementFinding({ kind: "grammar-error", error: error49 }, context) === "blocking-error") {
+      blocking.push(error49);
+    } else {
+      informational.push(error49);
+    }
   }
-  if (error49.class === "E3") {
-    return false;
-  }
-  return settlementTurnPermissions(scope.writableProvenance, error49.anchorId).relations;
+  return { blocking, informational };
+}
+function laneCheckErrorClassifier(evaluation, scope) {
+  const context = {
+    writableTurnIds: scope.writableTurnIds,
+    ...scope.writableProvenance ? { writableProvenance: scope.writableProvenance } : {},
+    anchorsInJudgment: evaluation.judged
+  };
+  return (error49) => classifySettlementFinding({ kind: "grammar-error", error: error49 }, context) === "blocking-error" ? "blocking" : "informational";
 }
 function renderSettlementCommitGateRefusal(db, evaluation, scope, scopeProvenance) {
-  const { result } = evaluation;
-  const blocking = result.errors.filter((error49) => blocksUnderProvenance(scope, error49));
+  const { blocking, informational } = classifyEvaluationErrors(evaluation, scope);
   if (blocking.length === 0) {
     return null;
   }
-  const beyondAuthority = result.errors.length - blocking.length;
+  const beyondAuthority = informational.length;
   return [
     `Commit refused \u2014 ${blocking.length} error(s) the grammar forbids still anchor inside your writable set. NOTHING was committed and this is NOT a failed attempt: repair these and call \`commit\` again in this same run.`,
     ...scopeProvenance ? renderBlockingErrorsByOrigin(db, blocking, scopeProvenance) : blocking.map((error49) => `  ${describeCommitGateError(db, error49)}`),
@@ -57146,7 +57280,8 @@ function createNoteSettlementSdkQuery(options) {
           return terminalGateVerdict;
         }
         const scope = projectionScope();
-        const evaluation = evaluateWindowLanes(db, scope);
+        const runTouches = writes.getRunLaneTouches();
+        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -57157,11 +57292,7 @@ function createNoteSettlementSdkQuery(options) {
           terminalGateVerdict = { ok: false, refusal };
           return terminalGateVerdict;
         }
-        const disposition = evaluateLaneDispositionGate(
-          db,
-          evaluation,
-          writes.getRunLaneTouches()
-        );
+        const disposition = evaluateLaneDispositionGate(db, evaluation, runTouches, scope);
         if (disposition.blocking.length > 0) {
           terminalGateVerdict = {
             ok: false,
@@ -57346,10 +57477,14 @@ ${tail.join("\n\n")}` : text);
             if (projectionFailure !== null) {
               return textResult5(projectionFailure);
             }
-            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
+            const scope = projectionScope();
+            const runTouches = writes.getRunLaneTouches();
+            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
-              pageBudget: args.pageBudget
+              pageBudget: args.pageBudget,
+              classifyError: laneCheckErrorClassifier(evaluation, scope)
             });
             const extraSections = [];
             if ((args.page ?? 1) === 1) {
@@ -57365,13 +57500,14 @@ ${tail.join("\n\n")}` : text);
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { result, turns },
-                writes.getRunLaneTouches()
+                evaluation,
+                runTouches,
+                scope
               );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [
-                    `LANE DISPOSITION (ticket 02 \u2014 MANDATORY at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
+                    `LANE DISPOSITION (blocking at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
                     ...disposition.blocking.map((line) => `  ${line}`)
                   ].join("\n")
                 );
@@ -57577,7 +57713,8 @@ function createUnifiedNoteSettlementSdkQuery(options) {
           return terminalGateVerdict;
         }
         const scope = projectionScope();
-        const evaluation = evaluateWindowLanes(db, scope);
+        const runTouches = writes.getRunLaneTouches();
+        const evaluation = evaluateWindowLanes(db, scope, runTouches.turnIds);
         const refusal = renderSettlementCommitGateRefusal(
           db,
           evaluation,
@@ -57588,11 +57725,7 @@ function createUnifiedNoteSettlementSdkQuery(options) {
           terminalGateVerdict = { ok: false, refusal };
           return terminalGateVerdict;
         }
-        const disposition = evaluateLaneDispositionGate(
-          db,
-          evaluation,
-          writes.getRunLaneTouches()
-        );
+        const disposition = evaluateLaneDispositionGate(db, evaluation, runTouches, scope);
         if (disposition.blocking.length > 0) {
           terminalGateVerdict = {
             ok: false,
@@ -57986,10 +58119,14 @@ ${tail.join("\n\n")}` : text);
             if (projectionFailure !== null) {
               return textResult5(projectionFailure);
             }
-            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
+            const scope = projectionScope();
+            const runTouches = writes.getRunLaneTouches();
+            const evaluation = evaluateWindowLanes(options.db, scope, runTouches.turnIds);
+            const { result, turns } = evaluation;
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
-              pageBudget: args.pageBudget
+              pageBudget: args.pageBudget,
+              classifyError: laneCheckErrorClassifier(evaluation, scope)
             });
             const extraSections = [];
             if ((args.page ?? 1) === 1) {
@@ -58005,13 +58142,14 @@ ${tail.join("\n\n")}` : text);
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                { result, turns },
-                writes.getRunLaneTouches()
+                evaluation,
+                runTouches,
+                scope
               );
               if (disposition.blocking.length > 0) {
                 extraSections.push(
                   [
-                    `LANE DISPOSITION (MANDATORY at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
+                    `LANE DISPOSITION (blocking at commit; ${disposition.blocking.length} fracture(s) touched by this run still owe a disposition):`,
                     ...disposition.blocking.map((line) => `  ${line}`)
                   ].join("\n")
                 );

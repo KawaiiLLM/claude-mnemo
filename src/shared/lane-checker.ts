@@ -391,6 +391,33 @@ export interface LaneTestimonyFact extends LaneCitedFact {
   relation: "verifies" | "refutes";
 }
 
+/**
+ * The whole-lane membership count a caller measured OUTSIDE this projection —
+ * `db/lane-checker-load.ts`'s `segment_members` scan, taken before its own
+ * judgment narrowing. Supplied per lane through `checkLanes`'s fifth
+ * parameter; a caller that supplies none gets no membership verdict, the same
+ * "never fabricate completeness" posture `LaneSegmentFacts` takes.
+ */
+export interface LaneMemberTotal {
+  key: LaneKey;
+  /** Live turns carrying this lane's tag in its own segment — the WHOLE lane. */
+  declaredMemberCount: number;
+}
+
+/**
+ * How much of this lane the reader is actually looking at.
+ *
+ * ONE QUESTION, ONE ANSWER (settlement-gate-taxonomy ticket 04): `status` is
+ * `whole` only when BOTH halves hold — every claiming edge's endpoint is
+ * loaded AND every declared member of the lane is in this projection. It used
+ * to answer only the first half, and after ticket 02's judgment narrowing that
+ * made it actively misleading: a reader of a narrowed lane saw 195 members
+ * where the lane has 295, under the word `whole`. A count that reads wider
+ * than it means is the MISLEADING half of this project's failure taxonomy, and
+ * misleading is the half that is not survivable.
+ *
+ * The two detail fields say WHICH half failed; neither is itself the verdict.
+ */
 export interface LaneCoverage {
   status: "whole" | "partial";
   /**
@@ -400,6 +427,17 @@ export interface LaneCoverage {
    * every edge it emits has both endpoints among the turns it emits.)
    */
   missingTurnIds: number[];
+  /**
+   * Loaded members vs the lane's whole declared membership. `undefined` when
+   * the caller supplied no `LaneMemberTotal` for this lane — not loaded, so no
+   * verdict, never "assume complete".
+   */
+  membership?: {
+    /** This projection's own members of the lane — the number report 1 prints. */
+    loaded: number;
+    /** The whole lane's live membership, measured by the caller outside this projection. */
+    declared: number;
+  };
 }
 
 export interface LaneStatsReport {
@@ -1479,6 +1517,12 @@ export function checkLanes(
   edges: readonly LaneEdgeInput[],
   knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
   segmentFacts: readonly LaneSegmentFacts[] = [],
+  /**
+   * Ticket 04: each lane's WHOLE declared membership, measured by the caller
+   * outside this projection — report 1's coverage denominator. A lane with no
+   * entry gets no membership verdict; see `LaneCoverage.membership`.
+   */
+  laneMemberTotals: readonly LaneMemberTotal[] = [],
 ): LaneCheckerResult {
   // Partition FIRST (module header, "Vocabulary conformance"): every graph
   // computation below reads `vocabEdges`, never the raw `edges` parameter — an
@@ -1503,11 +1547,25 @@ export function checkLanes(
 
   const laneStats: LaneStatsReport[] = [];
   const componentReports: LaneComponentReport[] = [];
+  const declaredMembersByToken = new Map<string, number>(
+    laneMemberTotals.map((total) => [
+      laneToken(total.key.segment, total.key.tag),
+      total.declaredMemberCount,
+    ]),
+  );
 
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
 
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    laneStats.push(
+      buildLaneStats(
+        lane,
+        memberIds,
+        turnById,
+        vocabEdges,
+        declaredMembersByToken.get(laneToken(lane.key.segment, lane.key.tag)),
+      ),
+    );
 
     const component = buildComponentReport(lane, memberIds);
     if (component !== null) {
@@ -1567,6 +1625,8 @@ function buildLaneStats(
   memberIds: ReadonlySet<number>,
   turnById: ReadonlyMap<number, LaneTurnInput>,
   allEdges: readonly LaneEdgeInput[],
+  /** This lane's whole declared membership, or `undefined` when the caller measured none. */
+  declaredMemberCount: number | undefined,
 ): LaneStatsReport {
   const phases = new Set<TurnPhase>();
   for (const member of lane.members) {
@@ -1607,13 +1667,33 @@ function buildLaneStats(
   }
   const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
 
+  // ONE VERDICT OVER BOTH HALVES (ticket 04, `LaneCoverage`): an endpoint this
+  // projection never loaded, OR a declared member it left behind, each makes
+  // what the reader is looking at a SLICE. `>` rather than `!==` on purpose —
+  // a projection can legitimately hold MORE members than the segment scan
+  // measured (a cross-segment claimant), and calling that "truncated" would be
+  // the same misreport in the other direction.
+  const membership =
+    declaredMemberCount === undefined
+      ? undefined
+      : { loaded: lane.members.length, declared: declaredMemberCount };
+  const truncatedMembership = membership !== undefined && membership.declared > membership.loaded;
+
+  const coverage: LaneCoverage = {
+    status: missingTurnIds.length > 0 || truncatedMembership ? "partial" : "whole",
+    missingTurnIds,
+  };
+  if (membership !== undefined) {
+    coverage.membership = membership;
+  }
+
   return {
     key: lane.key,
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
     citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
-    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds },
+    coverage,
   };
 }
 

@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mtif1sym" : "dev";
+var BUILD_ID = true ? "0.28.0-mtihk50c" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -12728,11 +12728,15 @@ function loadLaneCheckScope(db, scope) {
   const laneMemberIds = /* @__PURE__ */ new Set();
   const membersByLaneToken = /* @__PURE__ */ new Map();
   const boundaryMemberIds = /* @__PURE__ */ new Set();
+  const laneMemberTotals = [];
   for (const laneKey of involvedLaneKeys) {
     const token = laneKeyToken(laneKey);
     const scannedMembers = new Set(
       laneKey.segment === DEFAULT_SEGMENT ? [] : loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)
     );
+    if (laneKey.segment !== DEFAULT_SEGMENT) {
+      laneMemberTotals.push({ key: laneKey, declaredMemberCount: scannedMembers.size });
+    }
     const candidates = loadEdgesForTag(db, laneKey.tag);
     const owningSegments = candidates.length === 0 ? /* @__PURE__ */ new Map() : loadOwningSegments(
       db,
@@ -12923,7 +12927,8 @@ function loadLaneCheckScope(db, scope) {
     involvedLaneKeys,
     outOfVocabularyEdges,
     segmentFacts,
-    roles: { judgment, evidence, boundary }
+    roles: { judgment, evidence, boundary },
+    laneMemberTotals
   };
 }
 
@@ -22194,7 +22199,8 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
     "Three things, and nothing else: the EDGES of the turns in your writable",
-    "set, a severed lane's DISPOSITION, and this SESSION's own two fields. The",
+    "set, a severed lane's DISPOSITION \u2014 never required, see duty 2 \u2014 and this",
+    "SESSION's own two fields. The",
     "lane registry is not a fourth: stage 1 declared the lanes, the transition",
     "froze them, and this pass has no verb that mints, folds or removes one.",
     "You never create a task and never attach one.",
@@ -22244,20 +22250,30 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // blocking the stage-2 terminal commit for EVERY provenance, not only a
     // removed-side citer held for relations only — stage 2 holds no field
     // authority anywhere, so a type debt is never this pass's to discharge.
-    "One disagreement between the two surfaces is expected, and the GATE is",
-    "the truth. An E3 anywhere in your writable set \u2014 a window turn as much",
-    "as a turn you hold for RELATIONS ONLY \u2014 an empty or out-of-vocabulary",
-    "`type` \u2014 is NOT this pass's debt. Setting a turn's `type` is",
+    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the two surfaces no longer disagree
+    // at all — one rule builds both lists — so the paragraph that taught the
+    // disagreement, and taught the run to trust the gate over the preview,
+    // would now be teaching a divergence that does not exist.
+    "THE TWO SURFACES AGREE, by construction: one rule decides every",
+    "finding's class, and `lane_check`'s ERRORS block is exactly the list",
+    "`commit` refuses over. An E3 anywhere in your writable set \u2014 a window",
+    "turn as much as a turn you hold for RELATIONS ONLY \u2014 an empty or",
+    "out-of-vocabulary `type` \u2014 is NOT this pass's debt and is NOT in that",
+    "block. Setting a turn's `type` is",
     "a note field no edge pass holds the pen for \u2014 Stage 1's transition",
     "gate already refuses to hand over an unfinished type, and a type",
     "emptied AFTER the transition is the NEXT window's stage-1 debt, reached",
-    "through its own lookback. `commit` knows that and does not block on",
-    "it. `lane_check` does not, and still prints every E3 as actionable \u2014",
-    "the preview lists more than the gate refuses over.",
+    "through its own lookback. `lane_check` still SHOWS you every E3, under",
+    "the warnings, as a finding this run cannot repair.",
     "Do not chase it, and do not retype a turn to silence it.",
     "E4 and E6 anchored on that same turn ARE yours \u2014 both are relation",
     "grammar, both are repaired by retracting or re-placing the edge, and",
     "both block your commit.",
+    "",
+    "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING \u2014 a",
+    "severed lane included. Read them, act only where the material you are",
+    "already holding makes the write true, and never delay a commit or spend",
+    "an extra call on one.",
     "",
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
@@ -22410,34 +22426,25 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
-    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27), UPGRADED by
-    // severed-lane ticket 02 ([S15069/T1948][S15069/T1951]): a lane this
-    // window touched and leaves SEVERED no longer merely owes a final-reply
-    // sentence — `commit` REFUSES over it, mandatorily, one fracture at a
-    // time. See the file-header comment for the incident that first showed
-    // a teaching-only sentence is not enough.
-    "        A lane this window wrote a member or edge into owes more than a",
-    "        read of the WARNING: when Report 2 shows it SEVERED within the",
-    "        scope view, EDGE FIRST \u2014 read the disconnected pieces' candidate",
-    "        turns to their full text (page through the lane with",
-    '        `recall(id="E<n>/#<tag>")` until every page is covered \u2014 a',
-    "        partial read does not qualify) and write the stitching edge a",
-    "        genuine use-relation supports; adjacency is not use, and a",
-    "        chronology bridge invented to silence the warning is worse than",
-    "        the warning. A GENUINE STITCH SELF-EVIDENCES \u2014 once written, the",
-    "        next `lane_check` no longer reports that fracture, and nothing",
-    "        further is owed for it. If no stitch is genuine, call",
-    "        `remember(justify, id, tag, representative, otherRepresentative,",
-    "        reason)` naming BOTH components' current representative turns",
-    "        (lane_check's SEVERED report names them) and why none of the",
-    "        seven relation words applies \u2014 refused unless you have fully",
-    "        recalled the lane AND hold a full-content grant on",
-    '        `otherRepresentative`, which is what makes "you read it first"',
-    "        checkable rather than merely asked for. `commit` REFUSES while",
-    "        any fracture this window touched carries neither a stitch nor a",
-    "        justify; a lane this window never touched owes nothing here, and",
-    "        a topology change (your own later stitch, a further split)",
-    "        invalidates an old justify automatically.",
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27) UPGRADED this
+    // to a mandatory refusal via severed-lane ticket 02; SETTLEMENT-GATE-
+    // TAXONOMY TICKET 04 (user ruling [S15069/T2274]) takes the compulsion
+    // back out. Job 166 was ABANDONED after 21 refused commits on exactly this
+    // demand — dispose of fractures in a lane none of whose members it could
+    // write — and a run taught the old contract keeps paying for it whatever
+    // the gate does, which is why the teaching moves with the code.
+    "        A lane this window wrote a member or edge into is named again at",
+    "        the end of `lane_check` and on your commit receipt when it is",
+    "        SEVERED, with the pieces' representative turns as a stitch",
+    "        target. IT BLOCKS NOTHING and there is no disposition to file.",
+    "        Write a stitching edge ONLY where the turns you are already",
+    "        reading make a genuine use-relation true; adjacency is not use,",
+    "        and a chronology bridge invented to clear the line is worse than",
+    "        the line. A GENUINE STITCH SELF-EVIDENCES \u2014 once written, the",
+    "        next `lane_check` no longer reports that fracture. If no stitch",
+    "        is genuine, leave the fracture standing and commit: do not call",
+    "        `justify`, do not re-read the lane to satisfy the warning, and do",
+    "        not delay the commit over it.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -22562,11 +22569,17 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "   lane that looks wrong to you is a later, explicit, user-ruled merge,",
     "   never a rewrite from this pass. Say so in your final reply if you",
     "   believe two of them are one line.",
-    "   `justify` is step 4's own escape hatch and is described there: a",
-    "   fracture your window touched, with no genuine stitching edge, is",
-    "   disposed by naming both components' current representatives and why",
-    "   none of the seven relation words applies. `commit` REFUSES while any",
-    "   such fracture carries neither a stitch nor a justify.",
+    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the last two lines used to read
+    // "`commit` REFUSES while any such fracture carries neither a stitch nor a
+    // justify". They do not any more, and a run taught the old sentence keeps
+    // spending the round trip whatever the gate does — which is why the
+    // withdrawal is stated here as plainly as the obligation was.
+    "   `justify` IS NEVER REQUIRED and this window may finish without ever",
+    "   calling it. `commit` does not refuse over a severed lane: a fracture",
+    "   your window touched rides the receipt as a WARNING naming its stitch",
+    "   target, and an honest fracture left standing is a correct outcome. Do",
+    "   not call `justify` to clear a warning, and never to substitute for a",
+    "   stitch you could truthfully have written.",
     "",
     // ------------------------------------------------------------------
     // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own
@@ -22941,10 +22954,13 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   any edge whose endpoint has no task at all, with cause.",
     "8. You may call `lane_check` once your first pass over the worklist is",
     "   done, to see what the grammar still forbids before `commit` judges you",
-    "   on it. A SEVERED lane report (Report 2) that this run touched \u2014 a",
-    "   member or an edge \u2014 needs either a genuine stitching edge or one",
-    "   sentence in your final reply naming why the pieces stand apart; a lane",
-    "   severed entirely outside your writable set is not this run's debt.",
+    "   on it. A SEVERED lane this run touched \u2014 a member or an edge \u2014 is named",
+    "   at the end of that report and again on your commit receipt, with its",
+    "   stitch target. IT BLOCKS NOTHING: write a stitching edge only where the",
+    "   turns you are already reading make a genuine use-relation true, leave an",
+    "   honest fracture standing otherwise, and do not call `justify` or delay",
+    "   the commit over it. A lane severed entirely outside your writable set is",
+    "   not this run's debt at all.",
     "9. Write this session's own `title`/`content` where they need it (a",
     "   `note(session=\u2026)` call), then end with ONE successful `commit` \u2014 a",
     "   refusal is not that commit. `commit` verifies your job lease is still",
@@ -22961,15 +22977,25 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "`commit` is REFUSED while any ERROR `lane_check` reports anchors inside",
     "your writable set \u2014 the refusal lists exactly the rows to repair, and a",
     "refusal costs no attempt. Errors anchored outside your set belong to other",
-    "windows and never block you. One disagreement between the two surfaces is",
-    "expected, and the GATE is the truth: an E3 anywhere in your writable set \u2014",
-    "an empty or out-of-vocabulary `type` \u2014 is NOT your debt in the edge pass.",
+    "windows and never block you. THE TWO SURFACES AGREE, by construction: one",
+    "rule decides every finding's class, and `lane_check`'s ERRORS block is",
+    "exactly the list `commit` refuses over. An E3 anywhere in your writable",
+    "set \u2014 an empty or out-of-vocabulary `type` \u2014 is NOT your debt in the edge",
+    "pass and is NOT in that block.",
     "Setting a turn's `type` is a note field the edge pass holds no pen for;",
     "your own topic pass already refused to `finalize` with one unfinished, and",
     "a type emptied AFTER your transition is the NEXT window's topic-pass debt.",
+    "`lane_check` still SHOWS you every E3, under the warnings, as a finding",
+    "this run cannot repair.",
     "Do not chase it and do not retype a turn to silence it. E4 and E6 anchored",
     "on that same turn ARE yours \u2014 both are relation grammar, both are repaired",
     "by retracting or re-placing the edge, and both block your `commit`.",
+    "",
+    // SETTLEMENT-GATE-TAXONOMY TICKET 04 (user ruling [S15069/T2274]).
+    "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING \u2014 a severed",
+    "lane included. Read them, act only where the material you are already",
+    "holding makes the write true, and never delay a commit or spend an extra",
+    "call on one.",
     "",
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
@@ -23029,7 +23055,8 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "",
     "EDGE PASS (after `finalize` succeeds): three things, and nothing else \u2014",
     "the EDGES of the turns in your writable set, a severed lane's DISPOSITION",
-    "(`remember(justify, \u2026)`), and this SESSION's own two fields. The lane",
+    "(`remember(justify, \u2026)`, never required and never needed to commit), and",
+    "this SESSION's own two fields. The lane",
     "registry is not a fourth: you declared the lanes in the topic pass, your",
     "own `finalize` froze them, and the edge pass has no verb that mints, folds",
     "or removes one. You never create a task and never attach one, in either",
@@ -66209,7 +66236,7 @@ function errorDetail(error49) {
   if (error49.class === "E3") return "";
   return error49.tags.join(",");
 }
-function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = []) {
+function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts = [], laneMemberTotals = []) {
   const { inVocabulary: vocabEdges, outOfVocabulary: outOfVocabularyFromEdges } = partitionEdgesByVocabulary(edges);
   const outOfVocabularyEdges = mergeOutOfVocabularyEdges(
     outOfVocabularyFromEdges,
@@ -66224,9 +66251,23 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   const segmentFor = (id) => turnById.get(id)?.segment ?? DEFAULT_SEGMENT;
   const laneStats = [];
   const componentReports = [];
+  const declaredMembersByToken = new Map(
+    laneMemberTotals.map((total) => [
+      laneToken(total.key.segment, total.key.tag),
+      total.declaredMemberCount
+    ])
+  );
   for (const lane of lanes) {
     const memberIds = new Set(lane.members.map((member) => member.id));
-    laneStats.push(buildLaneStats(lane, memberIds, turnById, vocabEdges));
+    laneStats.push(
+      buildLaneStats(
+        lane,
+        memberIds,
+        turnById,
+        vocabEdges,
+        declaredMembersByToken.get(laneToken(lane.key.segment, lane.key.tag))
+      )
+    );
     const component = buildComponentReport(lane, memberIds);
     if (component !== null) {
       componentReports.push(component);
@@ -66268,7 +66309,7 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
     errors
   };
 }
-function buildLaneStats(lane, memberIds, turnById, allEdges) {
+function buildLaneStats(lane, memberIds, turnById, allEdges, declaredMemberCount) {
   const phases = /* @__PURE__ */ new Set();
   for (const member of lane.members) {
     const turn = turnById.get(member.id);
@@ -66304,13 +66345,22 @@ function buildLaneStats(lane, memberIds, turnById, allEdges) {
     edgeEndpointIds.add(edge.citedId);
   }
   const missingTurnIds = [...edgeEndpointIds].filter((id) => !turnById.has(id)).sort((a, b) => a - b);
+  const membership = declaredMemberCount === void 0 ? void 0 : { loaded: lane.members.length, declared: declaredMemberCount };
+  const truncatedMembership = membership !== void 0 && membership.declared > membership.loaded;
+  const coverage = {
+    status: missingTurnIds.length > 0 || truncatedMembership ? "partial" : "whole",
+    missingTurnIds
+  };
+  if (membership !== void 0) {
+    coverage.membership = membership;
+  }
   return {
     key: lane.key,
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
     citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
-    coverage: { status: missingTurnIds.length > 0 ? "partial" : "whole", missingTurnIds }
+    coverage
   };
 }
 
@@ -66552,8 +66602,9 @@ function renderStatsReport(lane, addresses) {
   lines.push(
     "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
   );
+  const membership = lane.coverage.membership;
   lines.push(
-    "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")" : "")
+    "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")" : "") + (membership === void 0 ? "" : " -- " + membership.loaded + " of " + membership.declared + " declared member(s) loaded" + (membership.declared > membership.loaded ? "; the members above are a SLICE of this lane, not all of it" : ""))
   );
   return lines;
 }
@@ -66632,9 +66683,7 @@ function renderCrossSegmentWarning(warning, addresses) {
 }
 function renderLaneCheckerReports(result, anchorAddresses) {
   const sections = [];
-  sections.push(
-    "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains"
-  );
+  sections.push(ERRORS_SECTION_HEADER);
   const shownErrors = errorInstanceLines(result.errors, anchorAddresses);
   if (result.errors.length === 0) {
     sections.push("(none)");
@@ -66645,7 +66694,8 @@ function renderLaneCheckerReports(result, anchorAddresses) {
     sections.push(...shownErrors);
   }
   sections.push("");
-  sections.push("## WARNINGS -- the three principles' facts below; aspirations, never enforced");
+  sections.push(WARNINGS_SECTION_HEADER);
+  sections.push(LANE_CHECK_WARNING_NOTICE);
   sections.push("");
   sections.push("## Report 1 -- lane statistics");
   if (result.lanes.length === 0) {
@@ -66754,6 +66804,9 @@ function renderLaneCheckerReports(result, anchorAddresses) {
   }
   return sections.join("\n");
 }
+var LANE_CHECK_WARNING_NOTICE = "WARNING \u2014 informational; does not block commit. Do not call justify or delay commit. Add a stitch only if a truthful relation is already supported by the material you are processing.";
+var WARNINGS_SECTION_HEADER = "## WARNINGS -- informational; nothing below this line blocks commit";
+var ERRORS_SECTION_HEADER = "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains";
 
 // src/worker/console-api.ts
 var SESSIONS_PAGE_MAX = 50;

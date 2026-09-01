@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import type { LaneCheckerTurnInput, LaneSegmentFacts } from "../shared/lane-checker";
+import type { LaneCheckerTurnInput, LaneMemberTotal, LaneSegmentFacts } from "../shared/lane-checker";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
@@ -169,6 +169,14 @@ import { liveTurnSql } from "./turn-liveness";
  * that field reports exactly what this file actually managed to load —
  * nothing here manufactures false completeness.
  *
+ * That answered a NARROWER question than it read, and once the judgment
+ * narrowing below landed, the gap became misleading rather than merely
+ * incomplete: a reader of a narrowed lane saw 195 members where the lane has
+ * 295, under the word `whole`. So `laneMemberTotals` (settlement-gate-taxonomy
+ * ticket 04) carries the denominator only this file can measure — each widened
+ * lane's whole `segment_members` count, captured BEFORE the narrowing is
+ * applied to it — and `LaneCoverage` answers one question over both halves.
+ *
  * THE ASYMMETRY, AND WHY IT IS CLOSED (settlement-gate-taxonomy tickets
  * 01/02). Until ticket 02 the two halves above covered DIFFERENT lane sets:
  * `laneTags` was resolved for EVERY turn that landed in the projection, while
@@ -251,6 +259,7 @@ export interface LaneJudgmentWindow {
 
 /** One turn's role in a settlement projection (module header, "THE THREE ROLES"). The three sets partition the projection's own turns. */
 export type LaneCheckTurnRole = "judgment" | "evidence" | "boundary";
+
 
 /**
  * The projection's turns, partitioned by role. Disjoint and exhaustive over
@@ -360,6 +369,13 @@ export interface LaneCheckProjection {
    * through `anchorsInJudgment`, never through a second membership test.
    */
   roles: LaneCheckRoles;
+  /**
+   * Per widened lane, its WHOLE declared membership (`LaneMemberTotal`) — the
+   * denominator report 1's coverage line needs to say that what a reader is
+   * seeing is a SLICE. Feed it to `checkLanes`'s fifth parameter; a caller that
+   * does not gets no membership verdict rather than a fabricated one.
+   */
+  laneMemberTotals: LaneMemberTotal[];
 }
 
 interface TurnLiteRow {
@@ -1220,6 +1236,13 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   const membersByLaneToken = new Map<string, Set<number>>();
   /** Members emitted only because they are somebody's BOUNDARY WITNESS — the third role. */
   const boundaryMemberIds = new Set<number>();
+  /**
+   * The DENOMINATOR (ticket 04): each widened lane's whole declared membership,
+   * captured from the same `segment_members` scan the narrowing is applied to,
+   * BEFORE it is applied. Recorded here rather than re-queried later because a
+   * second query is a second answer.
+   */
+  const laneMemberTotals: LaneMemberTotal[] = [];
   for (const laneKey of involvedLaneKeys) {
     const token = laneKeyToken(laneKey);
     // The SCAN. A DEFAULT_SEGMENT (homeless) lane has no `segment_members`
@@ -1229,6 +1252,12 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
         ? []
         : loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag),
     );
+    // A homeless lane has no `segment_members` rows, so its `scannedMembers`
+    // is empty by construction rather than by measurement — no entry, no
+    // fabricated denominator.
+    if (laneKey.segment !== DEFAULT_SEGMENT) {
+      laneMemberTotals.push({ key: laneKey, declaredMemberCount: scannedMembers.size });
+    }
     const candidates = loadEdgesForTag(db, laneKey.tag);
     const owningSegments =
       candidates.length === 0
@@ -1567,6 +1596,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     outOfVocabularyEdges,
     segmentFacts,
     roles: { judgment, evidence, boundary },
+    laneMemberTotals,
   };
 }
 

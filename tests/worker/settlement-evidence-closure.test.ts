@@ -48,6 +48,13 @@ interface EvidenceFixture {
   lookbackTurn: number;
   /** Prompt 899 — the cited end of the lookback turn's draft edge. */
   lookbackCited: number;
+  /**
+   * Prompt 898 — a CLEAN evidence turn with no edge of its own. Ticket 04's
+   * hole test writes a fresh draft from prompt 899 to this one, so the defect
+   * it creates anchors at a turn that carried none, and the pre-existing
+   * defect at prompt 900 stays a separate, untouched control.
+   */
+  evidenceRoot: number;
   windowTurnIds: number[];
 }
 
@@ -89,6 +96,7 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
       )!.id;
   }
 
+  const evidenceRoot = insertTurn(898, ["evidence-task", "beta"]);
   const lookbackCited = insertTurn(899, ["evidence-task", "beta"]);
   const lookbackTurn = insertTurn(900, ["evidence-task", "beta"]);
   const w1 = insertTurn(1000, ["evidence-task", "beta"]);
@@ -99,7 +107,7 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
     tags: ["evidence-task"],
     nowEpoch: NOW,
   }).id;
-  addSegmentMembers(db, segmentId, [lookbackCited, lookbackTurn, w1, w2], NOW);
+  addSegmentMembers(db, segmentId, [evidenceRoot, lookbackCited, lookbackTurn, w1, w2], NOW);
   insertLane(db, segmentId, "beta", NOW);
 
   const draft = (citing: number, cited: number) => ({
@@ -121,7 +129,14 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
   if (!job) {
     throw new Error("fixture failed to claim a settlement job");
   }
-  return { sessionDbId, job, lookbackTurn, lookbackCited, windowTurnIds: [w1, w2] };
+  return {
+    sessionDbId,
+    job,
+    lookbackTurn,
+    lookbackCited,
+    evidenceRoot,
+    windowTurnIds: [w1, w2],
+  };
 }
 
 function captureToolImpl() {
@@ -246,6 +261,142 @@ describe("settlement-gate-taxonomy ticket 02 — an old error on a lookback turn
       expect(laneCheckText).toContain("1 error(s)");
       // The lookback turn's E6 is not, on either scope.
       expect(laneCheckText).not.toContain(`S${fixture.sessionDbId}/T900: extends`);
+    } finally {
+      db?.close();
+    }
+  });
+});
+
+/**
+ * SETTLEMENT-GATE-TAXONOMY TICKET 04 — THE HOLE TICKET 02 OPENED, CLOSED.
+ *
+ * Ticket 02 made the judgment set narrower than the writable set, and left a
+ * gap between them: a run could DIRTY a writable turn outside its judgment set
+ * — mint a draft edge on a closure endpoint 100 prompts back — and commit
+ * clean, because its own brand-new finding anchored where nothing may be
+ * judged.
+ *
+ * TWO READINGS WERE AVAILABLE AND THE OTHER ONE IS THE OBVIOUS ONE, so this
+ * fixture pins the one that shipped:
+ *
+ *   - NOT "intersect write authority with the judgment set". Those turns are
+ *     writable precisely because this job's own projection made their edges
+ *     stale and the citing turn is the only turn that can repair them;
+ *     narrowing authority reinstates the deadlock the closure exists to break.
+ *   - "Writing at a turn re-admits it as an anchor, whatever the distance."
+ *     A finding where this run just wrote is not somebody else's debt at any
+ *     distance, and it can never deadlock: whatever the run wrote, it can
+ *     retract.
+ *
+ * ONE RUN, TWO DEFECTS OF THE IDENTICAL SHAPE, both on evidence turns:
+ * prompt 900's draft edge was already in the database, prompt 899's is minted
+ * by the run itself. Only the second is judged. That is what makes this a test
+ * of AUTHORSHIP rather than of "everything writable is judged after all".
+ */
+describe("settlement-gate-taxonomy ticket 04 — a defect this run CREATES on an evidence turn is judged", () => {
+  test("the run's own draft on prompt 899 blocks the commit; the pre-existing one on prompt 900 still does not", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const fixture = seedEvidenceFixture(db);
+      const writableTurnIds = [
+        fixture.evidenceRoot,
+        fixture.lookbackCited,
+        fixture.lookbackTurn,
+        ...fixture.windowTurnIds,
+      ];
+      let beforeText = "";
+      let afterText = "";
+      let commitText = "";
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          // CONTROL, before this run has written anything: the two evidence
+          // turns are loaded and readable, and neither one's own defect is a
+          // finding of this window.
+          beforeText = (
+            (await handlers.get("lane_check")!({})) as { content: Array<{ text: string }> }
+          ).content[0]!.text;
+
+          // The run DIRTIES prompt 899 — a bare address is a DRAFT edge, which
+          // is error class E6 by construction, on a turn 101 prompts before
+          // the window.
+          await handlers.get("recall")!({
+            id: `S${fixture.sessionDbId}/T899`,
+            filter: { fields: ["relations"] },
+            turn: 4_000,
+          });
+          const written = (await handlers.get("note")!({
+            turn: `S${fixture.sessionDbId}/T899`,
+            extends: [`S${fixture.sessionDbId}/T898`],
+          })) as { content: Array<{ text: string }> };
+          expect(written.content[0]!.text).not.toContain("refused");
+
+          afterText = (
+            (await handlers.get("lane_check")!({})) as { content: Array<{ text: string }> }
+          ).content[0]!.text;
+
+          commitText = (
+            (await handlers.get("commit")!({ report: "no friction this window" })) as {
+              content: Array<{ text: string }>;
+            }
+          ).content[0]!.text;
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-evidence-closure",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: fixture.job.id,
+        claimGeneration: fixture.job.claimGeneration,
+        stage: fixture.job.stage,
+        sessionId: fixture.sessionDbId,
+        writableTurnIds: new Set(writableTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(
+          db,
+          fixture.sessionDbId,
+          writableTurnIds,
+          1000,
+          1001,
+        ),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1000,
+        windowEnd: 1001,
+      });
+
+      // BEFORE: neither evidence turn's defect is reported. (The window's own
+      // turns carry a draft too — that one is prompt 1001's and is judged
+      // throughout, which is what keeps the ERRORS block from being empty for
+      // an uninteresting reason.)
+      expect(beforeText).toContain(`anchor S${fixture.sessionDbId}/T1001`);
+      expect(beforeText).not.toContain(`anchor S${fixture.sessionDbId}/T899`);
+      expect(beforeText).not.toContain(`anchor S${fixture.sessionDbId}/T900`);
+
+      // AFTER: the defect this run authored is a finding, at full distance.
+      expect(afterText).toContain(`anchor S${fixture.sessionDbId}/T899`);
+      // …and the identical one it did NOT author, 1 prompt further out, still
+      // is not. Same class, same writability, same distance band: authorship
+      // is the only difference between them.
+      expect(afterText).not.toContain(`anchor S${fixture.sessionDbId}/T900`);
+
+      // The gate agrees with the preview, because one rule built both.
+      expect(commitText).toContain("Commit refused");
+      expect(commitText).toContain(`S${fixture.sessionDbId}/T899`);
+      expect(commitText).not.toContain(`S${fixture.sessionDbId}/T900`);
     } finally {
       db?.close();
     }

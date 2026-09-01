@@ -306,10 +306,16 @@ async function collectFractureSets(
   db: Database,
   fixture: GhostLaneFixture,
   writableTurnIds: number[],
-): Promise<{ justify: string[]; preview: string[]; gate: string[] }> {
+): Promise<{ justify: string[]; preview: string[]; gate: string[]; previewText: string }> {
   const { sessionDbId, job, laneSegmentId, ghostTurnIds } = fixture;
   const promptNumberById = new Map(ghostTurnIds.map((id, index) => [id, index + 1]));
-  const answers = { justify: [] as string[], preview: [] as string[], gate: [] as string[] };
+  const answers = {
+    justify: [] as string[],
+    preview: [] as string[],
+    gate: [] as string[],
+    /** The `lane_check` render VERBATIM — ticket 04 reads the phantom-fracture criterion off it directly. */
+    previewText: "",
+  };
 
   const { toolImpl, handlers } = captureToolImpl();
   const queryImpl = mock(() =>
@@ -357,11 +363,24 @@ async function collectFractureSets(
       const preview = (await handlers.get("lane_check")!({})) as {
         content: Array<{ text: string }>;
       };
-      answers.preview = gateFracturePairs(preview.content[0]!.text);
+      answers.previewText = preview.content[0]!.text;
+      answers.preview = gateFracturePairs(answers.previewText);
 
       // ---- ARM 2: the terminal commit gate -----------------------------
+      // SETTLEMENT-GATE-TAXONOMY TICKET 04: this commit SUCCEEDS now — a
+      // fracture is a warning, so the disposition gate no longer refuses ahead
+      // of everything else, and the run reaches the obligations that were
+      // always behind it. The `impressions` judgment is one of them: the
+      // landed `justify` above is a TOUCH of the ghost lane, so this run owes
+      // that lane's container a judgment and the task tier's. Before this
+      // ticket the fracture refusal fired first and this fixture never got
+      // here.
       const committed = (await handlers.get("commit")!({
         report: "no friction this window",
+        impressions: [
+          { id: `E${laneSegmentId}/#ghost-lane`, baseRevision: 0, decision: "retain" },
+          { id: `E${laneSegmentId}`, baseRevision: 0, decision: "retain" },
+        ],
       })) as { content: Array<{ text: string }> };
       answers.gate = gateFracturePairs(committed.content[0]!.text);
 
@@ -421,11 +440,15 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
       // other is not — and BOTH surfaces say exactly that, in the same words.
       expect(sets.preview).toEqual(["4<->6"]);
       expect(sets.gate).toEqual(["4<->6"]);
-      // THE INVARIANT this whole ticket is about: what the gate still demands
-      // is a SUBSET of what justify will accept, so the run has a legal move.
+      // THE INVARIANT this whole ticket is about: what the gate still NAMES is
+      // a SUBSET of what justify will accept, so the run has a legal move.
       expect(sets.gate.every((pair) => sets.justify.includes(pair))).toBe(true);
 
-      expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
+      // TICKET 04: the fracture is on the receipt of a SUCCESSFUL commit. Both
+      // surfaces still name it, in the same words — that is what this test has
+      // always pinned — but the job is `done`, not held `claimed` on a
+      // refusal. It read `claimed` here for as long as a fracture refused.
+      expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -458,6 +481,19 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
       expect(sets.gate).toEqual([]);
       expect(sets.preview).toEqual([]);
 
+      // TICKET 04's own criterion, read off the RENDER rather than off a
+      // parsed pair set: "a lane whose edges were not widened produces no
+      // fracture line at all". Not a demoted warning, not a quieter phrasing —
+      // the lane is not in the report in any form, in either section, because
+      // it has no member in this projection. Demoting a phantom to a warning
+      // would have kept printing findings about a graph that is not there,
+      // which is the misleading half of the failure taxonomy.
+      expect(sets.previewText).not.toContain("ghost-lane");
+      // …and the report is not simply empty: the lane the seed DID discover is
+      // described, severed and all, in the same string.
+      expect(sets.previewText).toContain("carrier-lane");
+      expect(sets.previewText).toContain("SEVERED");
+
       // WHAT THE WHOLE BATCH IS FOR, stated as an assertion: what the gate
       // demands is a SUBSET of what justify will accept, so the run always has
       // a legal move. Before ticket 02 the two sets were DISJOINT here —
@@ -472,7 +508,11 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
       // membership for lanes whose edges were never widened — and this test
       // goes red with `gate` back at the five phantom pairs while `justify`
       // stays at two. Verified by running it.
-      expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
+      //
+      // TICKET 04: `done` rather than `claimed`, for the same reason as the
+      // test above — a fracture no longer refuses. Here the two sets were
+      // already empty, so this line moved because the OTHER gate did.
+      expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }

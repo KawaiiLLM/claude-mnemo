@@ -218,12 +218,30 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
       (testimony.join(", ") || "-") +
       "]",
   );
+  // TICKET 04: the coverage line names BOTH halves of the verdict. `members:`
+  // above prints a NUMBER, and after ticket 02's judgment narrowing that number
+  // is routinely a slice of the lane — 195 where the lane has 295 — while the
+  // old line said `whole` because every claiming edge's endpoint happened to be
+  // loaded. The slice is now said out loud, in the same line the reader already
+  // consults for completeness, rather than left to be inferred from a count
+  // nothing else states.
+  const membership = lane.coverage.membership;
   lines.push(
     "  coverage: " +
       lane.coverage.status +
       (lane.coverage.missingTurnIds.length > 0
         ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")"
-        : ""),
+        : "") +
+      (membership === undefined
+        ? ""
+        : " -- " +
+          membership.loaded +
+          " of " +
+          membership.declared +
+          " declared member(s) loaded" +
+          (membership.declared > membership.loaded
+            ? "; the members above are a SLICE of this lane, not all of it"
+            : "")),
   );
   return lines;
 }
@@ -562,9 +580,7 @@ export function renderLaneCheckerReports(
 ): string {
   const sections: string[] = [];
 
-  sections.push(
-    "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
-  );
+  sections.push(ERRORS_SECTION_HEADER);
   // UNCAPPED (finding P2-8): this is the render the settlement `lane_check`
   // returns, and the commit gate judges the same list — every instance the
   // gate can refuse on must be visible here. `cappedCountSuffix` therefore
@@ -581,7 +597,8 @@ export function renderLaneCheckerReports(
   }
 
   sections.push("");
-  sections.push("## WARNINGS -- the three principles' facts below; aspirations, never enforced");
+  sections.push(WARNINGS_SECTION_HEADER);
+  sections.push(LANE_CHECK_WARNING_NOTICE);
 
   sections.push("");
   sections.push("## Report 1 -- lane statistics");
@@ -766,6 +783,49 @@ export function renderLaneCheckerReports(
  *      inside one. Every page beyond the first states, at its own end, how
  *      many pages remain and the exact call that reaches the next one.
  */
+
+/**
+ * THE WARNING WORDING, verbatim from the settlement-gate-taxonomy spec
+ * ("Warning wording"). One string, two surfaces: it heads the `## WARNINGS`
+ * section of the `lane_check` render below, and `commit`'s own receipt carries
+ * it beside the same findings (`note-settlement-sdk-query.ts`).
+ *
+ * A warning that READS like an obligation buys a round trip, which is the cost
+ * this batch exists to remove — job 166 spent 21 refused commits and ~54M
+ * cache-read tokens on a demand it could not satisfy. So the text states three
+ * things a reader would otherwise have to infer: that nothing here blocks,
+ * that the two round-trip-buying moves (`justify`, delaying `commit`) are not
+ * wanted, and that a stitch is legitimate only when the material the run is
+ * already holding supports it — never as a way to silence the line.
+ *
+ * It lives in this SHARED module rather than beside the gate because both
+ * printers must emit the identical bytes; a second copy in the worker is how
+ * the two would come to word it differently.
+ */
+export const LANE_CHECK_WARNING_NOTICE =
+  "WARNING — informational; does not block commit. Do not call justify or delay commit. " +
+  "Add a stitch only if a truthful relation is already supported by the material you are processing.";
+
+/**
+ * The `## WARNINGS` header, and the criterion it now satisfies
+ * (settlement-gate-taxonomy ticket 04). It used to read "aspirations, never
+ * enforced" while `commit` refused over one of the findings printed beneath it
+ * — the first of the two written contradictions the spec's problem statement
+ * names. Nothing under this header blocks anything now, so the header says so
+ * plainly instead of claiming a posture the code contradicted.
+ */
+const WARNINGS_SECTION_HEADER = "## WARNINGS -- informational; nothing below this line blocks commit";
+
+/**
+ * The `## ERRORS` header, shared by both renders so the two never describe one
+ * class two ways. "that THIS run can repair" is the part ticket 04 added: the
+ * list under it is exactly the one `commit` refuses over, because the same rule
+ * built both — a finding whose repair this run's authority cannot reach is
+ * printed under the warnings header instead of here and then silently carved
+ * out of the gate.
+ */
+const ERRORS_SECTION_HEADER =
+  "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains";
 
 /** Samples per folded warning line — the "first several instance addresses" the ticket asks for. */
 const MAX_AGGREGATE_ADDRESS_SAMPLES = 5;
@@ -1029,27 +1089,56 @@ function renderBlock(...lines: string[]): LaneCheckerRenderBlock {
 function buildLaneCheckerBlocks(
   result: LaneCheckerResult,
   addresses: LaneAnchorAddresses | undefined,
+  classifyError: LaneCheckerErrorClassifier,
 ): LaneCheckerRenderBlock[] {
   const blocks: LaneCheckerRenderBlock[] = [];
 
-  blocks.push(
-    renderBlock(
-      "## ERRORS -- states the grammar forbids; commit refuses while one anchored in your writable scope remains",
-    ),
-  );
-  if (result.errors.length === 0) {
+  // ONE CLASS PER FINDING, DECIDED ELSEWHERE (ticket 04). This render prints
+  // the two lists in their two sections; it does not decide which list an
+  // instance belongs to, and there is no per-class rule here to drift from the
+  // gate's. `classifyError` is the settlement evaluator's own predicate,
+  // handed in — see `LaneCheckerPageOptions.classifyError`.
+  const blocking: LaneCheckerError[] = [];
+  const informational: LaneCheckerError[] = [];
+  for (const error of result.errors) {
+    (classifyError(error) === "blocking" ? blocking : informational).push(error);
+  }
+
+  blocks.push(renderBlock(ERRORS_SECTION_HEADER));
+  if (blocking.length === 0) {
     blocks.push(renderBlock("(none)"));
   } else {
     // UNCAPPED, same as `renderLaneCheckerReports` (module doc): the commit
     // gate judges this identical list, so every instance must stay reachable
     // — across pages if it must, never dropped.
-    blocks.push(renderBlock(result.errors.length + " error(s)"));
-    for (const error of result.errors) {
+    blocks.push(renderBlock(blocking.length + " error(s)"));
+    for (const error of blocking) {
       blocks.push(renderBlock(renderLaneError(error, addresses)));
     }
   }
 
-  blocks.push(renderBlock("", "## WARNINGS -- the three principles' facts below; aspirations, never enforced"));
+  blocks.push(renderBlock("", WARNINGS_SECTION_HEADER, LANE_CHECK_WARNING_NOTICE));
+
+  // The DEMOTED grammar findings (ticket 04, spec's classification table: E3 is
+  // a WARNING at stage 2). They are still SHOWN — narrowing what blocks is not
+  // hiding the fact — but they are shown UNDER the warnings header, paged like
+  // everything else, so a run cannot read them as a repair queue. Before this
+  // ticket they printed in the ERRORS block above while the gate silently
+  // carved them out, which is the second of the spec's two written
+  // contradictions.
+  if (informational.length > 0) {
+    blocks.push(
+      renderBlock(
+        "",
+        "## Grammar findings this run cannot repair -- " +
+          informational.length +
+          " finding(s); shown, never blocking",
+      ),
+    );
+    for (const error of informational) {
+      blocks.push(renderBlock(renderLaneError(error, addresses)));
+    }
+  }
 
   blocks.push(renderBlock("", "## Report 1 -- lane statistics"));
   if (result.lanes.length === 0) {
@@ -1282,11 +1371,33 @@ function continuationFooter(page: number, pageCount: number): string {
  */
 export const LANE_CHECK_DEFAULT_PAGE_BUDGET = 20_000;
 
+/**
+ * "Does this error instance block a commit?" — asked, never answered, here
+ * (settlement-gate-taxonomy ticket 04). The ONE rule that answers it lives at
+ * the settlement evaluator (`worker/note-settlement-finding-class.ts`), because
+ * two of its three conditions are facts about a RUN (which turns it may judge,
+ * which repairs its authority reaches) that this pure render cannot see.
+ *
+ * A caller that supplies none — the CLI, a fixture — gets `"blocking"` for
+ * every instance, which is the honest reading for a surface with no run and no
+ * gate behind it: it can say what the grammar forbids, and it must not invent
+ * a verdict about who could repair it.
+ */
+export type LaneCheckerErrorClassifier = (error: LaneCheckerError) => "blocking" | "informational";
+
 export interface LaneCheckerPageOptions {
   /** 1-based. Out-of-range yields an empty page body with the true `pageCount` still reported — the same "no clamping" convention `mcp/recall.ts`'s own pageBudget pagination uses. */
   page?: number;
   /** Same name and meaning as `recall`'s own `pageBudget` — a token ceiling per page; overflow rolls to another page, a block is never truncated. */
   pageBudget?: number;
+  /**
+   * The settlement evaluator's own class predicate (ticket 04). The demoted
+   * findings are rendered UNDER the warnings header and PAGED with everything
+   * else — an unpaged tail block would be the "output that cannot be expressed
+   * inside the protocol" failure the spec's third channel is about, and a real
+   * window has carried 435 E3s.
+   */
+  classifyError?: LaneCheckerErrorClassifier;
   // NO `scope` AND NO `actionableTurnIds` (settlement-gate-taxonomy ticket 03).
   // The scope projection is the evaluator's, applied once to the result BOTH
   // halves of the `lane_check` tool result are built from; a render that
@@ -1316,7 +1427,11 @@ export function renderLaneCheckerReportsPaged(
   const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
   const requestedPage = options?.page ?? 1;
 
-  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
+  const blocks = buildLaneCheckerBlocks(
+    result,
+    anchorAddresses,
+    options?.classifyError ?? (() => "blocking"),
+  );
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;
   const index = requestedPage - 1;

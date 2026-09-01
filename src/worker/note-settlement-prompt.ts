@@ -397,6 +397,19 @@ import { renderImpressionTeaching } from "./note-settlement-impression-teaching"
  * entirely outside the writable set is not this window's debt, and no
  * refusal path exists: a SEVERED touched lane with no stitch and no
  * sentence still commits.
+ *
+ * SETTLEMENT-GATE-TAXONOMY TICKET 04 (user ruling [S15069/T2274]) RESTORES
+ * that last clause, which severed-lane ticket 02 had overturned in between by
+ * making the disposition a mandatory refusal. Job 166 (S15069, window
+ * 2202-2251) was ABANDONED after 21 refused commits and ~54M cache-read
+ * tokens on that refusal, on a lane none of whose members it could write; the
+ * window's 50 turns are unsettled forever. What replaces the compulsion is one
+ * classification rule (`worker/note-settlement-finding-class.ts`) rather than
+ * a second teaching-only sentence: connectivity is a quality goal, not a legal
+ * post-state, and two writable endpoints do not imply that any of the seven
+ * relation words is TRUE between them. The step-5 text below therefore names
+ * the stitch target, forbids inventing a bridge, and explicitly withdraws both
+ * round-trip-buying moves (`justify`, delaying the commit).
  */
 
 export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
@@ -807,7 +820,8 @@ export function renderNoteSettlementPrompt(
     // membership is a `tags` write inside duty 1, and opening a container is
     // the main agent's act in front of the user, never a hindsight pass's.
     "Three things, and nothing else: the EDGES of the turns in your writable",
-    "set, a severed lane's DISPOSITION, and this SESSION's own two fields. The",
+    "set, a severed lane's DISPOSITION — never required, see duty 2 — and this",
+    "SESSION's own two fields. The",
     "lane registry is not a fourth: stage 1 declared the lanes, the transition",
     "froze them, and this pass has no verb that mints, folds or removes one.",
     "You never create a task and never attach one.",
@@ -857,20 +871,30 @@ export function renderNoteSettlementPrompt(
     // blocking the stage-2 terminal commit for EVERY provenance, not only a
     // removed-side citer held for relations only — stage 2 holds no field
     // authority anywhere, so a type debt is never this pass's to discharge.
-    "One disagreement between the two surfaces is expected, and the GATE is",
-    "the truth. An E3 anywhere in your writable set — a window turn as much",
-    "as a turn you hold for RELATIONS ONLY — an empty or out-of-vocabulary",
-    "`type` — is NOT this pass's debt. Setting a turn's `type` is",
+    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the two surfaces no longer disagree
+    // at all — one rule builds both lists — so the paragraph that taught the
+    // disagreement, and taught the run to trust the gate over the preview,
+    // would now be teaching a divergence that does not exist.
+    "THE TWO SURFACES AGREE, by construction: one rule decides every",
+    "finding's class, and `lane_check`'s ERRORS block is exactly the list",
+    "`commit` refuses over. An E3 anywhere in your writable set — a window",
+    "turn as much as a turn you hold for RELATIONS ONLY — an empty or",
+    "out-of-vocabulary `type` — is NOT this pass's debt and is NOT in that",
+    "block. Setting a turn's `type` is",
     "a note field no edge pass holds the pen for — Stage 1's transition",
     "gate already refuses to hand over an unfinished type, and a type",
     "emptied AFTER the transition is the NEXT window's stage-1 debt, reached",
-    "through its own lookback. `commit` knows that and does not block on",
-    "it. `lane_check` does not, and still prints every E3 as actionable —",
-    "the preview lists more than the gate refuses over.",
+    "through its own lookback. `lane_check` still SHOWS you every E3, under",
+    "the warnings, as a finding this run cannot repair.",
     "Do not chase it, and do not retype a turn to silence it.",
     "E4 and E6 anchored on that same turn ARE yours — both are relation",
     "grammar, both are repaired by retracting or re-placing the edge, and",
     "both block your commit.",
+    "",
+    "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING — a",
+    "severed lane included. Read them, act only where the material you are",
+    "already holding makes the write true, and never delay a commit or spend",
+    "an extra call on one.",
     "",
     "The lease is checked on EVERY call, not only at `commit`. If another",
     "worker reclaimed this window while you were reading, the very next write",
@@ -1023,34 +1047,25 @@ export function renderNoteSettlementPrompt(
     "        write. A lane's shape is no longer policed: a fork the lane never",
     "        re-joins is not an error, though an independent line of work is",
     "        usually clearer under a fresh, independently declared tag.",
-    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27), UPGRADED by
-    // severed-lane ticket 02 ([S15069/T1948][S15069/T1951]): a lane this
-    // window touched and leaves SEVERED no longer merely owes a final-reply
-    // sentence — `commit` REFUSES over it, mandatorily, one fracture at a
-    // time. See the file-header comment for the incident that first showed
-    // a teaching-only sentence is not enough.
-    "        A lane this window wrote a member or edge into owes more than a",
-    "        read of the WARNING: when Report 2 shows it SEVERED within the",
-    "        scope view, EDGE FIRST — read the disconnected pieces' candidate",
-    "        turns to their full text (page through the lane with",
-    "        `recall(id=\"E<n>/#<tag>\")` until every page is covered — a",
-    "        partial read does not qualify) and write the stitching edge a",
-    "        genuine use-relation supports; adjacency is not use, and a",
-    "        chronology bridge invented to silence the warning is worse than",
-    "        the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the",
-    "        next `lane_check` no longer reports that fracture, and nothing",
-    "        further is owed for it. If no stitch is genuine, call",
-    "        `remember(justify, id, tag, representative, otherRepresentative,",
-    "        reason)` naming BOTH components' current representative turns",
-    "        (lane_check's SEVERED report names them) and why none of the",
-    "        seven relation words applies — refused unless you have fully",
-    "        recalled the lane AND hold a full-content grant on",
-    "        `otherRepresentative`, which is what makes \"you read it first\"",
-    "        checkable rather than merely asked for. `commit` REFUSES while",
-    "        any fracture this window touched carries neither a stitch nor a",
-    "        justify; a lane this window never touched owes nothing here, and",
-    "        a topology change (your own later stitch, a further split)",
-    "        invalidates an old justify automatically.",
+    // Severed-lane-teaching ticket 01 (user ruling 2026-08-27) UPGRADED this
+    // to a mandatory refusal via severed-lane ticket 02; SETTLEMENT-GATE-
+    // TAXONOMY TICKET 04 (user ruling [S15069/T2274]) takes the compulsion
+    // back out. Job 166 was ABANDONED after 21 refused commits on exactly this
+    // demand — dispose of fractures in a lane none of whose members it could
+    // write — and a run taught the old contract keeps paying for it whatever
+    // the gate does, which is why the teaching moves with the code.
+    "        A lane this window wrote a member or edge into is named again at",
+    "        the end of `lane_check` and on your commit receipt when it is",
+    "        SEVERED, with the pieces' representative turns as a stitch",
+    "        target. IT BLOCKS NOTHING and there is no disposition to file.",
+    "        Write a stitching edge ONLY where the turns you are already",
+    "        reading make a genuine use-relation true; adjacency is not use,",
+    "        and a chronology bridge invented to clear the line is worse than",
+    "        the line. A GENUINE STITCH SELF-EVIDENCES — once written, the",
+    "        next `lane_check` no longer reports that fracture. If no stitch",
+    "        is genuine, leave the fracture standing and commit: do not call",
+    "        `justify`, do not re-read the lane to satisfy the warning, and do",
+    "        not delay the commit over it.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
@@ -1175,11 +1190,17 @@ export function renderNoteSettlementPrompt(
     "   lane that looks wrong to you is a later, explicit, user-ruled merge,",
     "   never a rewrite from this pass. Say so in your final reply if you",
     "   believe two of them are one line.",
-    "   `justify` is step 4's own escape hatch and is described there: a",
-    "   fracture your window touched, with no genuine stitching edge, is",
-    "   disposed by naming both components' current representatives and why",
-    "   none of the seven relation words applies. `commit` REFUSES while any",
-    "   such fracture carries neither a stitch nor a justify.",
+    // SETTLEMENT-GATE-TAXONOMY TICKET 04: the last two lines used to read
+    // "`commit` REFUSES while any such fracture carries neither a stitch nor a
+    // justify". They do not any more, and a run taught the old sentence keeps
+    // spending the round trip whatever the gate does — which is why the
+    // withdrawal is stated here as plainly as the obligation was.
+    "   `justify` IS NEVER REQUIRED and this window may finish without ever",
+    "   calling it. `commit` does not refuse over a severed lane: a fracture",
+    "   your window touched rides the receipt as a WARNING naming its stitch",
+    "   target, and an honest fracture left standing is a correct outcome. Do",
+    "   not call `justify` to clear a warning, and never to substitute for a",
+    "   stitch you could truthfully have written.",
     "",
     // ------------------------------------------------------------------
     // LANE-MODEL-V12 TICKET 22 (user ruling 2026-08-26). Ticket 15's own

@@ -629,6 +629,8 @@ export function createSettlementDirectWriteEngine(
   // in-memory staged list, no replay").
   const touchedTurnTagPairs = new Set<string>();
   const touchedLaneKeys = new Set<string>();
+  /** Ticket 04: the turns this run wrote at, the in-memory half of `RunLaneTouches.turnIds`. */
+  const touchedTurnIds = new Set<number>();
 
   /**
    * Ticket 04: the DURABLE half of the same fact, written inside the
@@ -699,7 +701,13 @@ export function createSettlementDirectWriteEngine(
     }
     accumulateTurnWriteCounts(counts, evaluation.outcome);
     for (const touch of evaluation.outcome.laneTouches) {
-      touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+      touchedTurnIds.add(touch.turnId);
+      // Ticket 04, mirroring `loadRunLaneTouches`: the `''` sentinel says "this
+      // run wrote at this turn and named no lane there" (a DRAFT edge side). It
+      // belongs in the turn set and never in the (turn, lane) pair set.
+      if (touch.tag !== "") {
+        touchedTurnTagPairs.add(laneTouchTurnTagKey(touch.turnId, touch.tag));
+      }
     }
     for (const touch of evaluation.outcome.laneKeyTouches) {
       touchedLaneKeys.add(laneTouchSegmentTagKey(touch.segmentId, touch.tag));
@@ -921,6 +929,7 @@ export function createSettlementDirectWriteEngine(
     getRunLaneTouches: () => {
       const durable = loadRunLaneTouches(db, context.jobId);
       return {
+        turnIds: new Set([...durable.turnIds, ...touchedTurnIds]),
         turnTagPairs: new Set([...durable.turnTagPairs, ...touchedTurnTagPairs]),
         laneKeys: new Set([...durable.laneKeys, ...touchedLaneKeys]),
       };

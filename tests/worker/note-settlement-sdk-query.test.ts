@@ -33,6 +33,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById } from "../../src/db/turns";
+import { LANE_CHECK_WARNING_NOTICE } from "../../src/shared/lane-checker-render";
 import { claimWriterId, sessionWriterId, stampField } from "../../src/db/write-gate";
 import { getOutgoingEdges } from "../../src/db/memory-edges";
 import {
@@ -1434,14 +1435,27 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
   });
 });
 
-describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory disposition", () => {
-  // REVERSED PINNED TEST (ticket 02's own required act — spec "Status": this
-  // reversal is the ticket's act, never a side effect). The predecessor
-  // severed-lane-teaching ticket 01 shipped this as "commit succeeds with no
-  // stitching edge and no justification sentence… (no new refusal path)".
-  // Ticket 02 upgrades exactly that finding to a MANDATORY ERROR: the same
-  // fixture, the same missing disposition, now REFUSES.
-  test("commit REFUSES a SEVERED touched lane with no stitching edge and no justify on record", async () => {
+describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WARNING on a successful commit", () => {
+  // REVERSED PINNED TEST, for the second time and in the opposite direction.
+  // severed-lane-teaching ticket 01 shipped this fixture as "commit succeeds…
+  // (no new refusal path)"; severed-lane ticket 02 upgraded it to a MANDATORY
+  // refusal; settlement-gate-taxonomy ticket 04 (user ruling S15069/T2274)
+  // demotes it back to a warning — this time through the ONE classification
+  // rule rather than by a decision written into the gate.
+  //
+  // WHAT MAKES IT RED, and what does NOT — measured, not assumed. The spec
+  // disqualifies a fracture TWICE, on two independent grounds, and both are
+  // written into the rule: connectivity is not a legal post-state (condition 1)
+  // and a writable pair does not imply a truthful relation (condition 3). So
+  // flipping EITHER arm of `worker/note-settlement-finding-class.ts` alone
+  // changes nothing anywhere in the suite — the conjunction still fails — and
+  // flipping BOTH turns this test red at its first `commit` assertion, along
+  // with every other fracture fixture in the repo (8 in total). Verified by
+  // running all three mutations. That is the honest reading: what this fixture
+  // pins is the fracture's CLASS, not either condition on its own, and
+  // condition 1's fracture arm is defence in depth rather than a load-bearing
+  // line.
+  test("commit SUCCEEDS on a SEVERED touched lane and the warning rides the receipt", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1476,21 +1490,33 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
           const laneCheckReceipt = (await handlers.get("lane_check")!({})) as {
             content: Array<{ text: string }>;
           };
-          expect(laneCheckReceipt.content[0]!.text).toContain("components: 2 (SEVERED)");
-          // Ticket 02: the mandatory disposition is ALSO surfaced from
-          // `lane_check` itself, before the agent ever calls `commit`.
-          expect(laneCheckReceipt.content[0]!.text).toContain("LANE DISPOSITION");
+          const preview = laneCheckReceipt.content[0]!.text;
+          expect(preview).toContain("components: 2 (SEVERED)");
+          // The fracture is still SHOWN before `commit` is ever called — the
+          // demotion narrows what blocks, it does not hide the fact.
+          expect(preview).toContain("LANE DISPOSITION — 1 severed fracture(s)");
+          expect(preview).toContain(LANE_CHECK_WARNING_NOTICE);
+          // …and it no longer reads like a queue: no obligation word, no
+          // repair verb, and above all no `justify` to spend a round trip on.
+          expect(preview).not.toContain("MANDATORY");
+          expect(preview).not.toContain("owe a disposition");
+          expect(preview).not.toContain("remember(justify");
 
-          const refused = (await handlers.get("commit")!({
+          const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("severed lane fracture");
-          expect(text).toContain("LANE-DISPOSITION");
-          expect(text).toContain(`S${sessionDbId}/T1`);
-          expect(text).toContain(`S${sessionDbId}/T3`);
-          expect(text).toContain("remember(justify");
+          const text = committed.content[0]!.text;
+          // THE ACCEPTANCE CRITERION, end to end: the commit LANDS, and the
+          // warning rides the receipt carrying the count and the stitch target.
+          expect(text).toContain("Committed");
+          expect(text).not.toContain("Commit refused");
+          expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
+          expect(text).toContain(
+            `severed fracture S${sessionDbId}/T1 <-> S${sessionDbId}/T3 (stitch target)`,
+          );
+          expect(text).toContain(LANE_CHECK_WARNING_NOTICE);
+          expect(text).not.toContain("remember(justify");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -1520,9 +1546,10 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         windowEnd: 4,
       });
 
-      // A refusal is an ordinary in-run rejection: the job row is untouched,
-      // exactly like the lane-checker's own E3/E4/E6 refusal.
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      // The window is SETTLED. Under ticket 02's gate this same fixture left
+      // the job `claimed` forever — 50 turns unsettled on a demand the run
+      // could not satisfy, which is job 166's whole failure in one assertion.
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -1935,7 +1962,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
   // for why three islands (two fractures) rather than two: it is the only
   // shape that can tell "the justify itself made this lane touched" apart
   // from "the one fracture the justify names happened to clear".
-  test("a lane touched ONLY by a landed justify (no edge, no tags write, members only in lookback) still blocks over its OTHER remaining fracture", async () => {
+  test("a lane touched ONLY by a landed justify (no edge, no tags write, members only in lookback) still WARNS over its OTHER remaining fracture", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -1980,17 +2007,23 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
           // (T3<->T5) is not — and this run made no other write of any
           // kind. If `touched` were still false for this lane (no edge, no
           // tags write, and the fixture never puts any of its turns in the
-          // window), this refusal would never fire and the outstanding
-          // fracture would silently pass through commit.
-          const refused = (await handlers.get("commit")!({
+          // window), no warning would name the outstanding fracture at all.
+          //
+          // TICKET 04: the outstanding fracture is a WARNING on a SUCCESSFUL
+          // receipt, not a refusal. What this test is about — that a landed
+          // justify is by itself enough to make the lane TOUCHED — is
+          // unchanged and is exactly what the warning's presence proves.
+          const committed = (await handlers.get("commit")!({
             report: "no friction this window",
+            impressions: retainAllImpressions(db!, job.id, laneTurnIds),
           })) as { content: Array<{ text: string }> };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("severed lane fracture");
-          expect(text).toContain(`S${sessionDbId}/T3`);
-          expect(text).toContain(`S${sessionDbId}/T5`);
-          // The healed fracture must not be re-demanded.
+          const text = committed.content[0]!.text;
+          expect(text).toContain("Committed");
+          expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
+          expect(text).toContain(
+            `severed fracture S${sessionDbId}/T3 <-> S${sessionDbId}/T5 (stitch target)`,
+          );
+          // The healed fracture must not be re-named.
           expect(text).not.toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -2021,7 +2054,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         windowEnd: 8,
       });
 
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -2767,7 +2800,15 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
     });
   }
 
-  test("a write to a representative's content between the justify and the commit makes the commit REFUSE, naming the fracture and the moved evidence", async () => {
+  // TICKET 04 INVERSION. The property this test pins is unchanged — a justify
+  // stops counting once the content it was granted on moves — but the
+  // OBSERVABLE moved with the class: a fracture is a warning now, so a fresh
+  // justify SILENCES the warning and a stale one lets it come back. The
+  // "MOVED since" prose is gone from the settlement surface with the refusal it
+  // existed to explain; a warning that told the run to re-justify would be an
+  // obligation wearing a warning's label, which is the wording this batch
+  // removes.
+  test("a write to a representative's content between the justify and the commit brings the fracture warning BACK", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -2793,27 +2834,33 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
         })) as { content: Array<{ text: string }> };
         expect(justified.content[0]!.text).toContain("Landed justify");
 
+        // CONTROL, and it is what makes the assertion below about STALENESS
+        // rather than about the warning simply always firing: while the
+        // justification is fresh, the fracture is silent.
+        const beforeTheMove = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        expect(beforeTheMove.content[0]!.text).toContain("components: 2 (SEVERED)");
+        expect(beforeTheMove.content[0]!.text).not.toContain("LANE DISPOSITION");
+
         // ANOTHER writer changes the very content the disposition was
         // reasoned from. The TOPOLOGY is untouched — same two islands, same
         // two representatives, same fingerprint — so nothing ticket 05's
         // fingerprint watches has moved.
         stampField(db!, "turn", t3, "content", sessionWriterId(sessionDbId), NOW + 1);
 
-        const refused = (await handlers.get("commit")!({
+        const committed = (await handlers.get("commit")!({
           report: "no friction this window",
+          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
-        const text = refused.content[0]!.text;
-        expect(text).toContain("Commit refused");
-        expect(text).toContain("LANE-DISPOSITION");
-        // The fracture, by both representative addresses…
+        const text = committed.content[0]!.text;
+        expect(text).toContain("Committed");
+        expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
+        // The fracture, by both representative addresses.
         expect(text).toContain(`S${sessionDbId}/T1 <-> S${sessionDbId}/T3`);
-        // …and the moved evidence, distinguished from "there is no justify".
-        expect(text).toContain("MOVED since");
-        expect(text).toContain(`S${sessionDbId}/T3 was written after that justify landed`);
-        expect(text).not.toContain("no stitching edge and no justify on");
       });
 
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -2852,17 +2899,19 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
 
       // RUN TWO: a fresh engine, writing nothing of its own. Under the
       // predecessor's fingerprint-only lookup the stored row cleared its gate
-      // outright, forever.
+      // outright, forever. Ticket 04: the non-inheritance is visible as the
+      // warning coming back, not as a refusal — observed here through
+      // `lane_check` rather than `commit`, because a commit would now SUCCEED
+      // and mark the job done, leaving run three nothing to do.
       await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        const refused = (await handlers.get("commit")!({
-          report: "no friction this window",
-        })) as { content: Array<{ text: string }> };
-        expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
-        expect(refused.content[0]!.text).toContain("MOVED since");
+        const preview = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        expect(preview.content[0]!.text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
       });
 
-      // …and re-reading the moved representative and re-justifying clears it,
-      // which is what makes the refusal a step rather than a wall.
+      // …and re-reading the moved representative and re-justifying silences it
+      // again, which is what makes the staleness a step rather than a wall.
       await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
         await handlers.get("recall")!({ id: `E${laneSegmentId}/#severed-fixture` });
         await handlers.get("recall")!({
@@ -2884,6 +2933,10 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
           impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
         expect(committed.content[0]!.text).toContain("Committed");
+        // The refreshed justification silences the warning again — the only
+        // place the freshness check is still observable, now that a fracture
+        // never refuses.
+        expect(committed.content[0]!.text).not.toContain("LANE DISPOSITION");
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
@@ -2967,7 +3020,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
     return retracted.content[0]!.text;
   }
 
-  test("retracting the SOLE bridging edge of an otherwise-whole lane leaves it touched — commit refuses without a stitch or justify", async () => {
+  test("retracting the SOLE bridging edge of an otherwise-whole lane leaves it touched — the receipt warns over the fracture it created", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -2984,19 +3037,24 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
 
         expect(await retractTheBridge(handlers, sessionDbId)).toContain("Retracted 1 relation(s)");
 
-        const refused = (await handlers.get("commit")!({
+        // TICKET 04: the TOUCH is what this test is about and it is unchanged
+        // — the retraction registered, so the lane it broke is this run's, and
+        // the fracture is named on the receipt. What moved is the class: the
+        // window settles instead of being held on a demand the run may have no
+        // truthful edge to satisfy.
+        const committed = (await handlers.get("commit")!({
           report: "no friction this window",
+          impressions: retainAllImpressions(db!, job.id, laneTurnIds),
         })) as { content: Array<{ text: string }> };
-        const text = refused.content[0]!.text;
-        expect(text).toContain("Commit refused");
-        expect(text).toContain("severed lane fracture");
-        expect(text).toContain("LANE-DISPOSITION");
-        expect(text).toContain(`S${sessionDbId}/T1`);
-        expect(text).toContain(`S${sessionDbId}/T3`);
+        const text = committed.content[0]!.text;
+        expect(text).toContain("Committed");
+        expect(text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
+        expect(text).toContain(
+          `severed fracture S${sessionDbId}/T1 <-> S${sessionDbId}/T3 (stitch target)`,
+        );
       });
 
-      // A refusal is an ordinary in-run rejection: the job row is untouched.
-      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
     } finally {
       db?.close();
     }
@@ -3125,7 +3183,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
     }
   });
 
-  test("a touch survives the engine instance that made it: attempt A severs and dies, attempt B's fresh engine still refuses", async () => {
+  test("a touch survives the engine instance that made it: attempt A severs and dies, attempt B's fresh engine still names the fracture", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -3141,13 +3199,16 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
 
       // ATTEMPT B: a brand-new engine on the same database and the same job.
       // It writes nothing at all — its in-memory touch sets are empty, and
-      // only the durable ledger can still hold attempt A's obligation.
+      // only the durable ledger can still carry attempt A's touch.
+      // TICKET 04: read at `lane_check` rather than at `commit`, because a
+      // commit would now SUCCEED and the assertion about DURABILITY would
+      // become an assertion about the commit's own tail. The touch is what is
+      // under test; the class of the finding it produces is not.
       await runSettlement(db, job, sessionDbId, laneTurnIds, async (handlers) => {
-        const refused = (await handlers.get("commit")!({
-          report: "no friction this window",
-        })) as { content: Array<{ text: string }> };
-        expect(refused.content[0]!.text).toContain("Commit refused");
-        expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
+        const preview = (await handlers.get("lane_check")!({})) as {
+          content: Array<{ text: string }>;
+        };
+        expect(preview.content[0]!.text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
@@ -3182,11 +3243,13 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
         sessionDbId,
         laneTurnIds,
         async (handlers) => {
-          const refused = (await handlers.get("commit")!({
-            report: "no friction this window",
-          })) as { content: Array<{ text: string }> };
-          expect(refused.content[0]!.text).toContain("Commit refused");
-          expect(refused.content[0]!.text).toContain("LANE-DISPOSITION");
+          // Ticket 04: `lane_check`, for the same reason as the test above —
+          // the JOB SCOPE of the ledger is the property, not the class of the
+          // finding it feeds.
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(preview.content[0]!.text).toContain("LANE DISPOSITION — 1 severed fracture(s)");
         },
         job.claimGeneration + 1,
       );
@@ -3434,7 +3497,18 @@ describe("settlement-gate-taxonomy ticket 03 — lane_check has ONE scope and no
           // commit gate's own list now, not a narrower preview of it.
           expect(actionableText).toContain(`S${sessionDbId}/T2`);
           expect(actionableText).toContain(`S${sessionDbId}/T1`);
-          expect(actionableText).toContain("2 error(s)");
+          // TICKET 04: both rows are still SHOWN, and both are shown on the
+          // side the gate actually treats them from. They are E3s, whose only
+          // repair is a `type` field write no edge pass holds the pen for, so
+          // the rule classes them warnings — and the ERRORS block, which is
+          // exactly what `commit` refuses over, is empty. Before this ticket
+          // they printed as "2 error(s)" above a gate that silently carved
+          // them out.
+          expect(actionableText).toContain(
+            "## Grammar findings this run cannot repair -- 2 finding(s)",
+          );
+          expect(actionableText).toContain("## ERRORS");
+          expect(actionableText.split("## ERRORS")[1]!.split("\n")[1]).toBe("(none)");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -6808,7 +6882,16 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain(
       "an empty or out-of-vocabulary turn type (E3), a tagged edge",
     );
-    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("this gate is the truth");
+    // TICKET 04: "this gate is the truth" is gone with the divergence it
+    // described — one rule builds both lists now, so the description says the
+    // two surfaces AGREE rather than which of them to believe.
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain("this gate is the truth");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("the two surfaces run one rule");
+    // …and the severed lane's own withdrawal, stated on the surface a caller
+    // meets on every retry.
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
+      "A SEVERED LANE NEVER REFUSES THIS COMMIT",
+    );
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("SHAPE NUMBERS");
   });
 });

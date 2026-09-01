@@ -110,6 +110,19 @@ export function laneTouchSegmentTagKey(segmentId: number, tag: string): string {
 
 /** This run's own touch facts, accumulated as `note`/`remember` calls land — see `laneTouchTurnTagKey`/`laneTouchSegmentTagKey` for the two key shapes. */
 export interface RunLaneTouches {
+  /**
+   * THE TURNS THIS RUN WROTE AT (settlement-gate-taxonomy ticket 04), derived
+   * from the same `turn-tag` rows as `turnTagPairs` — every entity id among
+   * them, including the ones recorded with the `''` lane sentinel for a DRAFT
+   * edge side.
+   *
+   * Its one consumer is the judgment seam: a finding this run CREATED is judged
+   * on wherever it sits, and this is the durable record of where the run wrote.
+   * It is deliberately a set of TURNS and not of findings — see
+   * `note-settlement-sdk-query.ts`'s `evaluateWindowLanes` for what that does
+   * and does not cover.
+   */
+  turnIds: ReadonlySet<number>;
   turnTagPairs: ReadonlySet<string>;
   /**
    * The LANE-ADDRESSED touches — `(segment, tag)`, not `(turn, tag)`.
@@ -177,6 +190,7 @@ interface LaneTouchDbRow {
  * than taking one and ignoring it.
  */
 export function loadRunLaneTouches(db: Database, jobId: number): RunLaneTouches {
+  const turnIds = new Set<number>();
   const turnTagPairs = new Set<string>();
   const laneKeys = new Set<string>();
   for (const row of db
@@ -186,12 +200,21 @@ export function loadRunLaneTouches(db: Database, jobId: number): RunLaneTouches 
     )
     .all(jobId)) {
     if (row.touchKind === "turn-tag") {
-      turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+      turnIds.add(row.entityId);
+      // TICKET 04: a DRAFT edge side is recorded with the `''` lane sentinel —
+      // the run wrote at the turn, and named no lane there. It contributes to
+      // `turnIds` (that is the whole point of recording it) and is kept OUT of
+      // the (turn, tag) pair set, which means "this run placed this turn in
+      // this lane" and would be answering a different question with a key no
+      // lane lookup can ever match.
+      if (row.laneTag !== "") {
+        turnTagPairs.add(laneTouchTurnTagKey(row.entityId, row.laneTag));
+      }
     } else {
       laneKeys.add(laneTouchSegmentTagKey(row.entityId, row.laneTag));
     }
   }
-  return { turnTagPairs, laneKeys };
+  return { turnIds, turnTagPairs, laneKeys };
 }
 
 // ---------------------------------------------------------------------------
