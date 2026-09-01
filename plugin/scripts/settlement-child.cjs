@@ -53542,10 +53542,7 @@ function intersectsWindow(ids, window) {
   }
   return false;
 }
-function projectLaneCheckerResultByScope(result, scope, actionableTurnIds) {
-  if (scope === "all" || actionableTurnIds === void 0) {
-    return result;
-  }
+function projectLaneCheckerResultByScope(result, actionableTurnIds) {
   const window = actionableTurnIds;
   const byToken = laneMemberIdsByToken(result.lanes);
   const bySegment = laneMemberIdsBySegment(result.lanes);
@@ -53796,9 +53793,7 @@ var LANE_CHECK_DEFAULT_PAGE_BUDGET = 2e4;
 function renderLaneCheckerReportsPaged(result, anchorAddresses, options) {
   const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
   const requestedPage = options?.page ?? 1;
-  const scope = options?.scope ?? "actionable";
-  const scoped = projectLaneCheckerResultByScope(result, scope, options?.actionableTurnIds);
-  const blocks = buildLaneCheckerBlocks(scoped, anchorAddresses);
+  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;
   const index = requestedPage - 1;
@@ -56764,12 +56759,11 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   ),
   pageBudget: external_exports.number().int().positive().max(MAX_PAGE_BUDGET).optional().describe(
     "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated."
-  ),
-  scope: external_exports.enum(["actionable", "all"]).optional().describe(
-    `"actionable" (default): only findings this round's own window can act on. "all": every finding in your writable set's projection \u2014 still aggregated, still paginated, never a shortcut around the page budget.`
   )
+  // NO `scope` (settlement-gate-taxonomy ticket 03) — see the doc comment
+  // above. One projection, no widening to ask for.
 };
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped (`scope`): \"actionable\" (default) shows only findings THIS round's own window can act on \u2014 an error anchored inside it, or a warning whose covered members touch it; \"all\" widens back to the whole writable set's projection (still aggregated, still paginated, never a way around the page budget). Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the truth: an E3 anywhere \u2014 on a window turn as much as on a turn you may write RELATIONS on only \u2014 prints here as actionable and does NOT block your commit, because setting a turn's `type` is a note field no edge pass holds the pen for. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THIS PREVIEW LISTS MORE THAN THE GATE REFUSES OVER, and the gate is the truth: an E3 anywhere \u2014 on a window turn as much as on a turn you may write RELATIONS on only \u2014 prints here as actionable and does NOT block your commit, because setting a turn's `type` is a note field no edge pass holds the pen for. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: aspirational facts, never enforced. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION = 'Also takes `impressions` (array): ONE entry per impression container this run touched, and nothing else \u2014 a touched container with no judgment is a rejected payload, not a silent skip, and a container you were not shown is not yours to rewrite. Each entry is `{ id, baseRevision, decision }` \u2014 `id` is the container address exactly as printed ("E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` is the revision you were shown, and `decision` is "retain" or "replace"; a replace adds `text` (the WHOLE new impression), a retain carries none. The whole set is fenced together: any container whose revision moved, or any lane whose settled membership moved, rejects the ENTIRE commit and reprints the current coordinates \u2014 read them and decide again. A refusal costs no attempt. A payload over 256 KiB is refused deterministically: regenerate SHORTER (compress prose, drop non-essential claims) but never omit a judgment and never demote a required replace to a retain.';
 var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` still prints it as actionable, and the refusal above still counts it \u2014 this gate is the truth about what blocks. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSIONS_DESCRIPTION;
 var SETTLEMENT_COMMIT_INPUT_SHAPE = {
@@ -56810,7 +56804,11 @@ function wireSettlementImpressions(options) {
 function textResult5(text) {
   return { content: [{ type: "text", text }] };
 }
-function checkWindowLanes(db, scope) {
+var SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE = "SYSTEM / PROJECTION FAILURE \u2014 this dispatch carried no scope provenance, so the projection this window would be judged on cannot be constructed. No report and no verdict is available, and NOTHING was committed. This is not a finding and there is no repair you can attempt: the run cannot proceed on this check until an operator fixes the dispatch that produced it.";
+function settlementScopeProvenanceFailure(scopeProvenance) {
+  return scopeProvenance === void 0 ? SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE : null;
+}
+function evaluateWindowLanes(db, scope) {
   const projection = loadLaneCheckScope(db, {
     kind: "turns",
     turnIds: [...scope.writableTurnIds],
@@ -56823,19 +56821,15 @@ function checkWindowLanes(db, scope) {
     projection.segmentFacts
   );
   return {
-    // THE ANCHOR RULE (settlement-gate-taxonomy ticket 02, spec: "Errors and
-    // warnings may anchor only here"), applied ONCE, at the seam BOTH the
-    // preview and the verdict read — never twice with two predicates. An error
-    // sitting on an EVIDENCE-CLOSURE turn (a cross-session closure endpoint, a
-    // lookback turn 90 prompts back) is a fact about somebody else's window;
-    // it is loaded because the graph needs it to be explicable and it is
-    // reported by nobody. `anchorsInJudgment` is that one predicate; with no
-    // judgment window declared every loaded turn is an anchor, so this filter
-    // is the identity and a caller that models no window is untouched.
-    result: {
-      ...result,
-      errors: result.errors.filter((error49) => anchorsInJudgment(projection.roles, error49.anchorId))
-    },
+    result: projectLaneCheckerResultByScope(
+      {
+        ...result,
+        errors: result.errors.filter(
+          (error49) => anchorsInJudgment(projection.roles, error49.anchorId)
+        )
+      },
+      scope.writableTurnIds
+    ),
     // Tag-mandate ticket 06: the projection's OWN turns, carried out so the
     // report can spell an anchor as an address. Returned from here rather
     // than re-loaded by the caller for the same reason the result is — one
@@ -56881,8 +56875,8 @@ function renderPhaseConnectivityReport(db, findings) {
     ...lines
   ].join("\n");
 }
-function evaluateLaneDispositionGate(db, scope, runTouches) {
-  const { result } = checkWindowLanes(db, scope);
+function evaluateLaneDispositionGate(db, evaluation, runTouches) {
+  const { result } = evaluation;
   const blocking = [];
   const segmentsSeen = /* @__PURE__ */ new Set();
   for (const component of result.components) {
@@ -56999,20 +56993,16 @@ function blocksUnderProvenance(scope, error49) {
   }
   return settlementTurnPermissions(scope.writableProvenance, error49.anchorId).relations;
 }
-function evaluateSettlementCommitGate(db, scope, scopeProvenance) {
-  const { result } = checkWindowLanes(db, scope);
+function renderSettlementCommitGateRefusal(db, evaluation, scope, scopeProvenance) {
+  const { result } = evaluation;
   const blocking = result.errors.filter((error49) => blocksUnderProvenance(scope, error49));
   if (blocking.length === 0) {
     return null;
   }
-  const outOfScope = result.errors.filter(
-    (error49) => !scope.writableTurnIds.has(error49.anchorId)
-  ).length;
-  const beyondAuthority = result.errors.length - blocking.length - outOfScope;
+  const beyondAuthority = result.errors.length - blocking.length;
   return [
     `Commit refused \u2014 ${blocking.length} error(s) the grammar forbids still anchor inside your writable set. NOTHING was committed and this is NOT a failed attempt: repair these and call \`commit\` again in this same run.`,
     ...scopeProvenance ? renderBlockingErrorsByOrigin(db, blocking, scopeProvenance) : blocking.map((error49) => `  ${describeCommitGateError(db, error49)}`),
-    outOfScope > 0 ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set \u2014 another window's work, not listed and not blocking.)` : null,
     beyondAuthority > 0 ? `(${beyondAuthority} further error(s) inside your writable set are turn-TYPE debts (E3) \u2014 their repair is a note field no edge pass holds the pen for, whatever put the turn in your set. They are stage 1's, reached through a later window's lookback, and are not blocking here.)` : null,
     "`lane_check` shows the same list, plus the warnings, without a commit attempt."
   ].filter((line) => line !== null).join("\n");
@@ -57148,9 +57138,19 @@ function createNoteSettlementSdkQuery(options) {
       // ledger from exactly one place or they can disagree about what this run
       // has written.
       evaluateTerminalGates: (db) => {
-        const refusal = evaluateSettlementCommitGate(
+        const projectionFailure = settlementScopeProvenanceFailure(
+          scopeHolder.current.scopeProvenance
+        );
+        if (projectionFailure !== null) {
+          terminalGateVerdict = { ok: false, refusal: projectionFailure };
+          return terminalGateVerdict;
+        }
+        const scope = projectionScope();
+        const evaluation = evaluateWindowLanes(db, scope);
+        const refusal = renderSettlementCommitGateRefusal(
           db,
-          projectionScope(),
+          evaluation,
+          scope,
           scopeHolder.current.scopeProvenance
         );
         if (refusal !== null) {
@@ -57159,7 +57159,7 @@ function createNoteSettlementSdkQuery(options) {
         }
         const disposition = evaluateLaneDispositionGate(
           db,
-          projectionScope(),
+          evaluation,
           writes.getRunLaneTouches()
         );
         if (disposition.blocking.length > 0) {
@@ -57340,12 +57340,16 @@ ${tail.join("\n\n")}` : text);
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args) => {
             laneCheckCalled = true;
-            const { result, turns } = checkWindowLanes(options.db, projectionScope());
+            const projectionFailure = settlementScopeProvenanceFailure(
+              scopeHolder.current.scopeProvenance
+            );
+            if (projectionFailure !== null) {
+              return textResult5(projectionFailure);
+            }
+            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
-              pageBudget: args.pageBudget,
-              scope: args.scope,
-              actionableTurnIds: scopeHolder.current.writableTurnIds
+              pageBudget: args.pageBudget
             });
             const extraSections = [];
             if ((args.page ?? 1) === 1) {
@@ -57361,7 +57365,7 @@ ${tail.join("\n\n")}` : text);
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                projectionScope(),
+                { result, turns },
                 writes.getRunLaneTouches()
               );
               if (disposition.blocking.length > 0) {
@@ -57565,9 +57569,19 @@ function createUnifiedNoteSettlementSdkQuery(options) {
         );
       },
       evaluateTerminalGates: (db) => {
-        const refusal = evaluateSettlementCommitGate(
+        const projectionFailure = settlementScopeProvenanceFailure(
+          scopeHolder.current.scopeProvenance
+        );
+        if (projectionFailure !== null) {
+          terminalGateVerdict = { ok: false, refusal: projectionFailure };
+          return terminalGateVerdict;
+        }
+        const scope = projectionScope();
+        const evaluation = evaluateWindowLanes(db, scope);
+        const refusal = renderSettlementCommitGateRefusal(
           db,
-          projectionScope(),
+          evaluation,
+          scope,
           scopeHolder.current.scopeProvenance
         );
         if (refusal !== null) {
@@ -57576,7 +57590,7 @@ function createUnifiedNoteSettlementSdkQuery(options) {
         }
         const disposition = evaluateLaneDispositionGate(
           db,
-          projectionScope(),
+          evaluation,
           writes.getRunLaneTouches()
         );
         if (disposition.blocking.length > 0) {
@@ -57966,12 +57980,16 @@ ${tail.join("\n\n")}` : text);
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args) => {
             laneCheckCalled = true;
-            const { result, turns } = checkWindowLanes(options.db, projectionScope());
+            const projectionFailure = settlementScopeProvenanceFailure(
+              scopeHolder.current.scopeProvenance
+            );
+            if (projectionFailure !== null) {
+              return textResult5(projectionFailure);
+            }
+            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
-              pageBudget: args.pageBudget,
-              scope: args.scope,
-              actionableTurnIds: scopeHolder.current.writableTurnIds
+              pageBudget: args.pageBudget
             });
             const extraSections = [];
             if ((args.page ?? 1) === 1) {
@@ -57987,7 +58005,7 @@ ${tail.join("\n\n")}` : text);
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                projectionScope(),
+                { result, turns },
                 writes.getRunLaneTouches()
               );
               if (disposition.blocking.length > 0) {

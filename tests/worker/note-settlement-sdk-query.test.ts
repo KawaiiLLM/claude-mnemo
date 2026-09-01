@@ -51,13 +51,17 @@ import {
   installSettlementEdgesScope,
   SETTLEMENT_ALLOWED_TOOLS,
   SETTLEMENT_COMMIT_TOOL_DESCRIPTION,
+  SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
   SETTLEMENT_NOTE_TOOL_DESCRIPTION,
 } from "../../src/worker/note-settlement-sdk-query";
 import {
   settlementTurnWriteInputSchema,
   settlementTurnWriteInputShape,
 } from "../../src/worker/note-settlement-turn-facade";
-import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import {
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
+  settlementScopeProvenanceFor,
+} from "../support/settlement-config";
 import type { ResponseOriginRegistry } from "../../src/worker/note-settlement-response-origin";
 import { retainAllImpressions } from "../support/impression-payload";
 
@@ -737,6 +741,7 @@ describe("the stage-2 note description teaches the allowlist it is judged by (ti
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -809,6 +814,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -861,6 +867,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -929,6 +936,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -984,6 +992,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -1110,6 +1119,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         // T1466 (finding P1-1): `lane_check`'s projection is this set, so an
         // empty one is now an empty report — the fixture states its scope.
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 3),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
@@ -1265,6 +1275,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         sessionId: sessionDbId,
         // T1466 (finding P1-1): the writable set IS the checker projection.
         writableTurnIds: new Set([t1, t2]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1, t2]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -1410,6 +1421,7 @@ describe("phase-connectivity ticket 01 — REPORT-ONLY findings in lane_check an
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(turnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(turnIds), 1, 4),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 4,
@@ -1502,6 +1514,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 4,
@@ -1600,6 +1613,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 4,
@@ -1711,6 +1725,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 4,
@@ -1787,6 +1802,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         // window (windowStart/windowEnd below); t1-t4 (the severed lane)
         // arrive only the way a rendered lookback would put them here.
         writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([...windowTurnIds, ...laneTurnIds]), 5, 6),
         contextBuiltAtEpoch: NOW,
         windowStart: 5,
         windowEnd: 6,
@@ -1897,6 +1913,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 4,
@@ -1998,6 +2015,7 @@ describe("severed-lane ticket 02 — a touched SEVERED lane owes a mandatory dis
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([...windowTurnIds, ...laneTurnIds]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([...windowTurnIds, ...laneTurnIds]), 7, 8),
         contextBuiltAtEpoch: NOW,
         windowStart: 7,
         windowEnd: 8,
@@ -2055,6 +2073,7 @@ describe("phase-connectivity ticket 05 — a justify's read obligation counts me
       stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
+      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd: 4,
@@ -2323,6 +2342,7 @@ describe("phase-connectivity ticket 07 — a receipt for what was delivered, an 
       stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
+      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, laneTurnIds, 1, windowEnd),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd,
@@ -2740,6 +2760,7 @@ describe("phase-connectivity ticket 08 — a justification carries the evidence 
       stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
+      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 4),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd: 4,
@@ -2920,6 +2941,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
       stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(writableTurnIds),
+      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(writableTurnIds), 1, 4),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd: 4,
@@ -3220,6 +3242,7 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -3296,6 +3319,7 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 3),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
@@ -3307,18 +3331,19 @@ describe("settlement-ergonomics ticket 05 — lane_check is paged (page/pageBudg
 });
 
 /**
- * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) — `lane_check` gains its
- * THIRD parameter, `scope`. Same division of labour as ticket 05's own
- * describe block above: the per-family PREDICATE is pinned exhaustively in
+ * `lane_check`'s SCOPE, at the real registered handler. Settlement-ergonomics
+ * ticket 06 made it a model-facing `scope` parameter (`"actionable"` |
+ * `"all"`); SETTLEMENT-GATE-TAXONOMY TICKET 03 REMOVED THE PARAMETER and with
+ * it the widening. Same division of labour as ticket 05's own describe block
+ * above: the per-family PREDICATE is pinned exhaustively in
  * `tests/shared/lane-checker-render.test.ts` against a dedicated fixture
- * (`buildScopeFixture`) — this file's job is narrower, proving only that
- * `scope` and this dispatch's own `request.scopeProvenance.window` (spec D0,
- * the SAME field ticket 07's commit-refusal partition already threads) reach
- * that render from the REAL tool call, through the real zod shape, at the
- * real registration seam.
+ * (`buildScopeFixture`) — this file's job is narrower, proving that the ONE
+ * projection reaches the render from the REAL tool call, through the real zod
+ * shape, at the real registration seam, and that there is no argument left
+ * that could ask for a second one.
  */
-describe("settlement-ergonomics ticket 06 — lane_check scope (actionable default / all), at the real registered handler", () => {
-  test('the registered shape declares scope as an optional enum accepting exactly "actionable"/"all"', async () => {
+describe("settlement-gate-taxonomy ticket 03 — lane_check has ONE scope and no way to widen it", () => {
+  test("the registered shape declares NO scope parameter at all", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -3351,6 +3376,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -3364,11 +3390,17 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           }
         | undefined
       >;
-      expect(shape.scope).toBeDefined();
-      expect(shape.scope?.isOptional?.()).toBe(true);
-      expect(shape.scope?.safeParse?.("actionable").success).toBe(true);
-      expect(shape.scope?.safeParse?.("all").success).toBe(true);
-      expect(shape.scope?.safeParse?.("bogus").success).toBe(false);
+      // The two paging parameters are still there — this is a removal of the
+      // scope widening, not of the tool's surface — so the absence below is a
+      // fact about `scope` and not about a shape that failed to register.
+      expect(shape.page).toBeDefined();
+      expect(shape.pageBudget).toBeDefined();
+      expect(shape.scope).toBeUndefined();
+      expect(Object.keys(shape).sort()).toEqual(["page", "pageBudget"]);
+      // And the description no longer teaches a widening a run cannot get:
+      // a prompt that promises `scope: "all"` buys a refused call and a round
+      // trip, which is the failure mode this batch exists to stop.
+      expect(SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION).not.toContain('"all"');
     } finally {
       db?.close();
     }
@@ -3403,14 +3435,6 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           expect(actionableText).toContain(`S${sessionDbId}/T2`);
           expect(actionableText).toContain(`S${sessionDbId}/T1`);
           expect(actionableText).toContain("2 error(s)");
-
-          // `all` widens the SCOPE, and with nothing outside the writable set
-          // in this fixture there is nothing left for it to add.
-          const all = (await handlers.get("lane_check")!({ scope: "all" })) as {
-            content: Array<{ text: string }>;
-          };
-          expect(all.content[0]!.text).toContain(`S${sessionDbId}/T1`);
-          expect(all.content[0]!.text).toContain("2 error(s)");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -3448,7 +3472,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
     }
   });
 
-  test("the default scope reads the request's writable set, so omitting scopeProvenance changes nothing", async () => {
+  test("the one projection reports a judgment anchor's error and suppresses an evidence-closure turn's, while still LOADING that turn", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -3462,25 +3486,14 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           const defaultCall = (await handlers.get("lane_check")!({})) as {
             content: Array<{ text: string }>;
           };
-          const allCall = (await handlers.get("lane_check")!({ scope: "all" })) as {
-            content: Array<{ text: string }>;
-          };
-          // No `scopeProvenance` on this request (below). It used to be what
-          // the default scope filtered against, so its absence was a
-          // fail-open case with its own convention; finding 04 moved the
-          // default onto `request.writableTurnIds`, which is always present,
-          // so the field no longer participates and the two renders agree for
-          // the ordinary reason: nothing in this fixture anchors outside the
-          // writable set.
-          //
           // SETTLEMENT-GATE-TAXONOMY TICKET 02 — THE EVIDENCE CLOSURE, at this
           // fixture's own seam. `outside` sits at prompt 4, past the window's
           // `windowEnd` of 3, so it is not a JUDGMENT ANCHOR: the window's own
           // prompt numbers plus the 50 preceding ones are, and nothing after
           // them is. Its untagged `consume` is therefore a finding of a window
-          // that has not run yet, and neither scope reports it — `scope: "all"`
-          // no longer widens past the judgment set either (spec: "the
-          // agent-facing `scope: "all"` widening is removed").
+          // that has not run yet, and the ONE projection this tool has does
+          // not report it. Ticket 03 removed the second projection that could
+          // have (`scope: "all"`), so there is no longer a call that shows it.
           //
           // READABLE, THOUGH, which is the half that makes this test say
           // something. The evidence closure is LOADED: report 1's citedness
@@ -3488,8 +3501,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           // asserts suppression of the FINDING rather than a projection that
           // quietly stopped loading the row.
           expect(defaultCall.content[0]!.text).toContain("(none)");
-          expect(allCall.content[0]!.text).toContain("(none)");
-          expect(allCall.content[0]!.text).not.toContain("[E6]");
+          expect(defaultCall.content[0]!.text).not.toContain("[E6]");
           expect(defaultCall.content[0]!.text).toContain(`used[S${sessionDbId}/T4->S${sessionDbId}/T1]`);
           expect(defaultCall.content[0]!.text).toContain("Lane E");
 
@@ -3515,6 +3527,7 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set(laneTurnIds),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 3),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 3,
@@ -3562,6 +3575,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -3615,6 +3629,7 @@ describe("ticket 01 (agent-thinking-config): maxThinkingTokens passthrough", () 
           stage: job.stage,
           sessionId: sessionDbId,
           writableTurnIds: new Set([t1]),
+          scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
           contextBuiltAtEpoch: NOW,
           windowStart: 1,
           windowEnd: 1,
@@ -3702,6 +3717,7 @@ describe("direct write holds through the real registered handlers (ticket 05: st
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -3928,6 +3944,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writableTurnIds, 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -3994,6 +4011,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         sessionId: sessionDbId,
         // T2 — the anchor — deliberately absent.
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -4070,6 +4088,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -4219,7 +4238,20 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
     }
   });
 
-  test("omitting scopeProvenance falls back to the old flat, undifferentiated list", async () => {
+  /**
+   * SETTLEMENT-GATE-TAXONOMY TICKET 03 — MISSING PRODUCTION PROVENANCE FAILS
+   * CLOSED. This test used to assert the opposite: that a request carrying no
+   * `scopeProvenance` fell back to the old flat, undifferentiated refusal list
+   * — one of two fail-opens the spec names ("a missing production provenance
+   * fails closed instead of falling open to whole history").
+   *
+   * The fixture is unchanged and deliberately DIRTY: a DRAFT edge (E6)
+   * anchored at T1, inside the writable set. Without the guard both surfaces
+   * have plenty to say — `lane_check` prints the E6 and `commit` refuses over
+   * it — so the two assertions below fail on exactly the guard's removal and
+   * on nothing else, and neither can pass by having nothing to report.
+   */
+  test("a call with NO scopeProvenance yields the system-failure channel from both surfaces — never a report, never a verdict", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -4249,15 +4281,32 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
+          // THE PREVIEW: a failure, INSTEAD of a report. Not a report with a
+          // warning attached and not an empty report — the spec's own rule is
+          // that the agent "must never be handed a list that pretends to be
+          // repairable", and an empty list is still a list.
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const previewText = preview.content[0]!.text;
+          expect(previewText).toContain("SYSTEM / PROJECTION FAILURE");
+          expect(previewText).not.toContain("## ERRORS");
+          expect(previewText).not.toContain("[E6]");
+          expect(previewText).not.toContain("WARNINGS");
+
+          // THE VERDICT: the same failure, and nothing committed. The E6 in
+          // this fixture would otherwise produce "Commit refused … [E6] …", so
+          // this is the guard's own line and not an absence of defects.
           const refused = (await handlers.get("commit")!({})) as {
             content: Array<{ text: string }>;
           };
           const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain(`S${sessionDbId}/T1`);
-          expect(text).not.toContain("IN THIS WINDOW");
-          expect(text).not.toContain("IN YOUR DECLARED LOOKBACK");
-          expect(text).not.toContain("PULLED IN ONLY BY AN EDGE");
+          expect(text).toContain("SYSTEM / PROJECTION FAILURE");
+          expect(text).not.toContain("Commit refused");
+          expect(text).not.toContain("[E6]");
+          // The failure text carries no repair instruction — the one thing a
+          // WARNING or an ERROR would.
+          expect(text).not.toContain("call `commit` again");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -4280,11 +4329,17 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
         claimGeneration: job.claimGeneration,
         stage: job.stage,
         sessionId: sessionDbId,
+        // NO `scopeProvenance` — the whole point of this test.
         writableTurnIds: new Set([t1]),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
       });
+
+      // AND THE JOB IS NOT DONE. Failing closed means the window stays
+      // unsettled for an operator to look at, never marked complete over a
+      // graph nobody could describe.
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
     } finally {
       db?.close();
     }
@@ -4412,6 +4467,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -4505,6 +4561,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1, t2]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -4618,6 +4675,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1, t2]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -4680,6 +4738,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1, t2]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -4837,6 +4896,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writableTurnIds, 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -4999,6 +5059,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         // window ∪ declared lookback — the frozen set, exactly as the dispatch
         // hands it to the write facade and the gate.
         writableTurnIds: new Set([lookback, windowTurn]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([lookback, windowTurn]), 3, 3),
         contextBuiltAtEpoch: NOW,
         windowStart: 3,
         windowEnd: 3,
@@ -5108,6 +5169,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([lookback, windowTurn]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([lookback, windowTurn]), 9, 9),
         contextBuiltAtEpoch: NOW,
         windowStart: 9,
         windowEnd: 9,
@@ -5168,6 +5230,7 @@ describe("the lease heartbeat", () => {
       stage: job.stage,
       sessionId: sessionDbId,
       writableTurnIds: new Set(laneTurnIds),
+      scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set(laneTurnIds), 1, 3),
       contextBuiltAtEpoch: NOW,
       windowStart: 1,
       windowEnd: 3,
@@ -5428,6 +5491,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1, t2]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1, t2]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -5484,6 +5548,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
         sessionId: sessionDbId,
         // T2 — the draft's anchor — deliberately absent.
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -6032,6 +6097,7 @@ function runStageTwo(
     // is missing the debt's citer entirely. The snapshot is what the run must
     // actually work, and the assertions below only pass if it wins.
     writableTurnIds: new Set(fixture.alpha),
+    scopeProvenance: settlementScopeProvenanceFor(db, fixture.sessionDbId, new Set(fixture.alpha), 1, 5),
     contextBuiltAtEpoch: NOW,
     windowStart: 1,
     windowEnd: 5,
@@ -6871,6 +6937,7 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writableTurnIds, 1, 2),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 2,
@@ -6978,6 +7045,7 @@ describe("the host loop feeds the response-origin coordinator (ticket 01)", () =
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -7033,6 +7101,7 @@ describe("the host loop feeds the response-origin coordinator (ticket 01)", () =
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -7086,6 +7155,7 @@ describe("the host loop feeds the response-origin coordinator (ticket 01)", () =
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,
@@ -7128,6 +7198,7 @@ describe("the host loop feeds the response-origin coordinator (ticket 01)", () =
         stage: job.stage,
         sessionId: sessionDbId,
         writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
         contextBuiltAtEpoch: NOW,
         windowStart: 1,
         windowEnd: 1,

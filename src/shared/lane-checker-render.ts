@@ -734,11 +734,16 @@ export function renderLaneCheckerReports(
  * a set the scope was about to remove, or lets a fold mix an in-scope instance
  * with one scope was about to drop:
  *
- *   0. SCOPE (`projectLaneCheckerResultByScope`, ticket 06) narrows to
- *      `scope: "actionable"` (default) — only findings THIS round can act on,
- *      or leaves everything in place for `scope: "all"`. See that function's
- *      own doc for the per-family predicate table; `"all"` still goes through
- *      mechanisms 1 and 2 below — it widens the SCOPE, never the BUDGET.
+ *   0. SCOPE (`projectLaneCheckerResultByScope`) — NO LONGER RUN HERE.
+ *      Settlement-gate-taxonomy ticket 03 moved the call to the evaluator seam
+ *      (`note-settlement-sdk-query.ts`'s `evaluateWindowLanes`), because the
+ *      `lane_check` tool result has a SECOND half — the LANE DISPOSITION block
+ *      — which is not rendered by this function and was therefore reading the
+ *      UNPROJECTED result while this render read the projected one. One call
+ *      printed "this lane is fine" above "this lane owes a disposition". The
+ *      projection is one question, so it is answered once, upstream of both
+ *      halves; what arrives here is already projected and this function
+ *      renders it verbatim.
  *   1. AGGREGATION folds the two report families that are BOTH unbounded AND
  *      literally repetitive — report 4c (time-order violations) and the stock
  *      cross-segment-warning list — from one line per instance down to ONE
@@ -775,12 +780,17 @@ function aggregateAddressLine(addresses: readonly string[]): string {
 // ------------------------------------------------------- settlement scope --
 
 /**
- * `lane_check`'s THIRD layer (settlement-ergonomics ticket 06, spec D3 item
- * 3). `"actionable"` (the default): only findings THIS round can act on.
- * `"all"`: no scope narrowing — see `projectLaneCheckerResultByScope`'s own
- * doc for what "all" does and does not mean.
+ * `lane_check`'s THIRD layer was once a MODEL-FACING CHOICE — `"actionable"`
+ * (the default) or `"all"` (settlement-ergonomics ticket 06, spec D3 item 3).
+ * Settlement-gate-taxonomy ticket 03 REMOVED the widening: the spec's own
+ * "Consequences" clause ("the agent-facing `scope: \"all\"` widening is
+ * removed"). A run that could ask for a second, wider view of the same lanes
+ * could be shown findings its own commit gate would never judge — and, worse,
+ * one of the two halves of the `lane_check` result (the LANE DISPOSITION
+ * block) never had a scope argument at all, so the widening it could not
+ * follow was a divergence the agent had a tool parameter for. There is one
+ * projection now, and no way to ask for another.
  */
-export type LaneCheckerScope = "actionable" | "all";
 
 /** `laneToken(segment, tag)` -> that reported lane's own member ids, from report 1 (`result.lanes`) — the borrowed anchor `coupling` below needs, since `LaneCouplingReport` carries no turn id of its own. */
 function laneMemberIdsByToken(lanes: readonly LaneStatsReport[]): Map<string, ReadonlySet<number>> {
@@ -821,22 +831,23 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
 }
 
 /**
- * D3 item 3's projection, run BEFORE aggregation/pagination (module doc
- * above `MAX_AGGREGATE_ADDRESS_SAMPLES`'s predecessor comment): a pure
- * function of `LaneCheckerResult` plus the job's own WINDOW turn ids
- * (`SettlementScopeProvenance.window`, spec D0 — never the wider writable set,
- * which also carries the declared lookback and the deadlock-guard closure).
+ * D3 item 3's projection: a pure function of `LaneCheckerResult` plus the set
+ * of turn ids this run may act on. Run ONCE, at the evaluator seam
+ * (`note-settlement-sdk-query.ts`'s `evaluateWindowLanes`), BEFORE either half
+ * of the `lane_check` result is built and before the commit gate reads a
+ * finding — never inside the render, which is only one of its two consumers.
  *
- * `scope: "all"` widens the SCOPE only (spec D3: "not an escape hatch from
- * the budget") — `result` passes through untouched, and the caller's next two
- * steps (aggregate, page) still run over it exactly as they always did.
- * `actionableTurnIds === undefined` is treated the SAME as `"all"`: a caller that
- * never modeled `SettlementScopeProvenance` (the identical optional-field
- * fallback `evaluateSettlementCommitGate` already uses, for the same reason)
- * cannot honestly filter without knowing the window, and the ticket's own
- * rule is "cannot decide honestly, leave it in actionable" — so the whole
- * projection fails OPEN rather than risk hiding a real finding behind a
- * scope nobody supplied.
+ * SETTLEMENT-GATE-TAXONOMY TICKET 03 CLOSED BOTH ESCAPE HATCHES that used to
+ * live in this signature:
+ *
+ *   - `scope: "all"`, which let the agent ask for a view its own gate would
+ *     not judge (see `LaneCheckerScope`'s deleted declaration above);
+ *   - `actionableTurnIds === undefined`, which returned the WHOLE projection.
+ *     That was the spec's "missing production provenance … falling open to
+ *     whole history". The set is required now; a caller that cannot supply one
+ *     has an unconstructible projection and must say so on the system-failure
+ *     channel instead of being handed a report — see
+ *     `settlementScopeProvenanceFailure` at the tool path.
  *
  * ## Per-family predicate (spec D3 item 3's own requirement: "define the
  * predicate PER REPORT FAMILY and list every family with its rule")
@@ -901,12 +912,8 @@ function intersectsWindow(ids: Iterable<number>, window: ReadonlySet<number>): b
  */
 export function projectLaneCheckerResultByScope(
   result: LaneCheckerResult,
-  scope: LaneCheckerScope,
-  actionableTurnIds: ReadonlySet<number> | undefined,
+  actionableTurnIds: ReadonlySet<number>,
 ): LaneCheckerResult {
-  if (scope === "all" || actionableTurnIds === undefined) {
-    return result;
-  }
   const window = actionableTurnIds;
 
   const byToken = laneMemberIdsByToken(result.lanes);
@@ -1280,10 +1287,10 @@ export interface LaneCheckerPageOptions {
   page?: number;
   /** Same name and meaning as `recall`'s own `pageBudget` — a token ceiling per page; overflow rolls to another page, a block is never truncated. */
   pageBudget?: number;
-  /** Ticket 06, spec D3 item 3 — `"actionable"` (default when omitted) or `"all"`. See `projectLaneCheckerResultByScope`'s own doc for the per-family predicate. */
-  scope?: LaneCheckerScope;
-  /** The job's own WINDOW turn ids (`SettlementScopeProvenance.window`, spec D0) — required for `scope: "actionable"` to filter anything; omitted behaves like `scope: "all"` (fail-open, see `projectLaneCheckerResultByScope`). */
-  actionableTurnIds?: ReadonlySet<number>;
+  // NO `scope` AND NO `actionableTurnIds` (settlement-gate-taxonomy ticket 03).
+  // The scope projection is the evaluator's, applied once to the result BOTH
+  // halves of the `lane_check` tool result are built from; a render that
+  // projected again would be a second answer to a question already answered.
 }
 
 export interface LaneCheckerPagedReport {
@@ -1294,11 +1301,12 @@ export interface LaneCheckerPagedReport {
 }
 
 /**
- * The settlement `lane_check` tool's OWN entry point (D3 items 1/2/3/4) — see
+ * The settlement `lane_check` tool's OWN entry point (D3 items 1/2/4) — see
  * the module doc above `MAX_AGGREGATE_ADDRESS_SAMPLES`'s predecessor comment
- * for the three mechanisms and their order (scope, THEN aggregate, THEN
- * page). `renderLaneCheckerReports` is untouched and remains the CLI's/
- * console's uncapped, unaggregated, unscoped render.
+ * for the two mechanisms left here (aggregate, THEN page) and for where the
+ * third one went. `result` arrives ALREADY PROJECTED; this function renders
+ * what it is given. `renderLaneCheckerReports` is untouched and remains the
+ * CLI's/console's uncapped, unaggregated, unscoped render.
  */
 export function renderLaneCheckerReportsPaged(
   result: LaneCheckerResult,
@@ -1307,10 +1315,8 @@ export function renderLaneCheckerReportsPaged(
 ): LaneCheckerPagedReport {
   const pageBudget = options?.pageBudget ?? LANE_CHECK_DEFAULT_PAGE_BUDGET;
   const requestedPage = options?.page ?? 1;
-  const scope = options?.scope ?? "actionable";
 
-  const scoped = projectLaneCheckerResultByScope(result, scope, options?.actionableTurnIds);
-  const blocks = buildLaneCheckerBlocks(scoped, anchorAddresses);
+  const blocks = buildLaneCheckerBlocks(result, anchorAddresses);
   const pages = packLaneCheckerBlocks(blocks, pageBudget);
   const pageCount = pages.length;
   const index = requestedPage - 1;

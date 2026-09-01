@@ -16,7 +16,10 @@ import {
   createNoteSettlementSdkQuery,
   evaluateSettlementCommitGate,
 } from "../../src/worker/note-settlement-sdk-query";
-import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import {
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
+  settlementScopeProvenanceFor,
+} from "../support/settlement-config";
 
 /**
  * SETTLEMENT-GATE-TAXONOMY TICKET 02 — THE EVIDENCE CLOSURE.
@@ -224,6 +227,13 @@ describe("settlement-gate-taxonomy ticket 02 — an old error on a lookback turn
         stage: fixture.job.stage,
         sessionId: fixture.sessionDbId,
         writableTurnIds: new Set([fixture.lookbackTurn, ...fixture.windowTurnIds]),
+        scopeProvenance: settlementScopeProvenanceFor(
+          db,
+          fixture.sessionDbId,
+          [fixture.lookbackTurn, ...fixture.windowTurnIds],
+          1000,
+          1001,
+        ),
         contextBuiltAtEpoch: NOW,
         windowStart: 1000,
         windowEnd: 1001,

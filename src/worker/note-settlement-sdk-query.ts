@@ -62,11 +62,16 @@ import {
 import { getTurnById } from "../db/turns";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
 import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
-import { checkLanes, type LaneCheckerError } from "../shared/lane-checker";
+import {
+  checkLanes,
+  type LaneCheckerError,
+  type LaneCheckerResult,
+  type LaneCheckerTurnInput,
+} from "../shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
+  projectLaneCheckerResultByScope,
   renderLaneCheckerReportsPaged,
-  type LaneCheckerScope,
 } from "../shared/lane-checker-render";
 import { evaluatePhaseConnectivity, type PhaseConnectivityFinding } from "../shared/phase-connectivity";
 import { parseTurnAddress } from "../mcp/note";
@@ -423,17 +428,20 @@ export const SETTLEMENT_REMEMBER_TOOL_DESCRIPTION =
  * tool-result cap — so the agent got an error instead of a report and that
  * run had no checker at all despite calling this tool.
  *
- * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) adds the THIRD parameter,
- * `scope`: `"actionable"` (default) narrows the render to findings anchored,
- * or covering members, inside this job's own WINDOW (`request.scopeProvenance
- * .window`, spec D0) — never the wider writable set, which also carries the
- * declared lookback and the deadlock-guard closure. `"all"` widens back to
- * the projection's own writable-set scope; it is NOT a budget escape hatch —
- * the render is still aggregated and still paginated exactly as above. See
- * `projectLaneCheckerResultByScope`'s own doc for the per-family predicate.
- * Omitting `scopeProvenance` on the request (a caller predating ticket 07)
- * makes `"actionable"` behave like `"all"` — the same fail-open convention
- * `evaluateSettlementCommitGate` already uses for the identical field.
+ * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) added a THIRD parameter,
+ * `scope` (`"actionable"` | `"all"`); SETTLEMENT-GATE-TAXONOMY TICKET 03
+ * DELETED IT. There is one projection — this dispatch's own writable set,
+ * applied at the evaluator seam (`evaluateWindowLanes`) to the value BOTH
+ * halves of this tool's result are built from — and no parameter that could
+ * ask for a second one. A widening the LANE DISPOSITION block below the report
+ * could not follow was a divergence with a tool argument attached to it; a
+ * widening the commit gate does not honour is a preview of a verdict nobody
+ * will reach. See `projectLaneCheckerResultByScope`'s own doc for the
+ * per-family predicate.
+ *
+ * A dispatch that carries NO `scopeProvenance` gets no report at all — the
+ * system-failure channel, `settlementScopeProvenanceFailure`. It used to make
+ * `"actionable"` behave like `"all"`, i.e. fall open to the whole projection.
  */
 const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: z
@@ -462,12 +470,8 @@ const SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
     .describe(
       "Token ceiling per page, same name and meaning as `recall`'s own `pageBudget`. Overflow rolls to another page; a block (one lane's stats, one error instance, one folded summary line) is never truncated.",
     ),
-  scope: z
-    .enum(["actionable", "all"])
-    .optional()
-    .describe(
-      "\"actionable\" (default): only findings this round's own window can act on. \"all\": every finding in your writable set's projection — still aggregated, still paginated, never a shortcut around the page budget.",
-    ),
+  // NO `scope` (settlement-gate-taxonomy ticket 03) — see the doc comment
+  // above. One projection, no widening to ask for.
 };
 
 export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
@@ -478,11 +482,9 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "and every page beyond the first ends stating how many remain and the " +
   "exact call for the next one; every page re-runs the check, so it shows " +
   "the state at the moment you ask rather than a frozen first-page snapshot. " +
-  "Scoped (`scope`): \"actionable\" (default) shows only findings THIS " +
-  "round's own window can act on — an error anchored inside it, or a " +
-  "warning whose covered members touch it; \"all\" widens back to the " +
-  "whole writable set's projection (still aggregated, still paginated, " +
-  "never a way around the page budget). Two " +
+  "Scoped to your own writable set, always and with no way to widen it: a " +
+  "finding you could not act on is a finding `commit` will not judge you on " +
+  "either. Two " +
   "WARNING families whose instances all repeat the same shape — time-order " +
   "violations and cross-task tagged edges — fold into one count-plus-" +
   "sample-addresses line each; every other report keeps one entry per block. " +
@@ -781,6 +783,83 @@ export interface SettlementProjectionScope {
 }
 
 /**
+ * THE SYSTEM / PROJECTION FAILURE CHANNEL — first case, "missing production
+ * provenance" (spec "The third channel: SYSTEM / PROJECTION FAILURE").
+ *
+ * A dispatch that carried no `SettlementScopeProvenance` cannot say which of
+ * its writable ids are its own window, so the projection this run would be
+ * judged on is not constructible. The OLD behaviour was to fall open — the
+ * render treated a missing provenance as `scope: "all"` and the gate printed a
+ * flat undifferentiated list — which handed the agent a report it had no way
+ * to know was computed under a different rule than the one that would refuse
+ * its commit.
+ *
+ * It fails CLOSED now: the surface says it cannot proceed and hands over NO
+ * list at all. That is the spec's own distinction — a system failure "may
+ * never be demoted to warnings, and the agent must never be handed a list that
+ * pretends to be repairable". There is deliberately no repair sentence and no
+ * finding: nothing the run can write changes this, and telling it to try would
+ * buy exactly the round trip the whole batch exists to stop.
+ *
+ * TICKET 05 owns the rest of this channel — a TYPED result carrying the other
+ * three cases (unconstructible projection, self-contradicting evaluator,
+ * over-protocol render) and an operator-visible worker-log path. This is the
+ * behaviour, not the type; ticket 05 is blocked on ticket 03 for exactly this
+ * seam.
+ */
+const SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE =
+  "SYSTEM / PROJECTION FAILURE — this dispatch carried no scope provenance, so the " +
+  "projection this window would be judged on cannot be constructed. No report and no " +
+  "verdict is available, and NOTHING was committed. This is not a finding and there is " +
+  "no repair you can attempt: the run cannot proceed on this check until an operator " +
+  "fixes the dispatch that produced it.";
+
+/**
+ * THE ONE PREDICATE for "is this dispatch's scope descriptor complete enough
+ * to judge anybody" — asked at the tool path, by every surface that would
+ * otherwise produce a report or a verdict, and asked nowhere else. Returns the
+ * failure text, or `null` when the projection is constructible.
+ *
+ * It is asked HERE rather than inside `evaluateWindowLanes` on purpose: the
+ * evaluator's own callers include direct-call test seams that legitimately
+ * model no provenance (`evaluateSettlementCommitGate(db, { writableTurnIds })`),
+ * and the ticket's rule is not "the fallback disappears" but "the fallback must
+ * not reach the production tool path".
+ */
+function settlementScopeProvenanceFailure(
+  scopeProvenance: SettlementScopeProvenance | undefined,
+): string | null {
+  return scopeProvenance === undefined ? SETTLEMENT_PROJECTION_FAILURE_NO_PROVENANCE : null;
+}
+
+/**
+ * ONE EVALUATION, READ BY EVERY SURFACE THAT JUDGES THIS RUN
+ * (settlement-gate-taxonomy ticket 03).
+ *
+ * A `lane_check` call and a `commit` call each produce exactly one of these,
+ * and every finding either of them prints is a RENDERING of this value:
+ *
+ *   - `lane_check` page 1 renders `result` through
+ *     `renderLaneCheckerReportsPaged` AND appends the LANE DISPOSITION block
+ *     computed from the SAME `result`. Those are the two halves ticket 01
+ *     found disagreeing inside one call — the render was scope-projected, the
+ *     disposition block re-ran the whole gate unprojected, and one tool result
+ *     said "this lane is fine" above "this lane owes a disposition".
+ *   - `commit` recomputes — a FRESH evaluation, inside the terminal
+ *     transaction — and renders its two refusals from that one value. Not a
+ *     shared snapshot: the spec rejects one explicitly, because the run's own
+ *     writes between the preview and the commit make a snapshot stale and
+ *     revisioning the whole graph to fix that is a bigger machine than the
+ *     problem. One DEFINITION, two evaluations.
+ */
+interface SettlementLaneEvaluation {
+  /** Judgment-anchored AND scope-projected. Nothing downstream filters it again. */
+  result: LaneCheckerResult;
+  /** The projection's own turns, so an anchor can be spelled as an `S<n>/T<m>` address. */
+  turns: LaneCheckerTurnInput[];
+}
+
+/**
  * ONE projection, one semantics: the `lane_check` tool and the commit gate
  * run the IDENTICAL `loadLaneCheckScope` -> `checkLanes` pass over the job's
  * own WRITABLE SET (spec's implementation decision: "the same
@@ -793,12 +872,33 @@ export interface SettlementProjectionScope {
  * facade's range check, the commit gate's anchor filter and the prompt's
  * printed declaration — so "what you may write", "what you are shown" and
  * "what you are judged on" are one set rather than three that happen to
- * overlap. The loader still WIDENS from that seed (each touched lane's full
- * edge set, the component closure, the seed-scoped out-of-vocabulary pass),
- * so an error anchored outside the set can still be REPORTED; the gate's own
- * anchor filter is what decides that it does not block.
+ * overlap.
+ *
+ * THE TWO FILTERS, both applied HERE and nowhere else (ticket 03):
+ *
+ *   1. THE ANCHOR RULE (ticket 02, spec: "Errors and warnings may anchor only
+ *      here"). An error sitting on an EVIDENCE-CLOSURE turn (a cross-session
+ *      closure endpoint, a lookback turn 90 prompts back) is a fact about
+ *      somebody else's window; it is loaded because the graph needs it to be
+ *      explicable and it is reported by nobody. `anchorsInJudgment` is that one
+ *      predicate; with no judgment window declared every loaded turn is an
+ *      anchor, so this filter is the identity and a caller that models no
+ *      window is untouched.
+ *   2. THE ACTIONABLE PROJECTION (`projectLaneCheckerResultByScope`), against
+ *      this dispatch's WRITABLE SET — "actionable IS the writable set", user
+ *      ruling [S15069/T1778]. It used to run inside
+ *      `renderLaneCheckerReportsPaged`, which is only ONE of the consumers of
+ *      this result; the LANE DISPOSITION block and the commit gate read the
+ *      unprojected value and could therefore demand a repair for a lane the
+ *      same tool result had just declined to describe.
+ *
+ * Everything downstream — the paged render, the disposition gate, the commit
+ * refusal — consumes the value this returns and filters nothing further.
  */
-function checkWindowLanes(db: Database, scope: SettlementProjectionScope) {
+function evaluateWindowLanes(
+  db: Database,
+  scope: SettlementProjectionScope,
+): SettlementLaneEvaluation {
   const projection = loadLaneCheckScope(db, {
     kind: "turns",
     turnIds: [...scope.writableTurnIds],
@@ -814,19 +914,15 @@ function checkWindowLanes(db: Database, scope: SettlementProjectionScope) {
     projection.segmentFacts,
   );
   return {
-    // THE ANCHOR RULE (settlement-gate-taxonomy ticket 02, spec: "Errors and
-    // warnings may anchor only here"), applied ONCE, at the seam BOTH the
-    // preview and the verdict read — never twice with two predicates. An error
-    // sitting on an EVIDENCE-CLOSURE turn (a cross-session closure endpoint, a
-    // lookback turn 90 prompts back) is a fact about somebody else's window;
-    // it is loaded because the graph needs it to be explicable and it is
-    // reported by nobody. `anchorsInJudgment` is that one predicate; with no
-    // judgment window declared every loaded turn is an anchor, so this filter
-    // is the identity and a caller that models no window is untouched.
-    result: {
-      ...result,
-      errors: result.errors.filter((error) => anchorsInJudgment(projection.roles, error.anchorId)),
-    },
+    result: projectLaneCheckerResultByScope(
+      {
+        ...result,
+        errors: result.errors.filter((error) =>
+          anchorsInJudgment(projection.roles, error.anchorId),
+        ),
+      },
+      scope.writableTurnIds,
+    ),
     // Tag-mandate ticket 06: the projection's OWN turns, carried out so the
     // report can spell an anchor as an address. Returned from here rather
     // than re-loaded by the caller for the same reason the result is — one
@@ -965,13 +1061,21 @@ function renderPhaseConnectivityReport(
  * A `DEFAULT_SEGMENT` (homeless) lane carries no real segment row to bind a
  * justify to and is skipped — the same "nothing to justify against" posture
  * the rest of this codebase takes for a homeless lane.
+ *
+ * TICKET 03: takes the caller's OWN `SettlementLaneEvaluation` rather than
+ * running a second `evaluateWindowLanes` of its own. It used to recompute, and
+ * that recomputation was unprojected — so inside ONE `lane_check` call the
+ * connectivity section (projected) could omit the very lane this block then
+ * demanded a disposition for. Both halves read one value now, and the fix is
+ * structural: there is no scope argument here to get wrong, because there is
+ * no projection step here at all.
  */
 function evaluateLaneDispositionGate(
   db: Database,
-  scope: SettlementProjectionScope,
+  evaluation: SettlementLaneEvaluation,
   runTouches: RunLaneTouches,
 ): { blocking: string[]; warnings: string[] } {
-  const { result } = checkWindowLanes(db, scope);
+  const { result } = evaluation;
   const blocking: string[] = [];
   const segmentsSeen = new Set<number>();
   for (const component of result.components) {
@@ -1249,13 +1353,17 @@ function blocksUnderProvenance(
 
 /**
  * The gate itself: run the checker over the job's immutable writable set and
- * REFUSE while any error anchors INSIDE it.
+ * REFUSE while any error anchors INSIDE it. TICKET 03 split it in two — this
+ * name is now the standalone entry point (evaluate, then render); production
+ * calls `renderSettlementCommitGateRefusal` directly with an evaluation it
+ * already holds, so `commit`'s refusal is a rendering of the same value its
+ * disposition gate reads and not a second computation.
  *
  * Returns the refusal payload, or `null` when the window is clean enough to
  * commit. Four properties this function exists to hold:
  *
  *   - **The projection is the writable set** (peer round T1466, finding
- *     P1-1). Seed and filter are now the SAME value — `checkWindowLanes`
+ *     P1-1). Seed and filter are now the SAME value — `evaluateWindowLanes`
  *     above — so "an error the gate could refuse over" and "an error the
  *     projection loaded" cannot come apart. When they did, a lookback turn's
  *     E3 (and, before its retirement, E1) and an external-endpoint E2 were
@@ -1291,29 +1399,52 @@ export function evaluateSettlementCommitGate(
   scope: SettlementProjectionScope,
   // Settlement-ergonomics ticket 07 (spec D0/D5): optional so a caller that
   // never modeled the distinction (a pre-ticket-07 stub, or a fixture testing
-  // something else entirely) gets the OLD flat, undifferentiated list —
-  // `createNoteSettlementSdkQuery`'s own commit handler, the one production
-  // caller, always supplies it (`request.scopeProvenance`).
+  // something else entirely) gets the OLD flat, undifferentiated list. THE
+  // PRODUCTION TOOL PATH NO LONGER REACHES THIS FALLBACK (ticket 03): a
+  // `commit`/`lane_check` call whose dispatch carried no `scopeProvenance`
+  // fails closed on the system-failure channel before this function is called
+  // at all — see `settlementScopeProvenanceFailure`. What is left here is the
+  // direct-call TEST seam, which is exactly what the ticket permits ("a test
+  // seam that needs a legacy fallback must not reach the production tool
+  // path").
   scopeProvenance?: SettlementScopeProvenance,
 ): string | null {
-  const { result } = checkWindowLanes(db, scope);
+  return renderSettlementCommitGateRefusal(
+    db,
+    evaluateWindowLanes(db, scope),
+    scope,
+    scopeProvenance,
+  );
+}
+
+/**
+ * The gate's RENDERING half (ticket 03): a pure function of an evaluation the
+ * caller already has. `commit` calls this with the SAME
+ * `SettlementLaneEvaluation` its disposition gate reads, so its two refusals
+ * describe one look at the graph rather than two.
+ */
+function renderSettlementCommitGateRefusal(
+  db: Database,
+  evaluation: SettlementLaneEvaluation,
+  scope: SettlementProjectionScope,
+  scopeProvenance?: SettlementScopeProvenance,
+): string | null {
+  const { result } = evaluation;
   const blocking = result.errors.filter((error) => blocksUnderProvenance(scope, error));
   if (blocking.length === 0) {
     return null;
   }
-  // The two non-blocking remainders are counted SEPARATELY and said
-  // separately: they are different facts, and the pre-staging line ("anchor
-  // OUTSIDE your writable set — another window's work") is a lie about an
-  // error that anchors squarely INSIDE it and is merely beyond this job's
-  // authority to repair. An agent told the wrong one goes looking for a
-  // scoping bug that does not exist. Ticket 17 widened the second remainder
-  // from "relations-only turns" to every in-set E3, so its wording no longer
-  // names a provenance the reader would then check its own turn against and
-  // find false.
-  const outOfScope = result.errors.filter(
-    (error) => !scope.writableTurnIds.has(error.anchorId),
-  ).length;
-  const beyondAuthority = result.errors.length - blocking.length - outOfScope;
+  // ONE non-blocking remainder is left to count. The other — "N further
+  // error(s) anchor OUTSIDE your writable set" — is GONE with ticket 03's
+  // projection: `evaluateWindowLanes` now projects the result to the writable
+  // set before anybody reads it, so `result.errors` has no out-of-set member
+  // left to count and the line could only ever have printed "0". It was also
+  // the last place `commit` reported a finding `lane_check` had never shown:
+  // the preview's own default projection has dropped those rows since
+  // settlement-ergonomics ticket 06, so the count named errors the agent could
+  // not see anywhere. Ticket 17's remainder below survives because it names a
+  // class (E3) that IS inside the writable set and IS shown by the preview.
+  const beyondAuthority = result.errors.length - blocking.length;
   return [
     `Commit refused — ${blocking.length} error(s) the grammar forbids still anchor inside your ` +
       "writable set. NOTHING was committed and this is NOT a failed attempt: repair these " +
@@ -1321,9 +1452,6 @@ export function evaluateSettlementCommitGate(
     ...(scopeProvenance
       ? renderBlockingErrorsByOrigin(db, blocking, scopeProvenance)
       : blocking.map((error) => `  ${describeCommitGateError(db, error)}`)),
-    outOfScope > 0
-      ? `(${outOfScope} further error(s) anchor OUTSIDE your writable set — another window's work, not listed and not blocking.)`
-      : null,
     beyondAuthority > 0
       ? `(${beyondAuthority} further error(s) inside your writable set are turn-TYPE debts (E3) — ` +
         "their repair is a note field no edge pass holds the pen for, whatever put the turn in your " +
@@ -1611,9 +1739,26 @@ export function createNoteSettlementSdkQuery(
       // ledger from exactly one place or they can disagree about what this run
       // has written.
       evaluateTerminalGates: (db) => {
-        const refusal = evaluateSettlementCommitGate(
+        // FAIL CLOSED before anything is judged (ticket 03). A commit is the
+        // one place where falling open costs the most: the job would be marked
+        // done over a graph nobody could describe.
+        const projectionFailure = settlementScopeProvenanceFailure(
+          scopeHolder.current.scopeProvenance,
+        );
+        if (projectionFailure !== null) {
+          terminalGateVerdict = { ok: false, refusal: projectionFailure };
+          return terminalGateVerdict;
+        }
+        // ONE EVALUATION, TWO RENDERINGS (ticket 03). The grammar refusal and
+        // the disposition refusal below are two READINGS of this single value,
+        // taken at one instant inside the terminal transaction — never two
+        // independent looks at a graph a write could move between them.
+        const scope = projectionScope();
+        const evaluation = evaluateWindowLanes(db, scope);
+        const refusal = renderSettlementCommitGateRefusal(
           db,
-          projectionScope(),
+          evaluation,
+          scope,
           scopeHolder.current.scopeProvenance,
         );
         if (refusal !== null) {
@@ -1626,7 +1771,7 @@ export function createNoteSettlementSdkQuery(
         // the moment this machinery ships.
         const disposition = evaluateLaneDispositionGate(
           db,
-          projectionScope(),
+          evaluation,
           writes.getRunLaneTouches(),
         );
         if (disposition.blocking.length > 0) {
@@ -2006,42 +2151,48 @@ export function createNoteSettlementSdkQuery(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
-          async (args: { page?: number; pageBudget?: number; scope?: LaneCheckerScope }) => {
+          async (args: { page?: number; pageBudget?: number }) => {
             laneCheckCalled = true;
-            // The SAME pass the commit gate runs (ticket 05) — see
-            // `checkWindowLanes`: the preview and the verdict are one
-            // projection, so the list this prints cannot differ from the
-            // list `commit` judges. Ticket 06 additionally hands the render
-            // that projection's turns, so an anchor prints as
+            // FAIL CLOSED (ticket 03): no provenance, no projection, no
+            // report. Returned INSTEAD of a report, never alongside one.
+            const projectionFailure = settlementScopeProvenanceFailure(
+              scopeHolder.current.scopeProvenance,
+            );
+            if (projectionFailure !== null) {
+              return textResult(projectionFailure);
+            }
+            // ONE EVALUATION FOR BOTH HALVES OF THIS RESULT (ticket 03). The
+            // paged report below and the LANE DISPOSITION block under it are
+            // two renderings of THIS value. They used to be two computations
+            // with two different scope rules — the render projected to the
+            // writable set, the disposition block re-ran the gate unprojected
+            // — so one call could print a clean connectivity section above a
+            // demand to repair a lane that section had just declined to
+            // describe. That is the disagreement job 166's own abandonment
+            // note named.
+            //
+            // The SAME pass the commit gate runs (ticket 05): the preview and
+            // the verdict are one projection, so the list this prints cannot
+            // differ from the list `commit` judges. Ticket 06 additionally
+            // hands the render that projection's turns, so an anchor prints as
             // `S<session>/T<prompt>` — the address the repair call itself
-            // takes, matching the commit refusal's own vocabulary. Finding
-            // P1-1: the scope is this dispatch's WRITABLE SET, the same seed
-            // the gate builds from — a preview over a narrower projection
-            // would hide exactly the rows the gate is about to refuse over.
-            const { result, turns } = checkWindowLanes(options.db, projectionScope());
+            // takes, matching the commit refusal's own vocabulary.
+            //
+            // "ACTIONABLE" IS THE WRITABLE SET (peer round three finding 04,
+            // user ruling [S15069/T1778]) — the same set the commit gate
+            // filters by, applied inside `evaluateWindowLanes`. Ticket 06 had
+            // scoped it to `scopeProvenance.window`, which hid an error
+            // anchored on a declared-lookback or closure turn by default and
+            // then refused the commit over it.
+            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
             // own doc for why a SEPARATE entry point exists rather than a
             // change to `renderLaneCheckerReports` itself (the CLI/console
             // still call that one, unbounded, on purpose).
-            //
-            // `"actionable"` IS THE WRITABLE SET (peer round three finding 04,
-            // user ruling [S15069/T1778]) — the same set the commit gate
-            // filters by, so the default view and the verdict are one list.
-            // Ticket 06 had scoped it to `scopeProvenance.window`, which
-            // contradicted the paragraph directly above: an error anchored on
-            // a declared-lookback or closure turn was invisible by default and
-            // fatal at commit, and the prompt told the agent those were the
-            // same list. It also contradicted "actionable"'s own definition —
-            // this round CAN write every turn in the writable set, so a
-            // finding there is precisely something it can act on. The wider
-            // default costs some output; hiding a blocking row costs a
-            // refused commit the agent was told could not happen.
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
-              scope: args.scope,
-              actionableTurnIds: scopeHolder.current.writableTurnIds,
             });
             // Ticket 01 (phase connectivity, report-only) + ticket 02 (lane
             // disposition, MANDATORY at `commit` — shown here too so the
@@ -2065,7 +2216,7 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                projectionScope(),
+                { result, turns },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {
@@ -2535,9 +2686,26 @@ export function createUnifiedNoteSettlementSdkQuery(
         );
       },
       evaluateTerminalGates: (db) => {
-        const refusal = evaluateSettlementCommitGate(
+        // FAIL CLOSED before anything is judged (ticket 03). A commit is the
+        // one place where falling open costs the most: the job would be marked
+        // done over a graph nobody could describe.
+        const projectionFailure = settlementScopeProvenanceFailure(
+          scopeHolder.current.scopeProvenance,
+        );
+        if (projectionFailure !== null) {
+          terminalGateVerdict = { ok: false, refusal: projectionFailure };
+          return terminalGateVerdict;
+        }
+        // ONE EVALUATION, TWO RENDERINGS (ticket 03). The grammar refusal and
+        // the disposition refusal below are two READINGS of this single value,
+        // taken at one instant inside the terminal transaction — never two
+        // independent looks at a graph a write could move between them.
+        const scope = projectionScope();
+        const evaluation = evaluateWindowLanes(db, scope);
+        const refusal = renderSettlementCommitGateRefusal(
           db,
-          projectionScope(),
+          evaluation,
+          scope,
           scopeHolder.current.scopeProvenance,
         );
         if (refusal !== null) {
@@ -2546,7 +2714,7 @@ export function createUnifiedNoteSettlementSdkQuery(
         }
         const disposition = evaluateLaneDispositionGate(
           db,
-          projectionScope(),
+          evaluation,
           writes.getRunLaneTouches(),
         );
         if (disposition.blocking.length > 0) {
@@ -3039,14 +3207,21 @@ export function createUnifiedNoteSettlementSdkQuery(
           "lane_check",
           SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION,
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
-          async (args: { page?: number; pageBudget?: number; scope?: LaneCheckerScope }) => {
+          async (args: { page?: number; pageBudget?: number }) => {
             laneCheckCalled = true;
-            const { result, turns } = checkWindowLanes(options.db, projectionScope());
+            // Ticket 03, identical to the legacy builder's own handler above —
+            // see its comments for why the projection is one value and why a
+            // missing provenance yields no report at all.
+            const projectionFailure = settlementScopeProvenanceFailure(
+              scopeHolder.current.scopeProvenance,
+            );
+            if (projectionFailure !== null) {
+              return textResult(projectionFailure);
+            }
+            const { result, turns } = evaluateWindowLanes(options.db, projectionScope());
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
-              scope: args.scope,
-              actionableTurnIds: scopeHolder.current.writableTurnIds,
             });
             const extraSections: string[] = [];
             if ((args.page ?? 1) === 1) {
@@ -3062,7 +3237,7 @@ export function createUnifiedNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                projectionScope(),
+                { result, turns },
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {

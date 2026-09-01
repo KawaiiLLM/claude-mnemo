@@ -4,6 +4,7 @@ import type { LaneCheckerResult } from "../../src/shared/lane-checker";
 import {
   buildLaneAnchorAddresses,
   LANE_CHECK_DEFAULT_PAGE_BUDGET,
+  projectLaneCheckerResultByScope,
   renderLaneCheckerReports,
   renderLaneCheckerReportsPaged,
   renderLaneDigraph,
@@ -1127,178 +1128,167 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
 });
 
 /**
- * SETTLEMENT-ERGONOMICS TICKET 06 (spec D3 item 3) -- `lane_check`'s THIRD
- * layer, `scope: "actionable"` (default) vs `"all"`. `buildScopeFixture`
- * (`tests/support/`) gives each DECIDABLE report family exactly one in-window
- * and one out-of-window entry, so "the two scopes differ" is provable PER
- * FAMILY rather than merely "some filtering happened somewhere" -- the
- * ticket's own inertness warning: a fixture whose findings were all in-window
- * would let `actionable`/`all` render identically and hide a dead filter.
+ * THE ACTIONABLE PROJECTION, at its new home (settlement-gate-taxonomy ticket
+ * 03). It was `renderLaneCheckerReportsPaged`'s own first mechanism and a
+ * model-facing `scope` parameter (`"actionable"` | `"all"`,
+ * settlement-ergonomics ticket 06); it is now a standalone pure function the
+ * EVALUATOR calls once, because the render is only ONE of the two consumers of
+ * a `lane_check` result and the other one — the LANE DISPOSITION block — was
+ * reading the unprojected value.
+ *
+ * The per-family predicate table is unchanged and is still pinned here.
+ * `buildScopeFixture` (`tests/support/`) gives each DECIDABLE report family
+ * exactly one in-window and one out-of-window entry, so "the projection
+ * filters" is provable PER FAMILY rather than merely "something was dropped
+ * somewhere" -- a fixture whose findings were all in-window would let a dead
+ * filter pass unnoticed. The UNPROJECTED render is the control arm: it proves
+ * each out-of-window entry really is in the fixture and really does render.
+ *
  * A large `pageBudget` keeps every assertion below on a single page, so
- * "family X is absent" can only mean "scope dropped it", never "it paged
- * away".
+ * "family X is absent" can only mean "the projection dropped it", never "it
+ * paged away".
  */
-describe("lane_check scope -- actionable (default) vs all (settlement-ergonomics ticket 06, spec D3 item 3)", () => {
+describe("the actionable projection, per report family (settlement-gate-taxonomy ticket 03)", () => {
+  /** Project, then render -- the exact order and the exact pair of calls the evaluator seam makes. */
+  function renderProjected(
+    result: LaneCheckerResult,
+    actionableTurnIds: ReadonlySet<number>,
+  ): string {
+    return renderLaneCheckerReportsPaged(
+      projectLaneCheckerResultByScope(result, actionableTurnIds),
+      undefined,
+      { pageBudget: 1_000_000 },
+    ).text;
+  }
+
   // Peer round three finding 05: the projection filtered ENTRIES and kept the
   // unfiltered COUNT, so a family with two instances and one in scope printed
-  // "2 edge(s) ... showing first 1" — which reads as an actionable item the
+  // "2 edge(s) ... showing first 1" -- which reads as an actionable item the
   // page budget withheld, not as an edge outside the scope entirely.
   test("a rescoped family's count follows its entries, so no 'showing first' suffix is invented", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
-    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
+    const actionable = renderProjected(result, actionableTurnIds);
 
     // FAMILY headers only. A cluster's own "50 turns ... (showing first 2)"
-    // is a different, honest cap — that cluster really does have 50 turns and
+    // is a different, honest cap -- that cluster really does have 50 turns and
     // the sample inside it is bounded on purpose. What must not survive is a
     // header counting INSTANCES of a family above the number of instances the
     // scope actually kept, on a page big enough to show them all.
-    const familyHeaders = actionable.text
+    const familyHeaders = actionable
       .split("\n")
       .filter((line) => /^\d+ (unattributed cluster|edge)\(s\)/.test(line));
     expect(familyHeaders.filter((line) => /\(showing first \d+\)/.test(line))).toEqual([]);
-    // And the guard is not vacuous — the fixture does render such headers.
+    // And the guard is not vacuous -- the fixture does render such headers.
     expect(familyHeaders.length).toBeGreaterThan(0);
   });
 
-  test("per-family table: actionable keeps only the in-window entry, all keeps both -- one assertion pair per DECIDABLE family", () => {
+  test("per-family table: the projection keeps only the in-window entry; the unprojected result keeps both -- one assertion pair per DECIDABLE family", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
-    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
+    const actionable = renderProjected(result, actionableTurnIds);
+    // The CONTROL: the same fixture rendered with no projection at all, which
+    // is what the CLI/console still do and what every out-of-window assertion
+    // below is measured against.
+    const unprojected = renderLaneCheckerReportsPaged(result, undefined, {
       pageBudget: 1_000_000,
-    });
-    const all = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "all",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
+    }).text;
 
     // ANCHORED -- errors, tested by anchor.
-    expect(actionable.text).toContain("anchor T101");
-    expect(actionable.text).not.toContain("anchor T201");
-    expect(all.text).toContain("anchor T101");
-    expect(all.text).toContain("anchor T201");
+    expect(actionable).toContain("anchor T101");
+    expect(actionable).not.toContain("anchor T201");
+    expect(unprojected).toContain("anchor T101");
+    expect(unprojected).toContain("anchor T201");
 
     // AGGREGATE -- reports 1/2/3, tested by the lane's own members.
-    expect(actionable.text).toContain("in-lane");
-    expect(actionable.text).not.toContain("out-lane");
-    expect(all.text).toContain("in-lane");
-    expect(all.text).toContain("out-lane");
+    expect(actionable).toContain("in-lane");
+    expect(actionable).not.toContain("out-lane");
+    expect(unprojected).toContain("in-lane");
+    expect(unprojected).toContain("out-lane");
 
     // AGGREGATE -- report 4b, bypass candidates.
-    expect(actionable.text).toContain("T120 -> T121");
-    expect(actionable.text).not.toContain("T220 -> T221");
-    expect(all.text).toContain("T220 -> T221");
+    expect(actionable).toContain("T120 -> T121");
+    expect(actionable).not.toContain("T220 -> T221");
+    expect(unprojected).toContain("T220 -> T221");
 
     // AGGREGATE, folded -- report 4c, time-order violations.
-    expect(actionable.text).toContain("1 time-order violation(s), folded:");
-    expect(actionable.text).not.toContain("T230->T231");
-    expect(all.text).toContain("2 time-order violation(s), folded:");
-    expect(all.text).toContain("T230->T231");
+    expect(actionable).toContain("1 time-order violation(s), folded:");
+    expect(actionable).not.toContain("T230->T231");
+    expect(unprojected).toContain("2 time-order violation(s), folded:");
+    expect(unprojected).toContain("T230->T231");
 
     // AGGREGATE, folded -- stock cross-task warnings.
-    expect(actionable.text).toContain("1 cross-task tagged edge(s), folded:");
-    expect(actionable.text).not.toContain("T240(2)");
-    expect(all.text).toContain("2 cross-task tagged edge(s), folded:");
-    expect(all.text).toContain("T240(2)");
+    expect(actionable).toContain("1 cross-task tagged edge(s), folded:");
+    expect(actionable).not.toContain("T240(2)");
+    expect(unprojected).toContain("2 cross-task tagged edge(s), folded:");
+    expect(unprojected).toContain("T240(2)");
 
     // AGGREGATE -- out-of-vocabulary edges (each entry is a complete fact).
-    expect(actionable.text).toContain("T150 --supersedes--> T151");
-    expect(actionable.text).not.toContain("T250 --supersedes--> T251");
-    expect(all.text).toContain("T250 --supersedes--> T251");
+    expect(actionable).toContain("T150 --supersedes--> T151");
+    expect(actionable).not.toContain("T250 --supersedes--> T251");
+    expect(unprojected).toContain("T250 --supersedes--> T251");
 
     // AGGREGATE -- unattributed clusters, the FULLY-SHOWN pair (the truncated
     // undecidable one is covered separately below).
-    expect(actionable.text).toContain("T160,T161,T162,T163");
-    expect(actionable.text).not.toContain("T260,T261,T262,T263");
-    expect(all.text).toContain("T260,T261,T262,T263");
+    expect(actionable).toContain("T160,T161,T162,T163");
+    expect(actionable).not.toContain("T260,T261,T262,T263");
+    expect(unprojected).toContain("T260,T261,T262,T263");
 
     // BORROWED ANCHOR -- lane proliferation, via the reported lane's own
     // members in that segment.
-    expect(actionable.text).toContain("E1: 5 declared lanes");
-    expect(actionable.text).not.toContain("E2: 5 declared lanes");
-    expect(all.text).toContain("E2: 5 declared lanes");
+    expect(actionable).toContain("E1: 5 declared lanes");
+    expect(actionable).not.toContain("E2: 5 declared lanes");
+    expect(unprojected).toContain("E2: 5 declared lanes");
   });
 
-  test("the UNDECIDABLE entries (no matching reported lane at all) survive actionable -- 'cannot decide honestly' keeps rather than drops", () => {
+  test("the UNDECIDABLE entries (no matching reported lane at all) survive the projection -- 'cannot decide honestly' keeps rather than drops", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
-    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
+    const actionable = renderProjected(result, actionableTurnIds);
 
     // coupling: {segment:"3", tag:"orphan-coupling"} names no reported lane.
-    expect(actionable.text).toContain("orphan-coupling");
+    expect(actionable).toContain("orphan-coupling");
     // laneProliferation: segment "9" has no reported lane either.
-    expect(actionable.text).toContain("E9: 5 declared lanes");
+    expect(actionable).toContain("E9: 5 declared lanes");
   });
 
-  test("a truncated unattributed cluster survives actionable even with no window hit among the SHOWN turns -- a negative result from an incomplete sample is undecidable, not a clean miss", () => {
+  test("a truncated unattributed cluster survives even with no window hit among the SHOWN turns -- a negative result from an incomplete sample is undecidable, not a clean miss", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
-    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
     // turnIds=[300,301] is 2 of the cluster's true 50 members, none shown
     // land in the window -- the sample is too short to say "no", so it stays.
-    expect(actionable.text).toContain("T300,T301");
+    expect(renderProjected(result, actionableTurnIds)).toContain("T300,T301");
   });
 
-  test("omitting `scope` behaves exactly like \"actionable\" when actionableTurnIds is supplied -- the documented default", () => {
-    const { result, actionableTurnIds } = buildScopeFixture();
-    const omitted = renderLaneCheckerReportsPaged(result, undefined, { actionableTurnIds, pageBudget: 1_000_000 });
-    const explicit = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
-    expect(omitted).toEqual(explicit);
-  });
-
-  test("scope \"actionable\" with NO actionableTurnIds fails OPEN -- renders byte-identical to \"all\" rather than silently hiding everything", () => {
+  /**
+   * THE FAIL-OPEN IS GONE (ticket 03). `actionableTurnIds` used to be
+   * optional, and omitting it returned the WHOLE result -- the spec's "missing
+   * production provenance … falling open to whole history". The parameter is
+   * required now, so the nearest thing a caller can still express is an EMPTY
+   * set, and that must drop everything decidable rather than keep it. A
+   * re-added `if (actionableTurnIds.size === 0) return result` short-circuit --
+   * the shape a fail-open would take today -- turns this red.
+   */
+  test("an EMPTY actionable set projects everything decidable away, rather than falling open to the whole result", () => {
     const { result } = buildScopeFixture();
-    const noProvenance = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      pageBudget: 1_000_000,
-    });
-    const all = renderLaneCheckerReportsPaged(result, undefined, { scope: "all", pageBudget: 1_000_000 });
-    expect(noProvenance).toEqual(all);
-    expect(noProvenance.text).toContain("anchor T201");
+    const empty = projectLaneCheckerResultByScope(result, new Set());
+
+    expect(empty.errors).toEqual([]);
+    expect(empty.lanes).toEqual([]);
+    expect(empty.components).toEqual([]);
+    expect(empty.bypassCandidates).toEqual([]);
+    expect(empty.timeOrderViolations).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+    // The fixture is not empty to begin with -- so the assertions above are
+    // about the projection and not about a vacuous input.
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.components.length).toBeGreaterThan(0);
   });
 
-  test("order: scope projects BEFORE aggregation -- a dropped out-of-window instance never inflates a folded family's own count", () => {
+  test("order: the projection runs BEFORE aggregation -- a dropped out-of-window instance never inflates a folded family's own count", () => {
     const { result, actionableTurnIds } = buildScopeFixture();
-    const actionable = renderLaneCheckerReportsPaged(result, undefined, {
-      scope: "actionable",
-      actionableTurnIds,
-      pageBudget: 1_000_000,
-    });
-    // Exactly ONE instance survives scope projection in each folded family.
+    const actionable = renderProjected(result, actionableTurnIds);
+    // Exactly ONE instance survives the projection in each folded family.
     // Had aggregation run FIRST (the forbidden order), the fold would already
-    // have merged both raw instances before scope ever got a chance to drop
-    // one, and a count of "1" could never appear here.
-    expect(actionable.text).toContain("1 time-order violation(s), folded:");
-    expect(actionable.text).toContain("1 cross-task tagged edge(s), folded:");
-  });
-
-  test("scope \"all\" still aggregates and still paginates -- not a budget escape hatch", () => {
-    const fixture = buildLargeLaneCheckerFixture();
-    const scopedAll = renderLaneCheckerReportsPaged(fixture, undefined, { scope: "all" });
-    const noScopeOption = renderLaneCheckerReportsPaged(fixture, undefined, {});
-    // Same render, same page count, at the SAME default budget as an
-    // unscoped call -- "all" widens the SCOPE only, per D3's own text.
-    expect(scopedAll).toEqual(noScopeOption);
-    expect(scopedAll.pageCount).toBeGreaterThan(1);
-    // The folded families (module doc: aggregation still runs under "all")
-    // land on page 2 at this fixture's own size -- same as the plain
-    // no-scope paging tests above.
-    const page2 = renderLaneCheckerReportsPaged(fixture, undefined, { scope: "all", page: 2 });
-    expect(page2.text).toContain("time-order violation(s), folded");
+    // have merged both raw instances before the projection got a chance to
+    // drop one, and a count of "1" could never appear here.
+    expect(actionable).toContain("1 time-order violation(s), folded:");
+    expect(actionable).toContain("1 cross-task tagged edge(s), folded:");
   });
 });

@@ -14,7 +14,10 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createNoteSettlementSdkQuery } from "../../src/worker/note-settlement-sdk-query";
-import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import {
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
+  settlementScopeProvenanceFor,
+} from "../support/settlement-config";
 
 /**
  * SETTLEMENT-GATE-TAXONOMY TICKET 01 — THE FROZEN-AGREEMENT FIXTURE.
@@ -384,6 +387,11 @@ async function collectFractureSets(
     stage: job.stage,
     sessionId: sessionDbId,
     writableTurnIds: new Set(writableTurnIds),
+    // Ticket 03: a dispatch with no provenance now fails CLOSED on the
+    // system-failure channel, so a fixture that drives the real tool path has
+    // to model it. Prompts 7-8 are the window; the ghost turns, when the
+    // parameterised writable set carries them, are its declared lookback.
+    scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writableTurnIds, 7, 8),
     contextBuiltAtEpoch: NOW,
     windowStart: 7,
     windowEnd: 8,
