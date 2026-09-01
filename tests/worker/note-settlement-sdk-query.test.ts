@@ -3472,13 +3472,25 @@ describe("settlement-ergonomics ticket 06 — lane_check scope (actionable defau
           // so the field no longer participates and the two renders agree for
           // the ordinary reason: nothing in this fixture anchors outside the
           // writable set.
-          // What the two scopes now differ over, and the only thing they do:
-          // a finding anchored OUTSIDE the writable set is another window's
-          // work — it cannot block this commit and the default does not show
-          // it. `all` still does.
+          //
+          // SETTLEMENT-GATE-TAXONOMY TICKET 02 — THE EVIDENCE CLOSURE, at this
+          // fixture's own seam. `outside` sits at prompt 4, past the window's
+          // `windowEnd` of 3, so it is not a JUDGMENT ANCHOR: the window's own
+          // prompt numbers plus the 50 preceding ones are, and nothing after
+          // them is. Its untagged `consume` is therefore a finding of a window
+          // that has not run yet, and neither scope reports it — `scope: "all"`
+          // no longer widens past the judgment set either (spec: "the
+          // agent-facing `scope: "all"` widening is removed").
+          //
+          // READABLE, THOUGH, which is the half that makes this test say
+          // something. The evidence closure is LOADED: report 1's citedness
+          // still names the very edge whose error is suppressed, so this
+          // asserts suppression of the FINDING rather than a projection that
+          // quietly stopped loading the row.
           expect(defaultCall.content[0]!.text).toContain("(none)");
-          expect(allCall.content[0]!.text).toContain("[E6]");
-          expect(allCall.content[0]!.text).toContain("1 error(s)");
+          expect(allCall.content[0]!.text).toContain("(none)");
+          expect(allCall.content[0]!.text).not.toContain("[E6]");
+          expect(defaultCall.content[0]!.text).toContain(`used[S${sessionDbId}/T4->S${sessionDbId}/T1]`);
           expect(defaultCall.content[0]!.text).toContain("Lane E");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -6246,15 +6258,29 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(early).toContain("Commit refused");
         expect(early).toContain("[E6]");
         // The citer is in the writable set ONLY through the frozen snapshot —
-        // the request never named it — and its E3 is exempt by AUTHORITY.
-        // Ticket 17 widened that exemption to every provenance, so the
-        // accounting line no longer names one.
-        expect(early).toContain("turn-TYPE debts (E3)");
+        // the request never named it — and its E3 was exempt by AUTHORITY
+        // (ticket 17), which showed up as an "N further error(s) … turn-TYPE
+        // debts (E3)" accounting line.
+        //
+        // SETTLEMENT-GATE-TAXONOMY TICKET 02 removes it one layer earlier and
+        // for a different reason: the citer sits at prompt 7, PAST this
+        // dispatch's `windowEnd` of 5, so it is not a JUDGMENT ANCHOR at all
+        // and nothing anchored on it is reported by either surface. There is no
+        // remainder left to account for, so the line is gone rather than
+        // reworded — and `lane_check`'s preview, which used to LAG the gate by
+        // printing that same E3 as actionable, now says exactly what the gate
+        // says. That disagreement was one of the two this batch exists to
+        // close; it closes here as a by-product of binding the scope.
+        expect(early).not.toContain("turn-TYPE debts (E3)");
         expect(early).not.toContain("[E3]");
+        expect(await callText(handlers, "lane_check", {})).not.toContain("[E3]");
 
-        // `lane_check`'s preview LAGS the gate: the same E3 prints as
-        // actionable there (ticket 05's handoff, taught rather than fixed).
-        expect(await callText(handlers, "lane_check", {})).toContain("E3");
+        // THE CITER IS STILL LOADED — it is EVIDENCE, not a judgment anchor.
+        // The removed-side debt this same run discharges below is its edge's,
+        // so a projection that had simply stopped loading the row would fail
+        // that step rather than this assertion. Suppression of the FINDING is
+        // what ticket 02 does; the row itself stays readable.
+        expect(early).toContain("[E6]");
 
         // ---- Draft reconciliation: retract the unsettled row, place the row -
         await handlers.get("recall")!({

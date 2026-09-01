@@ -44,7 +44,11 @@ import {
   type SettlementEdgesScopeHolder,
 } from "./note-settlement-edges-scope";
 import { buildIsolatedEnv } from "../mnemosyne/env";
-import { loadLaneCheckScope } from "../db/lane-checker-load";
+import {
+  anchorsInJudgment,
+  loadLaneCheckScope,
+  type LaneJudgmentWindow,
+} from "../db/lane-checker-load";
 import { loadBasisReachabilityClosure, closureAsPhaseConnectivityInput, selectLandingTurnIds } from "../db/basis-reachability-load";
 import {
   computeDuplicateReasonRate,
@@ -756,6 +760,24 @@ export interface SettlementProjectionScope {
    * never transitioned.
    */
   writableProvenance?: SettlementProvenanceIndex;
+  /**
+   * THE JUDGMENT WINDOW (settlement-gate-taxonomy ticket 02) — this job's own
+   * session and window bounds, handed to `loadLaneCheckScope` so the three
+   * roles are bound at the LOADER instead of filtered at the render.
+   *
+   * It is NOT a second writable set and never grants anything: authority stays
+   * `writableTurnIds`' answer alone. What it decides is what may be JUDGED —
+   * the window's prompt numbers plus the 50 preceding ones of the same session
+   * — and how far each involved lane is materialised. A closure turn the
+   * deadlock guard dragged in from another session, or from 90 prompts back, is
+   * still writable and is still LOADED as evidence; its own older findings
+   * simply stop blocking a window that did not produce them.
+   *
+   * Optional for the same reason `writableProvenance` is: a fixture or a
+   * pre-ticket caller that models no window gets the undifferentiated
+   * projection, which is the pre-ticket behaviour.
+   */
+  judgment?: LaneJudgmentWindow;
 }
 
 /**
@@ -780,17 +802,31 @@ function checkWindowLanes(db: Database, scope: SettlementProjectionScope) {
   const projection = loadLaneCheckScope(db, {
     kind: "turns",
     turnIds: [...scope.writableTurnIds],
+    ...(scope.judgment ? { judgment: scope.judgment } : {}),
   });
+  // Ticket 09 (D9): the loader's own per-SEGMENT registry/membership counts
+  // go straight through as the fourth argument — the proliferation warning
+  // must never be inferred from this window's projection (peer P1-11).
+  const result = checkLanes(
+    projection.turns,
+    projection.edges,
+    projection.outOfVocabularyEdges,
+    projection.segmentFacts,
+  );
   return {
-    // Ticket 09 (D9): the loader's own per-SEGMENT registry/membership counts
-    // go straight through as the fourth argument — the proliferation warning
-    // must never be inferred from this window's projection (peer P1-11).
-    result: checkLanes(
-      projection.turns,
-      projection.edges,
-      projection.outOfVocabularyEdges,
-      projection.segmentFacts,
-    ),
+    // THE ANCHOR RULE (settlement-gate-taxonomy ticket 02, spec: "Errors and
+    // warnings may anchor only here"), applied ONCE, at the seam BOTH the
+    // preview and the verdict read — never twice with two predicates. An error
+    // sitting on an EVIDENCE-CLOSURE turn (a cross-session closure endpoint, a
+    // lookback turn 90 prompts back) is a fact about somebody else's window;
+    // it is loaded because the graph needs it to be explicable and it is
+    // reported by nobody. `anchorsInJudgment` is that one predicate; with no
+    // judgment window declared every loaded turn is an anchor, so this filter
+    // is the identity and a caller that models no window is untouched.
+    result: {
+      ...result,
+      errors: result.errors.filter((error) => anchorsInJudgment(projection.roles, error.anchorId)),
+    },
     // Tag-mandate ticket 06: the projection's OWN turns, carried out so the
     // report can spell an anchor as an address. Returned from here rather
     // than re-loaded by the caller for the same reason the result is — one
@@ -1409,6 +1445,25 @@ export function createNoteSettlementSdkQuery(
       writableTurnIds: request.writableTurnIds,
       scopeProvenance: request.scopeProvenance,
     });
+    /**
+     * ONE scope descriptor for every checker call this request makes
+     * (settlement-gate-taxonomy ticket 02). A FUNCTION, not a value: the
+     * writable set and its provenance live on `scopeHolder.current`, which a
+     * later `installSettlementEdgesScope` may replace mid-request, and the four
+     * call sites below used to re-spell the same two fields each — so a third
+     * field could be added to three of them and forgotten in the fourth. The
+     * judgment window is this dispatch's own, taken from the request and never
+     * from anything the model supplied.
+     */
+    const projectionScope = (): SettlementProjectionScope => ({
+      writableTurnIds: scopeHolder.current.writableTurnIds,
+      writableProvenance: scopeHolder.current.writableProvenance,
+      judgment: {
+        sessionId: request.sessionId,
+        windowStart: request.windowStart,
+        windowEnd: request.windowEnd,
+      },
+    });
     const turnFacadeContext: SettlementTurnFacadeContext = {
       jobId: request.jobId,
       claimGeneration: request.claimGeneration,
@@ -1558,10 +1613,7 @@ export function createNoteSettlementSdkQuery(
       evaluateTerminalGates: (db) => {
         const refusal = evaluateSettlementCommitGate(
           db,
-          {
-            writableTurnIds: scopeHolder.current.writableTurnIds,
-            writableProvenance: scopeHolder.current.writableProvenance,
-          },
+          projectionScope(),
           scopeHolder.current.scopeProvenance,
         );
         if (refusal !== null) {
@@ -1574,10 +1626,7 @@ export function createNoteSettlementSdkQuery(
         // the moment this machinery ships.
         const disposition = evaluateLaneDispositionGate(
           db,
-          {
-            writableTurnIds: scopeHolder.current.writableTurnIds,
-            writableProvenance: scopeHolder.current.writableProvenance,
-          },
+          projectionScope(),
           writes.getRunLaneTouches(),
         );
         if (disposition.blocking.length > 0) {
@@ -1969,10 +2018,7 @@ export function createNoteSettlementSdkQuery(
             // P1-1: the scope is this dispatch's WRITABLE SET, the same seed
             // the gate builds from — a preview over a narrower projection
             // would hide exactly the rows the gate is about to refuse over.
-            const { result, turns } = checkWindowLanes(options.db, {
-              writableTurnIds: scopeHolder.current.writableTurnIds,
-              writableProvenance: scopeHolder.current.writableProvenance,
-            });
+            const { result, turns } = checkWindowLanes(options.db, projectionScope());
             // Settlement-ergonomics ticket 05: paged and aggregated, never
             // the plain uncapped render — see `renderLaneCheckerReportsPaged`'s
             // own doc for why a SEPARATE entry point exists rather than a
@@ -2019,10 +2065,7 @@ export function createNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                {
-                  writableTurnIds: scopeHolder.current.writableTurnIds,
-                  writableProvenance: scopeHolder.current.writableProvenance,
-                },
+                projectionScope(),
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {
@@ -2401,6 +2444,16 @@ export function createUnifiedNoteSettlementSdkQuery(
       writableTurnIds: request.writableTurnIds,
       scopeProvenance: request.scopeProvenance,
     });
+    /** ONE scope descriptor for every checker call this request makes — see the legacy builder's identical closure for why it is a function and not a value. */
+    const projectionScope = (): SettlementProjectionScope => ({
+      writableTurnIds: scopeHolder.current.writableTurnIds,
+      writableProvenance: scopeHolder.current.writableProvenance,
+      judgment: {
+        sessionId: request.sessionId,
+        windowStart: request.windowStart,
+        windowEnd: request.windowEnd,
+      },
+    });
 
     // THE CALL'S OWN BELIEVED STAGE (spec 3(a)) — set by the `leasedTool`
     // wrapper below from EVERY call's own resolved origin, and read by three
@@ -2484,10 +2537,7 @@ export function createUnifiedNoteSettlementSdkQuery(
       evaluateTerminalGates: (db) => {
         const refusal = evaluateSettlementCommitGate(
           db,
-          {
-            writableTurnIds: scopeHolder.current.writableTurnIds,
-            writableProvenance: scopeHolder.current.writableProvenance,
-          },
+          projectionScope(),
           scopeHolder.current.scopeProvenance,
         );
         if (refusal !== null) {
@@ -2496,10 +2546,7 @@ export function createUnifiedNoteSettlementSdkQuery(
         }
         const disposition = evaluateLaneDispositionGate(
           db,
-          {
-            writableTurnIds: scopeHolder.current.writableTurnIds,
-            writableProvenance: scopeHolder.current.writableProvenance,
-          },
+          projectionScope(),
           writes.getRunLaneTouches(),
         );
         if (disposition.blocking.length > 0) {
@@ -2994,10 +3041,7 @@ export function createUnifiedNoteSettlementSdkQuery(
           SETTLEMENT_LANE_CHECK_TOOL_SHAPE,
           async (args: { page?: number; pageBudget?: number; scope?: LaneCheckerScope }) => {
             laneCheckCalled = true;
-            const { result, turns } = checkWindowLanes(options.db, {
-              writableTurnIds: scopeHolder.current.writableTurnIds,
-              writableProvenance: scopeHolder.current.writableProvenance,
-            });
+            const { result, turns } = checkWindowLanes(options.db, projectionScope());
             const paged = renderLaneCheckerReportsPaged(result, buildLaneAnchorAddresses(turns), {
               page: args.page,
               pageBudget: args.pageBudget,
@@ -3018,10 +3062,7 @@ export function createUnifiedNoteSettlementSdkQuery(
               }
               const disposition = evaluateLaneDispositionGate(
                 options.db,
-                {
-                  writableTurnIds: scopeHolder.current.writableTurnIds,
-                  writableProvenance: scopeHolder.current.writableProvenance,
-                },
+                projectionScope(),
                 writes.getRunLaneTouches(),
               );
               if (disposition.blocking.length > 0) {

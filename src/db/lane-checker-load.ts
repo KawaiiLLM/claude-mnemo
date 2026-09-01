@@ -4,6 +4,7 @@ import type { LaneCheckerTurnInput, LaneSegmentFacts } from "../shared/lane-chec
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
+  laneMembershipClaims,
   laneToken,
   type LaneEdgeInput,
   type LaneKey,
@@ -167,7 +168,116 @@ import { liveTurnSql } from "./turn-liveness";
  * never fabricates a placeholder turn for an id it could not resolve, so
  * that field reports exactly what this file actually managed to load —
  * nothing here manufactures false completeness.
+ *
+ * THE ASYMMETRY, AND WHY IT IS CLOSED (settlement-gate-taxonomy tickets
+ * 01/02). Until ticket 02 the two halves above covered DIFFERENT lane sets:
+ * `laneTags` was resolved for EVERY turn that landed in the projection, while
+ * phases 3/4 widened only the lanes the SEED discovered. Between them sat the
+ * segment-global pass, which pulls in every live turn of every involved lane's
+ * SEGMENT through `SEGMENT_GRAPH_RELATIONS_SQL` alone. So a lane nobody asked
+ * about materialised with its FULL membership and a TRUNCATED edge set — on
+ * the production lane `E60/execution-repair` it kept 33 edges and lost all 20
+ * `indexes` rows, the very relation an index turn uses to claim its lane —
+ * and read as severed into one island per member. The commit gate then
+ * demanded dispositions for fractures that do not exist, on a lane the run had
+ * never touched: job 166 burned 81 minutes and 21 refused commits on exactly
+ * that, and was abandoned.
+ *
+ * The invariant that replaces it, held by `membersByLaneToken` below: **a lane
+ * that is REPORTED is a lane whose edges were WIDENED.** `laneTags` is no
+ * longer "the turn's own tags ∩ its segment's declared lanes" but that
+ * intersection RESTRICTED to the lanes this projection actually widened, and
+ * (under a judgment window, below) to the members it actually emitted for
+ * them. The pure core enumerates lanes from `laneTags` alone, so a lane whose
+ * edges were not widened now has no member, is not enumerated, and appears in
+ * no report, no count and no gate — by construction rather than by a
+ * downstream filter.
+ *
+ * THE THREE ROLES (settlement-gate-taxonomy spec, "One evaluator, one scope
+ * definition, two evaluations"; ticket 02). A settlement caller declares a
+ * JUDGMENT WINDOW (`LaneJudgmentWindow`) and the projection's turns split into
+ * three roles that are never collapsed back into one id set:
+ *
+ *   - JUDGMENT ANCHORS — the window's own prompt numbers plus the
+ *     `JUDGMENT_LOOKBACK_PROMPTS` immediately preceding prompt numbers of the
+ *     SAME session. PROMPT numbers, deliberately not "the lane's own preceding
+ *     50 members": a sparse lane spans thousands of prompts (E60's
+ *     `milestone-design` runs from prompt 139 to prompt 2264 of one session),
+ *     so a member-counted lookback would drag in two years of history and
+ *     defeat the ruling it is supposed to express. Findings may anchor only
+ *     here.
+ *   - EVIDENCE CLOSURE — everything else this projection had to load to
+ *     EXPLAIN those anchors: the far endpoint of an edge a judgment anchor
+ *     writes, a seed turn the caller's writable set carried in from outside
+ *     the window's own prompt range, one structural hop out of the loaded set
+ *     so report 4b's detours stay computable. Readable; its own older findings
+ *     enter neither the report nor the gate.
+ *   - BOUNDARY WITNESS — per lane component the judgment anchors touch,
+ *     exactly ONE nearest component they do not, as a stitch target. Scanning
+ *     the whole lane to FIND that one is allowed and is what
+ *     `narrowLaneToJudgment` does; emitting more than that one is not.
+ *
+ * BOUND HERE, NOT AT THE RENDER. Filtering downstream leaves the full
+ * membership and edge set loaded and the components computed over all of it —
+ * the cost is fully paid and only the printing shrinks. So the narrowing runs
+ * inside the WIDEN block, before `memberIdList` is frozen, and the
+ * segment-global pass's domain shrinks with it.
  */
+
+/**
+ * The lookback the ruling fixes, in PROMPT NUMBERS of the judgment window's own
+ * session (settlement-gate-taxonomy spec: "the window's 50 prompt numbers plus
+ * the 50 immediately preceding prompt numbers of the SAME session … not the
+ * lane's own preceding 50 members: on a sparse lane that spans thousands of
+ * prompts and defeats the ruling's intent").
+ */
+export const JUDGMENT_LOOKBACK_PROMPTS = 50;
+
+/**
+ * A settlement dispatch's JUDGMENT WINDOW — the declaration that turns a bare
+ * turn-id seed into the three roles (module header, "THE THREE ROLES"). It
+ * names a session and the window's own prompt bounds; the lookback is
+ * `JUDGMENT_LOOKBACK_PROMPTS`, applied HERE and nowhere else so no caller can
+ * choose a different one.
+ */
+export interface LaneJudgmentWindow {
+  /** `turns.session_id` — the judgment set never crosses a session, so a cross-session closure turn is EVIDENCE, never an anchor. */
+  sessionId: number;
+  /** The window's first prompt number (inclusive). */
+  windowStart: number;
+  /** The window's last prompt number (inclusive). */
+  windowEnd: number;
+}
+
+/** One turn's role in a settlement projection (module header, "THE THREE ROLES"). The three sets partition the projection's own turns. */
+export type LaneCheckTurnRole = "judgment" | "evidence" | "boundary";
+
+/**
+ * The projection's turns, partitioned by role. Disjoint and exhaustive over
+ * `LaneCheckProjection.turns` by construction: a boundary witness lives in a
+ * component NO judgment anchor touches (that is what makes it a witness), so
+ * it can never also be an anchor, and `evidence` is defined as the remainder.
+ *
+ * With no judgment window declared, every loaded turn is a JUDGMENT anchor and
+ * the other two sets are empty — the honest reading for a caller (the CLI, the
+ * console, `mcp/note.ts`) that declared no window and therefore judges
+ * everything it asked for.
+ */
+export interface LaneCheckRoles {
+  judgment: ReadonlySet<number>;
+  evidence: ReadonlySet<number>;
+  boundary: ReadonlySet<number>;
+}
+
+/**
+ * THE anchor predicate (spec: "Errors and warnings may anchor only here"). The
+ * ONE place the question "may a finding anchored at this turn be reported or
+ * gated on?" is answered — both settlement surfaces read it through
+ * `checkWindowLanes`, so a preview and a verdict cannot disagree about it.
+ */
+export function anchorsInJudgment(roles: LaneCheckRoles, turnId: number): boolean {
+  return roles.judgment.has(turnId);
+}
 
 export type LaneCheckScope =
   | { kind: "range"; sessionId: number; promptStart: number; promptEnd: number }
@@ -181,7 +291,19 @@ export type LaneCheckScope =
    * `loadLiveTurns`/`liveTurnSql` rather than at seed time, and every pass
    * seeds from the FULL set.
    */
-  | { kind: "turns"; turnIds: readonly number[] }
+  | {
+      kind: "turns";
+      turnIds: readonly number[];
+      /**
+       * The settlement seam (ticket 02). Declaring it switches on the three
+       * roles: findings may anchor only in the judgment set, each involved
+       * lane is narrowed to the components those anchors touch plus ONE
+       * boundary witness each, and the segment-global graph pass stops
+       * scanning whole segments. OMITTED means "judge everything this seed
+       * loads", which is what every non-settlement caller means.
+       */
+      judgment?: LaneJudgmentWindow;
+    }
   | { kind: "lanes"; laneKeys: readonly LaneKey[] };
 
 export interface LaneCheckProjection {
@@ -231,6 +353,13 @@ export interface LaneCheckProjection {
    * computed off the window's shape.
    */
   segmentFacts: LaneSegmentFacts[];
+  /**
+   * The three roles over `turns` (module header, "THE THREE ROLES"), computed
+   * where the narrowing itself happens rather than re-derived by a reader. Its
+   * ONE consumer question — "may a finding anchored here be reported?" — goes
+   * through `anchorsInJudgment`, never through a second membership test.
+   */
+  roles: LaneCheckRoles;
 }
 
 interface TurnLiteRow {
@@ -515,6 +644,154 @@ function loadSegmentTurnIds(db: Database, segmentId: number): number[] {
     )
     .all(segmentId)
     .map((row) => row.id);
+}
+
+/**
+ * THE JUDGMENT ANCHOR SET (ticket 02, module header) — every LIVE turn of the
+ * declared session whose PROMPT NUMBER falls in the window plus the
+ * `JUDGMENT_LOOKBACK_PROMPTS` immediately preceding prompt numbers.
+ *
+ * Prompt numbers, and one session. Both halves are the ruling, not an
+ * implementation convenience: a member-counted lookback ("the lane's own
+ * preceding 50 members") walks a sparse lane back through thousands of prompts
+ * — E60's `milestone-design` has 266 members spread from prompt 139 to prompt
+ * 2264 of a single session — and a cross-session closure turn is by definition
+ * not part of the arc this window is judging.
+ *
+ * LAW 8 applies here like everywhere else: a skipped or rolled-back turn is
+ * not an anchor, so it can neither carry a finding nor make a lane component
+ * count as touched.
+ */
+function loadJudgmentAnchorTurnIds(db: Database, window: LaneJudgmentWindow): number[] {
+  const promptStart = Math.max(0, window.windowStart - JUDGMENT_LOOKBACK_PROMPTS);
+  return db
+    .query<{ id: number }, [number, number, number]>(
+      `SELECT id FROM turns
+       WHERE session_id = ? AND prompt_number BETWEEN ? AND ?
+         AND ${liveTurnSql()}`,
+    )
+    .all(window.sessionId, promptStart, window.windowEnd)
+    .map((row) => row.id);
+}
+
+/** One connected component of ONE lane, over that lane's own claiming edges — the same partition `shared/lane-checker.ts`'s `buildComponentReport` computes, with the same representative (smallest member id). */
+interface LaneComponentSlice {
+  /** Smallest member id — `LaneIsland.representative`, and the key `computeLaneFractures` walks islands in. */
+  representative: number;
+  memberIds: number[];
+  /** Largest member id. With `representative` this is the span the boundary witness measures distance against. */
+  max: number;
+  /** `true` when any member is a JUDGMENT ANCHOR. */
+  touched: boolean;
+}
+
+/**
+ * Partition one lane's scanned membership by its own CLAIMING edges — the same
+ * question `buildComponentReport` asks, asked here because the answer is what
+ * decides how much of the lane this projection is allowed to emit, and that
+ * decision has to be made before `memberIdList` freezes.
+ *
+ * The claiming predicate is `laneMembershipClaims`' and nobody else's: both
+ * sides settled to THIS tag and both endpoints owned by THIS segment. An edge
+ * that names two lanes claims neither, exactly as the core reads it, so the two
+ * cannot drift into different component counts.
+ */
+function componentsOfLane(
+  laneKey: LaneKey,
+  memberIds: ReadonlySet<number>,
+  laneEdges: readonly EdgeLiteRow[],
+  owningSegments: ReadonlyMap<number, number>,
+  judgmentIds: ReadonlySet<number>,
+): LaneComponentSlice[] {
+  const parent = new Map<number, number>();
+  const find = (id: number): number => {
+    let root = id;
+    while (parent.get(root) !== root) {
+      root = parent.get(root)!;
+    }
+    let walk = id;
+    while (parent.get(walk) !== root) {
+      const next = parent.get(walk)!;
+      parent.set(walk, root);
+      walk = next;
+    }
+    return root;
+  };
+  for (const id of memberIds) {
+    parent.set(id, id);
+  }
+  for (const row of laneEdges) {
+    if (!memberIds.has(row.citingId) || !memberIds.has(row.citedId)) continue;
+    const claims = laneMembershipClaims(
+      toEdgeInput(row),
+      segmentKeyFor(owningSegments, row.citingId),
+      segmentKeyFor(owningSegments, row.citedId),
+    );
+    if (!claims.some((claim) => claim.segment === laneKey.segment && claim.tag === laneKey.tag)) {
+      continue;
+    }
+    const a = find(row.citingId);
+    const b = find(row.citedId);
+    if (a !== b) {
+      parent.set(a, b);
+    }
+  }
+  const byRoot = new Map<number, number[]>();
+  for (const id of memberIds) {
+    const root = find(id);
+    const bucket = byRoot.get(root);
+    if (bucket === undefined) {
+      byRoot.set(root, [id]);
+    } else {
+      bucket.push(id);
+    }
+  }
+  return [...byRoot.values()]
+    .map((ids) => {
+      const sorted = ids.sort((a, b) => a - b);
+      return {
+        representative: sorted[0]!,
+        memberIds: sorted,
+        max: sorted[sorted.length - 1]!,
+        touched: sorted.some((id) => judgmentIds.has(id)),
+      };
+    })
+    .sort((a, b) => a.representative - b.representative);
+}
+
+/**
+ * THE BOUNDARY WITNESS (ticket 02, module header): for ONE touched component,
+ * the ONE nearest component the judgment anchors do not touch — or `null` when
+ * the lane has none, which is the whole-lane case and needs no stitch target.
+ *
+ * DISTANCE IS THE GAP BETWEEN THE TWO COMPONENTS' MEMBER-ID SPANS, and the
+ * tie-break is the smaller representative. Both are `computeLaneFractures`'
+ * own key rather than a second one invented here: that function walks a lane's
+ * islands in representative order and pairs each with the NEXT, so a witness
+ * chosen by any other measure would be a stitch target the fracture list then
+ * refuses to name. Overlapping spans score 0 and win, which is right — an
+ * interleaved component is nearer than an adjacent one.
+ */
+function nearestUntouchedComponent(
+  touched: LaneComponentSlice,
+  components: readonly LaneComponentSlice[],
+): LaneComponentSlice | null {
+  let best: LaneComponentSlice | null = null;
+  let bestGap = Number.POSITIVE_INFINITY;
+  for (const candidate of components) {
+    if (candidate.touched) continue;
+    const gap =
+      touched.max < candidate.representative
+        ? candidate.representative - touched.max
+        : candidate.max < touched.representative
+          ? touched.representative - candidate.max
+          : 0;
+    if (gap < bestGap || (gap === bestGap && best !== null && candidate.representative < best.representative)) {
+      best = candidate;
+      bestGap = gap;
+    }
+  }
+  return best;
 }
 
 /** Every live `SEGMENT_GRAPH_RELATIONS_SQL` edge with BOTH endpoints inside `turnIds` — "all stance/consume/grounds edges among" a segment's own turns (round-4 review #4a), as opposed to `loadEdgesByRelationTouching`'s one-hop-from-a-member "touching" scope. */
@@ -868,6 +1145,14 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   // against, so a read can never admit a tag the write side would refuse.
   const laneTagsFor = createLaneTagResolver(db);
 
+  // THE JUDGMENT WINDOW (ticket 02, module header). Absent for every caller
+  // that declared none — the CLI, the console, `mcp/note.ts`, stage 1 — and
+  // those callers keep loading exactly what they always did, minus the lanes
+  // the asymmetry used to smuggle in.
+  const judgmentWindow = scope.kind === "turns" ? scope.judgment : undefined;
+  const judgmentIds: ReadonlySet<number> | undefined =
+    judgmentWindow === undefined ? undefined : new Set(loadJudgmentAnchorTurnIds(db, judgmentWindow));
+
   if (scope.kind === "lanes") {
     involvedLaneKeys = [...scope.laneKeys];
     seedTurnIds = [];
@@ -919,26 +1204,39 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     involvedLaneKeys = [...seen.values()];
   }
 
-  // ---- WIDEN: each involved lane's full tagged edge set, its own segment only ----
+  // ---- WIDEN: each involved lane's tagged edge set, its own segment only ----
   const widenedByKey = new Map<string, EdgeLiteRow[]>();
-  // …and (ticket 10, phase 4) each involved lane's full MEMBERSHIP, which no
-  // edge pass can reach: a turn carrying the tag with no edge at all.
+  // …and (ticket 10, phase 4) each involved lane's MEMBERSHIP, which no edge
+  // pass can reach: a turn carrying the tag with no edge at all.
   const laneMemberIds = new Set<number>();
+  /**
+   * THE ONE MEMBERSHIP ANSWER (ticket 02, module header). `laneKeyToken` ->
+   * the member ids this projection EMITTED for that lane. `laneTags` is
+   * resolved against it below, so "the lanes membership is resolved for" and
+   * "the lanes whose edges were widened" are the SAME set by construction, and
+   * the per-member narrowing a judgment window applies cannot be undone by a
+   * later pass re-admitting a dropped member through some other door.
+   */
+  const membersByLaneToken = new Map<string, Set<number>>();
+  /** Members emitted only because they are somebody's BOUNDARY WITNESS — the third role. */
+  const boundaryMemberIds = new Set<number>();
   for (const laneKey of involvedLaneKeys) {
-    if (laneKey.segment !== DEFAULT_SEGMENT) {
-      for (const id of loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)) {
-        laneMemberIds.add(id);
-      }
-    }
-    const candidates = loadEdgesForTag(db, laneKey.tag);
-    if (candidates.length === 0) {
-      widenedByKey.set(laneKeyToken(laneKey), []);
-      continue;
-    }
-    const owningSegments = loadOwningSegments(
-      db,
-      candidates.flatMap((row) => [row.citingId, row.citedId]),
+    const token = laneKeyToken(laneKey);
+    // The SCAN. A DEFAULT_SEGMENT (homeless) lane has no `segment_members`
+    // rows and therefore no membership at all — see the module header.
+    const scannedMembers = new Set<number>(
+      laneKey.segment === DEFAULT_SEGMENT
+        ? []
+        : loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag),
     );
+    const candidates = loadEdgesForTag(db, laneKey.tag);
+    const owningSegments =
+      candidates.length === 0
+        ? new Map<number, number>()
+        : loadOwningSegments(
+            db,
+            candidates.flatMap((row) => [row.citingId, row.citedId]),
+          );
     // Match from EITHER endpoint's segment, but PER SIDE (ticket 06): the
     // TAIL only ever names a lane in the CITING turn's segment and the HEAD
     // only in the CITED turn's, so a row belongs to lane `(S, T)` when its
@@ -948,15 +1246,62 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     // row for row; it diverges only where the two sides carry different
     // tags, and there the segment that matters is the one belonging to the
     // side that actually names the lane.
+    const laneEdges = candidates.filter(
+      (row) =>
+        (row.tailTag === laneKey.tag &&
+          segmentKeyFor(owningSegments, row.citingId) === laneKey.segment) ||
+        (row.headTag === laneKey.tag &&
+          segmentKeyFor(owningSegments, row.citedId) === laneKey.segment),
+    );
+
+    if (judgmentIds === undefined) {
+      // No window declared: the lane is emitted whole, exactly as before —
+      // what changes for such a caller is only that a lane it never
+      // discovered is no longer reported off a partial edge set.
+      membersByLaneToken.set(token, scannedMembers);
+      widenedByKey.set(token, laneEdges);
+      for (const id of scannedMembers) {
+        laneMemberIds.add(id);
+      }
+      continue;
+    }
+
+    // NARROW (ticket 02): the components the judgment anchors touch, plus ONE
+    // nearest untouched component per touched one. The scan above found them;
+    // only these are emitted.
+    const components = componentsOfLane(laneKey, scannedMembers, laneEdges, owningSegments, judgmentIds);
+    const kept = new Map<number, LaneComponentSlice>();
+    for (const component of components) {
+      if (!component.touched) continue;
+      kept.set(component.representative, component);
+      const witness = nearestUntouchedComponent(component, components);
+      if (witness !== null) {
+        kept.set(witness.representative, witness);
+      }
+    }
+    const emitted = new Set<number>();
+    for (const component of kept.values()) {
+      for (const id of component.memberIds) {
+        emitted.add(id);
+        if (!component.touched) {
+          boundaryMemberIds.add(id);
+        }
+      }
+    }
+    membersByLaneToken.set(token, emitted);
+    for (const id of emitted) {
+      laneMemberIds.add(id);
+    }
+    // An edge is emitted when it still has an emitted endpoint. A CLAIMING
+    // edge unions its two endpoints into one component, so it is kept or
+    // dropped whole and can never dangle across the cut; what this admits
+    // beyond those is the CROSS-LANE rows report 3 counts, whose far endpoint
+    // then joins as EVIDENCE.
     widenedByKey.set(
-      laneKeyToken(laneKey),
-      candidates.filter(
-        (row) =>
-          (row.tailTag === laneKey.tag &&
-            segmentKeyFor(owningSegments, row.citingId) === laneKey.segment) ||
-          (row.headTag === laneKey.tag &&
-            segmentKeyFor(owningSegments, row.citedId) === laneKey.segment),
-      ),
+      token,
+      emitted.size === 0
+        ? []
+        : laneEdges.filter((row) => emitted.has(row.citingId) || emitted.has(row.citedId)),
     );
   }
 
@@ -1025,14 +1370,38 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   // transitive reduction ("段的全图") is computed over — report 2's
   // connectivity no longer reads it, since a lane's connectivity is now judged
   // on the lane's own claiming edges alone.
+  //
+  // UNDER A JUDGMENT WINDOW THAT DOMAIN IS THE EVIDENCE CLOSURE, NOT THE
+  // SEGMENT (ticket 02). Scanning whole segments is the single largest cost
+  // this loader pays and the reason a 50-prompt window loaded 1524 turns of
+  // E60 and classed 435 errors on them: `loadSegmentTurnIds` returns every one
+  // of a segment's 2225 live turns and `loadComponentEdgesAmong` then runs
+  // with twice that many bound parameters. What report 4b actually needs is
+  // the graph AROUND what this projection judges, so the domain becomes the
+  // loaded set plus ONE structural hop out of it — which is exactly the
+  // evidence closure's definition, and is enough to see every three-node
+  // detour around a judged turn. A detour of four nodes or more that leaves
+  // the closure entirely is given up on purpose; report 4b is a warning about
+  // shape, and a warning anchored outside the judgment set may not be reported
+  // anyway.
   const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
-  const segmentTurnIds = new Set<number>();
-  for (const segmentId of realSegmentIds) {
-    for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
-      segmentTurnIds.add(id);
+  const segmentGraphDomain = new Set<number>();
+  if (judgmentIds === undefined) {
+    for (const segmentId of realSegmentIds) {
+      for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
+        segmentGraphDomain.add(id);
+      }
+    }
+  } else {
+    for (const id of memberIdList) {
+      segmentGraphDomain.add(id);
+    }
+    for (const row of loadEdgesByRelationTouching(db, memberIdList, [...SEGMENT_GRAPH_RELATIONS_SQL])) {
+      segmentGraphDomain.add(row.citingId);
+      segmentGraphDomain.add(row.citedId);
     }
   }
-  for (const row of loadComponentEdgesAmong(db, [...segmentTurnIds])) {
+  for (const row of loadComponentEdgesAmong(db, [...segmentGraphDomain])) {
     edgeMap.set(edgeKey(row), row);
   }
 
@@ -1091,6 +1460,27 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
 
+  /**
+   * THE membership rule, closed (ticket 02, module header): the registry
+   * intersection `createLaneTagResolver` computes, INTERSECTED with the
+   * per-lane member sets this projection actually emitted. One predicate, one
+   * place — the widening decided these sets and nothing downstream may widen
+   * them back.
+   */
+  function emittedLaneTagsFor(
+    turnId: number,
+    segmentId: number | undefined,
+    rawTags: string | null,
+  ): string[] {
+    if (segmentId === undefined) {
+      return [];
+    }
+    const segment = String(segmentId);
+    return laneTagsFor(segmentId, rawTags).filter((tag) =>
+      membersByLaneToken.get(laneToken(segment, tag))?.has(turnId) ?? false,
+    );
+  }
+
   const turns: LaneCheckerTurnInput[] = [...turnRows.values()]
     .map((row) => {
       const segmentId = owningSegmentsForTurns.get(row.id);
@@ -1103,7 +1493,14 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
         // this loader — `[]` is a real answer ("this turn joins no lane"),
         // never "not loaded", because the two inputs it needs (the turn's own
         // column and its segment's registry) are both read right here.
-        laneTags: laneTagsFor(segmentId, row.tags),
+        //
+        // TICKET 02 closes the asymmetry HERE: the registry intersection is
+        // further restricted to the lanes this projection WIDENED, member by
+        // member (`membersByLaneToken`). A turn dragged in by the
+        // segment-global pass, or held only as a far edge endpoint, therefore
+        // claims nothing — so the lane it happens to carry a tag for is never
+        // enumerated off a truncated edge set. See the module header.
+        laneTags: emittedLaneTagsFor(row.id, segmentId, row.tags),
       };
       if (segmentId !== undefined) {
         input.segment = String(segmentId);
@@ -1145,7 +1542,32 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   }
   const segmentFacts = loadSegmentFacts(db, [...scopeSegmentIds]);
 
-  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
+  // THE THREE ROLES (ticket 02, module header), over the turns this projection
+  // actually returns — disjoint and exhaustive. A boundary witness lives in a
+  // component NO judgment anchor touches, so the two sets cannot overlap;
+  // EVIDENCE is the remainder, defined by subtraction rather than by a third
+  // membership query that could disagree with the other two.
+  const judgment = new Set<number>();
+  const boundary = new Set<number>();
+  const evidence = new Set<number>();
+  for (const turn of turns) {
+    if (judgmentIds === undefined || judgmentIds.has(turn.id)) {
+      judgment.add(turn.id);
+    } else if (boundaryMemberIds.has(turn.id)) {
+      boundary.add(turn.id);
+    } else {
+      evidence.add(turn.id);
+    }
+  }
+
+  return {
+    turns,
+    edges,
+    involvedLaneKeys,
+    outOfVocabularyEdges,
+    segmentFacts,
+    roles: { judgment, evidence, boundary },
+  };
 }
 
 // ------------------------------------------- ATTRIBUTION CONTROLS (ticket 13)

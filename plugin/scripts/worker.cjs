@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mti89kfm" : "dev";
+var BUILD_ID = true ? "0.28.0-mtidlldf" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -12300,6 +12300,7 @@ function checkTurnTagWrite(db, input) {
 }
 
 // src/db/lane-checker-load.ts
+var JUDGMENT_LOOKBACK_PROMPTS = 50;
 function turnOrderKey(sessionId, promptNumber) {
   return [sessionId, promptNumber];
 }
@@ -12418,6 +12419,81 @@ function loadSegmentTurnIds(db, segmentId) {
        JOIN segment_members sm ON sm.turn_id = t.id
        WHERE sm.segment_id = ? AND ${liveTurnSql("t")}`
   ).all(segmentId).map((row) => row.id);
+}
+function loadJudgmentAnchorTurnIds(db, window) {
+  const promptStart = Math.max(0, window.windowStart - JUDGMENT_LOOKBACK_PROMPTS);
+  return db.query(
+    `SELECT id FROM turns
+       WHERE session_id = ? AND prompt_number BETWEEN ? AND ?
+         AND ${liveTurnSql()}`
+  ).all(window.sessionId, promptStart, window.windowEnd).map((row) => row.id);
+}
+function componentsOfLane(laneKey, memberIds, laneEdges, owningSegments, judgmentIds) {
+  const parent = /* @__PURE__ */ new Map();
+  const find = (id) => {
+    let root2 = id;
+    while (parent.get(root2) !== root2) {
+      root2 = parent.get(root2);
+    }
+    let walk = id;
+    while (parent.get(walk) !== root2) {
+      const next = parent.get(walk);
+      parent.set(walk, root2);
+      walk = next;
+    }
+    return root2;
+  };
+  for (const id of memberIds) {
+    parent.set(id, id);
+  }
+  for (const row of laneEdges) {
+    if (!memberIds.has(row.citingId) || !memberIds.has(row.citedId)) continue;
+    const claims = laneMembershipClaims(
+      toEdgeInput(row),
+      segmentKeyFor(owningSegments, row.citingId),
+      segmentKeyFor(owningSegments, row.citedId)
+    );
+    if (!claims.some((claim) => claim.segment === laneKey.segment && claim.tag === laneKey.tag)) {
+      continue;
+    }
+    const a = find(row.citingId);
+    const b = find(row.citedId);
+    if (a !== b) {
+      parent.set(a, b);
+    }
+  }
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const id of memberIds) {
+    const root2 = find(id);
+    const bucket = byRoot.get(root2);
+    if (bucket === void 0) {
+      byRoot.set(root2, [id]);
+    } else {
+      bucket.push(id);
+    }
+  }
+  return [...byRoot.values()].map((ids) => {
+    const sorted = ids.sort((a, b) => a - b);
+    return {
+      representative: sorted[0],
+      memberIds: sorted,
+      max: sorted[sorted.length - 1],
+      touched: sorted.some((id) => judgmentIds.has(id))
+    };
+  }).sort((a, b) => a.representative - b.representative);
+}
+function nearestUntouchedComponent(touched, components) {
+  let best = null;
+  let bestGap = Number.POSITIVE_INFINITY;
+  for (const candidate of components) {
+    if (candidate.touched) continue;
+    const gap = touched.max < candidate.representative ? candidate.representative - touched.max : candidate.max < touched.representative ? touched.representative - candidate.max : 0;
+    if (gap < bestGap || gap === bestGap && best !== null && candidate.representative < best.representative) {
+      best = candidate;
+      bestGap = gap;
+    }
+  }
+  return best;
 }
 function loadComponentEdgesAmong(db, turnIds) {
   if (turnIds.length === 0) {
@@ -12614,6 +12690,8 @@ function loadLaneCheckScope(db, scope) {
   let involvedLaneKeys;
   let seedTurnIds;
   const laneTagsFor = createLaneTagResolver(db);
+  const judgmentWindow = scope.kind === "turns" ? scope.judgment : void 0;
+  const judgmentIds = judgmentWindow === void 0 ? void 0 : new Set(loadJudgmentAnchorTurnIds(db, judgmentWindow));
   if (scope.kind === "lanes") {
     involvedLaneKeys = [...scope.laneKeys];
     seedTurnIds = [];
@@ -12648,26 +12726,55 @@ function loadLaneCheckScope(db, scope) {
   }
   const widenedByKey = /* @__PURE__ */ new Map();
   const laneMemberIds = /* @__PURE__ */ new Set();
+  const membersByLaneToken = /* @__PURE__ */ new Map();
+  const boundaryMemberIds = /* @__PURE__ */ new Set();
   for (const laneKey of involvedLaneKeys) {
-    if (laneKey.segment !== DEFAULT_SEGMENT) {
-      for (const id of loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)) {
-        laneMemberIds.add(id);
-      }
-    }
+    const token = laneKeyToken(laneKey);
+    const scannedMembers = new Set(
+      laneKey.segment === DEFAULT_SEGMENT ? [] : loadSegmentTurnIdsCarryingTag(db, Number(laneKey.segment), laneKey.tag)
+    );
     const candidates = loadEdgesForTag(db, laneKey.tag);
-    if (candidates.length === 0) {
-      widenedByKey.set(laneKeyToken(laneKey), []);
-      continue;
-    }
-    const owningSegments = loadOwningSegments(
+    const owningSegments = candidates.length === 0 ? /* @__PURE__ */ new Map() : loadOwningSegments(
       db,
       candidates.flatMap((row) => [row.citingId, row.citedId])
     );
+    const laneEdges = candidates.filter(
+      (row) => row.tailTag === laneKey.tag && segmentKeyFor(owningSegments, row.citingId) === laneKey.segment || row.headTag === laneKey.tag && segmentKeyFor(owningSegments, row.citedId) === laneKey.segment
+    );
+    if (judgmentIds === void 0) {
+      membersByLaneToken.set(token, scannedMembers);
+      widenedByKey.set(token, laneEdges);
+      for (const id of scannedMembers) {
+        laneMemberIds.add(id);
+      }
+      continue;
+    }
+    const components = componentsOfLane(laneKey, scannedMembers, laneEdges, owningSegments, judgmentIds);
+    const kept = /* @__PURE__ */ new Map();
+    for (const component of components) {
+      if (!component.touched) continue;
+      kept.set(component.representative, component);
+      const witness = nearestUntouchedComponent(component, components);
+      if (witness !== null) {
+        kept.set(witness.representative, witness);
+      }
+    }
+    const emitted = /* @__PURE__ */ new Set();
+    for (const component of kept.values()) {
+      for (const id of component.memberIds) {
+        emitted.add(id);
+        if (!component.touched) {
+          boundaryMemberIds.add(id);
+        }
+      }
+    }
+    membersByLaneToken.set(token, emitted);
+    for (const id of emitted) {
+      laneMemberIds.add(id);
+    }
     widenedByKey.set(
-      laneKeyToken(laneKey),
-      candidates.filter(
-        (row) => row.tailTag === laneKey.tag && segmentKeyFor(owningSegments, row.citingId) === laneKey.segment || row.headTag === laneKey.tag && segmentKeyFor(owningSegments, row.citedId) === laneKey.segment
-      )
+      token,
+      emitted.size === 0 ? [] : laneEdges.filter((row) => emitted.has(row.citingId) || emitted.has(row.citedId))
     );
   }
   const edgeMap = /* @__PURE__ */ new Map();
@@ -12697,13 +12804,23 @@ function loadLaneCheckScope(db, scope) {
     }
   }
   const realSegmentIds = [...new Set(involvedLaneKeys.map((key) => key.segment).filter((s) => s !== DEFAULT_SEGMENT))];
-  const segmentTurnIds = /* @__PURE__ */ new Set();
-  for (const segmentId of realSegmentIds) {
-    for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
-      segmentTurnIds.add(id);
+  const segmentGraphDomain = /* @__PURE__ */ new Set();
+  if (judgmentIds === void 0) {
+    for (const segmentId of realSegmentIds) {
+      for (const id of loadSegmentTurnIds(db, Number(segmentId))) {
+        segmentGraphDomain.add(id);
+      }
+    }
+  } else {
+    for (const id of memberIdList) {
+      segmentGraphDomain.add(id);
+    }
+    for (const row of loadEdgesByRelationTouching(db, memberIdList, [...SEGMENT_GRAPH_RELATIONS_SQL])) {
+      segmentGraphDomain.add(row.citingId);
+      segmentGraphDomain.add(row.citedId);
     }
   }
-  for (const row of loadComponentEdgesAmong(db, [...segmentTurnIds])) {
+  for (const row of loadComponentEdgesAmong(db, [...segmentGraphDomain])) {
     edgeMap.set(edgeKey(row), row);
   }
   const allTurnIds = new Set(memberIdList);
@@ -12732,6 +12849,15 @@ function loadLaneCheckScope(db, scope) {
   });
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
+  function emittedLaneTagsFor(turnId, segmentId, rawTags) {
+    if (segmentId === void 0) {
+      return [];
+    }
+    const segment = String(segmentId);
+    return laneTagsFor(segmentId, rawTags).filter(
+      (tag) => membersByLaneToken.get(laneToken(segment, tag))?.has(turnId) ?? false
+    );
+  }
   const turns = [...turnRows.values()].map((row) => {
     const segmentId = owningSegmentsForTurns.get(row.id);
     const input = {
@@ -12743,7 +12869,14 @@ function loadLaneCheckScope(db, scope) {
       // this loader — `[]` is a real answer ("this turn joins no lane"),
       // never "not loaded", because the two inputs it needs (the turn's own
       // column and its segment's registry) are both read right here.
-      laneTags: laneTagsFor(segmentId, row.tags)
+      //
+      // TICKET 02 closes the asymmetry HERE: the registry intersection is
+      // further restricted to the lanes this projection WIDENED, member by
+      // member (`membersByLaneToken`). A turn dragged in by the
+      // segment-global pass, or held only as a far edge endpoint, therefore
+      // claims nothing — so the lane it happens to carry a tag for is never
+      // enumerated off a truncated edge set. See the module header.
+      laneTags: emittedLaneTagsFor(row.id, segmentId, row.tags)
     };
     if (segmentId !== void 0) {
       input.segment = String(segmentId);
@@ -12772,7 +12905,26 @@ function loadLaneCheckScope(db, scope) {
     }
   }
   const segmentFacts = loadSegmentFacts(db, [...scopeSegmentIds]);
-  return { turns, edges, involvedLaneKeys, outOfVocabularyEdges, segmentFacts };
+  const judgment = /* @__PURE__ */ new Set();
+  const boundary = /* @__PURE__ */ new Set();
+  const evidence = /* @__PURE__ */ new Set();
+  for (const turn of turns) {
+    if (judgmentIds === void 0 || judgmentIds.has(turn.id)) {
+      judgment.add(turn.id);
+    } else if (boundaryMemberIds.has(turn.id)) {
+      boundary.add(turn.id);
+    } else {
+      evidence.add(turn.id);
+    }
+  }
+  return {
+    turns,
+    edges,
+    involvedLaneKeys,
+    outOfVocabularyEdges,
+    segmentFacts,
+    roles: { judgment, evidence, boundary }
+  };
 }
 
 // src/db/segment-rank.ts

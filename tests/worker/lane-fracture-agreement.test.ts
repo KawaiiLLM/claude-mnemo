@@ -66,7 +66,16 @@ import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
  * ONE FIXTURE, TWO RUNS, ONE KNOB. Both tests below share the identical
  * frozen database and differ only in `writableTurnIds`. When the ghost lane's
  * members are in the seed, the lane is DISCOVERED, its `indexes` edges load,
- * and all three evaluators agree. When they are not, they do not.
+ * and all three evaluators agree. When they are not, they did not.
+ *
+ * TICKET 02 CLOSED THE ASYMMETRY and the second test's assertions moved with
+ * it. `laneTags` is now resolved only for the lanes this projection actually
+ * WIDENED (`db/lane-checker-load.ts`'s `emittedLaneTagsFor`), so an
+ * undiscovered lane has no member, is not enumerated by the core, and is
+ * reported by nobody — the phantom fractures are gone by CONSTRUCTION rather
+ * than filtered out downstream. What the second test pins now is the property
+ * this whole batch exists for: whatever the gate demands is a SUBSET of what
+ * `justify` will accept, so a run always has a legal move.
  */
 
 const NOW = 1_800_000_000;
@@ -168,8 +177,15 @@ function seedGhostLaneFixture(db: Database): GhostLaneFixture {
     "UPDATE turns SET title = ?, content = ? WHERE id = ?",
   ).run("g4 note", "g4 body sentence. ".repeat(40), g4);
 
-  const w1 = insertTurn(7, ["ghost-lane-task", "window-lane"]);
-  const w2 = insertTurn(8, ["ghost-lane-task", "window-lane"]);
+  // The window's turns claim `carrier-lane` TOO — which is what keeps the
+  // second test honest after ticket 02. A seed turn's own tags are a DISCOVERY
+  // source, so `carrier-lane` is widened in BOTH runs, its whole membership
+  // (g1..g6 included) is emitted in both, and the six ghost turns are
+  // therefore in the projection either way. Without this the judgment
+  // narrowing alone would keep them out and the second test would pass by
+  // scope luck rather than by the invariant it names.
+  const w1 = insertTurn(7, ["ghost-lane-task", "window-lane", "carrier-lane"]);
+  const w2 = insertTurn(8, ["ghost-lane-task", "window-lane", "carrier-lane"]);
 
   addSegmentMembers(db, laneSegmentId, [g1, g2, g3, g4, g5, g6, w1, w2], NOW);
   insertLane(db, laneSegmentId, "ghost-lane", NOW);
@@ -407,7 +423,7 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
     }
   });
 
-  test("when the lane is OUT of the seed, the gate demands fractures justify refuses to recognise — the same database, one knob", async () => {
+  test("when the lane is OUT of the seed, it is reported by nobody — a lane whose edges were not widened has no members", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -417,29 +433,37 @@ describe("settlement-gate-taxonomy ticket 01 — the three fracture evaluators o
 
       // The ONLY difference from the test above: the ghost lane's members are
       // not in the writable set, so the loader never DISCOVERS the lane and
-      // never widens its `indexes` edges — while the segment-global pass still
-      // puts all six members in the projection.
+      // never widens its `indexes` edges.
       const sets = await collectFractureSets(db, fixture, fixture.windowTurnIds);
 
-      // Justify is unchanged — it projects the whole lane and sees the truth.
+      // Justify is unchanged — it projects the whole lane (`{kind:"lanes"}`)
+      // and sees the truth. It is the CONTROL: the lane really does have two
+      // fractures, so nothing below passes because the fixture is empty.
       expect(sets.justify).toEqual(["1<->4", "4<->6"]);
-      // The gate sees six one-member islands: five phantom fractures, none of
-      // which justify would ever accept a disposition for.
-      expect(sets.gate).toEqual(["1<->2", "2<->3", "3<->4", "4<->5", "5<->6"]);
-      expect(sets.preview).toEqual(sets.gate);
 
-      // THE DEADLOCK, stated as an assertion: the two sets are DISJOINT, so no
-      // sequence of legal justify calls can ever clear this commit. This is
-      // the production failure of job 166 reduced to eight turns.
-      expect(sets.gate.some((pair) => sets.justify.includes(pair))).toBe(false);
+      // TICKET 02'S INVARIANT: a lane that is REPORTED is a lane whose edges
+      // were WIDENED. `ghost-lane` was not discovered, so `loadEdgesForTag`
+      // never ran for it, so its members claim it in no projection, so the
+      // core never enumerates it — and there is nothing for the gate to
+      // fracture. Not "the phantom fractures were filtered out downstream":
+      // the lane is absent from the projection entirely.
+      expect(sets.gate).toEqual([]);
+      expect(sets.preview).toEqual([]);
 
-      // RED CAPABILITY. Replace `.not` with a plain `toEqual` (or give test 1's
-      // writable set to this test) and the fixture goes red on exactly this
-      // defect. When the loader is narrowed so that an undiscovered lane can
-      // no longer be reported at all, THIS assertion is the one that must be
-      // rewritten — it is a record of today's behaviour, not of the contract.
-      expect(sets.gate).not.toEqual(sets.justify);
+      // WHAT THE WHOLE BATCH IS FOR, stated as an assertion: what the gate
+      // demands is a SUBSET of what justify will accept, so the run always has
+      // a legal move. Before ticket 02 the two sets were DISJOINT here —
+      // `1<->2, 2<->3, 3<->4, 4<->5, 5<->6` against `1<->4, 4<->6` — and no
+      // sequence of legal calls could clear the commit. That is job 166's
+      // 81-minute abandonment reduced to eight turns.
+      expect(sets.gate.every((pair) => sets.justify.includes(pair))).toBe(true);
 
+      // RED CAPABILITY, and it is the LOADER's own line that carries it:
+      // restore `laneTags: laneTagsFor(segmentId, row.tags)` in place of
+      // `emittedLaneTagsFor(...)` in `db/lane-checker-load.ts` — i.e. resolve
+      // membership for lanes whose edges were never widened — and this test
+      // goes red with `gate` back at the five phantom pairs while `justify`
+      // stays at two. Verified by running it.
       expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     } finally {
       db?.close();
