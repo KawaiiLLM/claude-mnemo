@@ -1,0 +1,6 @@
+REPLACE
+SAN11 visual-style lane: diagonal-brick diamond projection is the locked geometry, superseding 3/4 top-down (S18993/T105 overrides T89), isometric, and brick-rect in turn — verified (T125), locked as-is (T133), ticket 004 acceptance-verified (T149); officer portraits are a ruled SOURCE, 萌战 package, not yet extracted (T133); the commit stays staged (T149).
+Causal law: "top-down" comes from axis-aligned, not diagonal, gridlines, not flat shading; a yawed diagonal grid, not decoration, gives the real stagger (S18993/T124).
+Binding: diagonal-brick tile form + current tiles locked, native regen unscheduled (S18993/T133); 萌战 is the ruled officer-art source, nothing extracted (T133).
+Asset base: CC BY 4.0 scrabling.itch.io pack + Codex gap tiles, commercial use OK, no standalone redistribution (S18993/T104).
+Frontier: ticket 004's acceptance criteria hand-verified — tests, digest match, smoke screenshots (S18993/T149); Autumn Forest's projection fit (T109) and a flagged cliff-render gap (T107) remain open.

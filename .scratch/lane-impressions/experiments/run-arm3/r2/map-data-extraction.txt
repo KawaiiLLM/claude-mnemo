@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 map-data-extraction lane: original tile/region data is pulled from san11pkres.bin via the community S11Bin editor, run on a Windows machine at 192.168.1.6 (S18993/T96, T97). The extraction recipe came from a forum post (S18993/T95); the 1.5G asset folder and editor v1.095 were copied there and verified byte-exact (S18993/T98, T99). v1.095 postdates the forum's v1.07 parsing-bug fix, likely already fixed but unconfirmed. Open: exporting the tile-info table to the converter is not yet done.

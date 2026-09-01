@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 visual-style lane: 2:1 isometric, diagonal-brick diamond stagger (S18993/T124). Road cells are now whole tiles, not the 004-era mid-tile stripe SPEC v7 left unscheduled — user ruled it ugly; retile landed a32588c, pixel-verified (T159, T160, T164, T168). Viewport and render-blur bugs fixed at the client (T179, T196). mapA elevation (K3ST) is decoded, an offline hillshade preview rendered — unblocking 3D-relief, previously ruled out for lack of data — but client integration and combat meaning stay open (T198, T199).

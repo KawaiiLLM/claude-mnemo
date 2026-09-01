@@ -1,0 +1,2 @@
+REPLACE
+SAN11 map-data-extraction lane: the goal is a tile-info table for a converter, to be pulled from SAN11's pkres.bin via a community bin editor per a decoded forum recipe (S18993/T95); the source folder and the bin editor are both transferred and byte-verified intact on the Win machine (T98, T99) — running the manual export and building the converter remain open.

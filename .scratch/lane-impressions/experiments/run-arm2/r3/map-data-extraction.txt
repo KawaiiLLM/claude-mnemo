@@ -1,0 +1,2 @@
+REPLACE
+SAN11 map-data-extraction lane: SAN11's pkres.bin SHEX tile format is reverse-engineered, revealing a second embedded map, mapB (S18993/T101); mapA is picked over the mirror-defective mapB (T102), its converter delivered as mapA.json + reusable tools/, with odd-r hex adjacency locked by a 42/42-city proof (T103) — mapB's conversion and further engine integration remain open.

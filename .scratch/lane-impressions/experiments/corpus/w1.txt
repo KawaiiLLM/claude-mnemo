@@ -1,0 +1,5 @@
+=== settlement window 1: turns T1-T50 ===
+
+--- lane #visual-style: 0 member turns in this window ---
+
+--- lane #map-data-extraction: 0 member turns in this window ---

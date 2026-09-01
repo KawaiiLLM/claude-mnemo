@@ -1,0 +1,17 @@
+=== settlement window 1: turns T40-T61 ===
+
+--- lane #latency-budget: 5 member turns in this window ---
+T41 [design] Locked the 120ms end-to-end budget and its three legs
+   content: User ruled the pipeline's whole budget is 120ms wall clock from key-down to first audible sample, split capture 25ms / transform 60ms / playback 35ms. The split is a ruling, not a measurement: any leg that wants more has to take it from another leg by a new ruling, never by growing the total. Rejected the alternative of a per-leg budget with no total, on the grounds that three independently-defended legs are how a budget dies.
+T44 [implement,ops] Ring-buffer capture leg landed and committed
+   content: Replaced the callback-allocating capture path with a lock-free ring buffer; committed as 7f21ac9 on main after review. Measured on the reference box over 10k key-downs: p50 9ms, p99 18ms, inside the 25ms leg. The old path's allocation spike under load is gone from the flame graph.
+T51 [research,measure] Transform leg profiled; the cost is the resampler, not the FFT
+   content: Profiled the transform leg with perf over a 3-minute capture. The FFT is 11ms of the 74ms; the polyphase resampler is 48ms, all of it in the window-coefficient recompute that runs per block instead of once. This overturns the standing assumption that the FFT was the leg's cost centre — the assumption came from a napkin estimate, never a profile.
+T57 [implement,measure] Precomputed-coefficient resampler prototyped; /tmp preview only
+   content: Built a prototype resampler that hoists the window-coefficient table out of the per-block path and precomputes it once at rate-change. Rendered the comparison offline: the transform leg drops from 74ms to 21ms on the same 3-minute capture, and the output is bit-identical to the current path on the regression corpus. NOTHING IS WIRED IN — the prototype lives at /tmp/resamp_proto.c and the production path is untouched; no ticket owns the integration, and the coefficient table's memory cost at 8 simultaneous rates has not been measured.
+T60 [design] Playback leg's 35ms is deferred, not accepted
+   content: User declined to re-rule the playback leg while the transform leg is in flight: 「先把变换那条腿弄完再说」. The 35ms stands as an unexamined inheritance from T41's split, not as a measured requirement. Recorded so nobody reads the silence as endorsement.
+   edges written this window (latency-budget):
+   T51 --override--> T41 (tail:latency-budget head:latency-budget)
+   T57 --extends--> T51 (tail:latency-budget head:latency-budget)
+   T60 --narrows--> T41 (tail:latency-budget head:latency-budget)

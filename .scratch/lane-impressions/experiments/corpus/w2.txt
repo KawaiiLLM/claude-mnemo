@@ -1,0 +1,43 @@
+=== settlement window 2: turns T51-T100 ===
+
+--- lane #visual-style: 7 member turns in this window ---
+T82 [correction,design] M3 redefined: SAN11 mechanic+visual fidelity, LLM deprioritized
+   content: Overturns [T11011]'s "M3 = platformization + LLM seats" plan: user wants SAN11 mechanic/visual fidelity first, LLM access stays a thin existing-adapter interface (no new work), no 3D — an Arknights-style oblique 2.5D camera instead. Edited docs/SPEC.md: M3 now "战役层还原" (五维属性+适性、气力制战法替代冷却、兵种扩充、场设施、支援攻击) + oblique-camera visuals; platformization items (probe registry, batch facade) demoted to grow-as
+T85 [correction,design,implement] Locked pure-2D oblique projection, replacing Board3D 3D-mesh spike
+   content: Overturns [T11013]'s 3D-mesh pseudo-perspective (BoxMesh terrain + tilted camera): deleted scenes/Board3D.tscn, scripts/Board3D.gd; updated docs/SPEC.md to lock pure 2D oblique projection (parallelogram tiles, extruded side faces for terrain height, upright unit standees) with vector art (self-drawn/Codex-generated SVG or CC0 assets), modern minimalist style — ink-wash not required. Built Board2D.
+T86 [research] Looked up solo-AI-dev Steam success video; no analysis delivered
+   content: User shared a Bilibili video (BV1Hvu46iEVL, "我一个人用AI做游戏 Steam新品节打败了80%的对手"); fetched video info, AI summary, and full zh subtitle transcript — author's 4-month solo AI-driven dev journey (Feb-June), treats AI collaborators as a team he coaches rather than tools, draws a career-reskilling analogy to drum-kit invention displacing multiple musicians. Response text was unrelated to the video (referenc
+T87 [research] Researched pixel-art scene-composition techniques via reference video
+   content: Fetched Bilibili tutorial BV1rm421779Z (地图编辑与优化思路), snapshots at 15s/90s/170s, and zh transcript: hue/value color variants on repeated tiles, dense-vs-sparse prop placement with negative space, non-grid "broken-shape" decorator props to break tilemap monotony, complementary-color walkability boundary semantics, triangular light/dark/off-hue grouping. Delivery dropped mid-turn — only the tail two-d
+T88 [research] Assessed pixel-art feasibility: reproducible via code as placement rules
+   content: Resent [T11044]'s dropped analysis: named 5 composition techniques from the tutorial (hue/value tile variants, dense/sparse placement w/ negative space, non-grid "broken-shape" decorator props, complementary-color walkability boundaries, triangular light/dark/hue grouping) and judged all 5 proceduralizable as placement/variant rules, not drawing. Case for pixel art: animation cost collapses to 2-4
+T89 [correction,design] User picked retro pixel + 3/4 top-down, overturning oblique/vector plan
+   content: User shared a reference image and confirmed style: retro pixel art, 3/4 top-down projection — overturns [T11022]'s locked vector-art/oblique-parallelogram plan (per [T11049], oblique+pixel causes forbidden aliasing). Locked 3-tier asset sourcing: ~80% off-the-shelf CC0/paid packs (Tiny Swords, Mystic Woods, Ninja Adventure candidates for the 6 terrain families), ~15% AI pixel generators (Retro Dif
+T93 [implement,design,research] Locked SPEC v4: motive+pixel plan written; SAN11 map layout researched
+   content: Edited docs/SPEC.md: added player-side motive paragraph to the problem statement implementing [T11071] ("难度=智能而非数值", seat-bound model/reasoning-effort as the IQ knob); changed M3's visual milestone text from oblique-vector to pixel-art (3/4 top-down, asset-pack+gen-fill pipeline, procedural placement) formalizing [T11049]/[T11052]; added a 5-point v4 修订记录 (motive, pixel pivot, art pipeline, precis
+   edges written this window (visual-style):
+   T85 --override--> T82 (tail:visual-style head:visual-style)
+   T88 --extends--> T87 (tail:visual-style head:visual-style)
+   T89 --override--> T85 (tail:visual-style head:visual-style)
+   T89 --grounds--> T88 (tail:visual-style head:visual-style)
+   T93 --grounds--> T89 (tail:visual-style head:visual-style)
+
+--- lane #map-data-extraction: 6 member turns in this window ---
+T93 [implement,design,research] Locked SPEC v4: motive+pixel plan written; SAN11 map layout researched
+   content: Edited docs/SPEC.md: added player-side motive paragraph to the problem statement implementing [T11071] ("难度=智能而非数值", seat-bound model/reasoning-effort as the IQ knob); changed M3's visual milestone text from oblique-vector to pixel-art (3/4 top-down, asset-pack+gen-fill pipeline, procedural placement) formalizing [T11049]/[T11052]; added a 5-point v4 修订记录 (motive, pixel pivot, art pipeline, precis
+T95 [research] Decoded bin-editor download link; wrote SAN11 map export recipe
+   content: Decoded the forum's base64-obfuscated "云Base" link to the community bin-file editor: pan.baidu.com/s/1XTUljdSmJN0KajLMWEZIpQ, code hrxq (post's 1.07 update also fixed a "region 92/terrain 31 read as 255" parsing bug — recommends grabbing the latest version). Wrote the extraction recipe from the forum post: open editor → File→打开bin文件 → select 萌战无双's Media/san11pkres.bin → Edit→所有信息 → yields the per
+T96 [ops] Confirmed Win machine reachable via SSH; blocked on username
+   content: Verified 192.168.1.6 (not .5, which is unreachable) has SSH(22) and RDP(3389) open, is in known_hosts from a prior connection, and a local id_rsa key exists — ready to scp the 1.5G 萌战无双4++ folder to the Win machine's Downloads once a username is known. Did not guess the login username (a permission classifier had just blocked that). Gave user a passwordless-check one-liner and two fallback paths (
+T97 [ops] Found win-ssh script, resolved username, transfer to Win machine started
+   content: User misremembered the script name as "ssh-codeclaw" — actual script is /Users/zhaoqixuan/Projects/KawaiiLLM/scripts/win-ssh (defaults to host 192.168.1.5, user makisekurisu); overrode via KAWAII_WIN_HOST=192.168.1.6, confirmed connectivity (C: has 45GB free). Kicked off a background scp of the 1.5G 萌战无双4++ folder to C:\Users\makisekurisu\Downloads\ on the Win machine — unblocks [T11082]. Once tra
+T98 [measure] Verified 萌战无双4++ transfer to Win machine byte-complete
+   content: Background scp from [T11083] finished; verified 2452 files landed at C:\Users\makisekurisu\Downloads\萌战无双4++ and san11pkres.bin's byte count matches the local copy exactly (963,812,891). Handed off to user: install the bin editor (pan.baidu.com/s/1XTUljdSmJN0KajLMWEZIpQ, code hrxq), open Media/san11pkres.bin, Edit→所有信息, export/copy the tile-info table back for the converter.
+T99 [ops,measure] Transferred bin editor v1.095 to Win machine, verified intact
+   content: Copied S11Bin文件编辑器 v1.095 (Build 20201126) to the Win machine's Downloads; byte count (4,626,838) matches local, filename mojibake was only an SSH console display artifact, not actual corruption. This build is newer than the forum's referenced v1.07, likely carrying the parsing bugfixes already. Restated the extraction procedure: unzip, open Media/san11pkres.bin, Edit→所有信息, export/copy the tile-in
+   edges written this window (map-data-extraction):
+   T95 --extends--> T93 (tail:map-data-extraction head:map-data-extraction)
+   T96 --extends--> T95 (tail:map-data-extraction head:map-data-extraction)
+   T97 --narrows--> T96 (tail:map-data-extraction head:map-data-extraction)
+   T98 --verifies--> T97 (tail:map-data-extraction head:map-data-extraction)
+   T99 --extends--> T98 (tail:map-data-extraction head:map-data-extraction)

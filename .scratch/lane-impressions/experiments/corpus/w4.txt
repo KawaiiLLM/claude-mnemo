@@ -1,0 +1,42 @@
+=== settlement window 4: turns T151-T200 ===
+
+--- lane #visual-style: 9 member turns in this window ---
+T159 [research] diagnose+san11-demo-feedback: traced path-groove art and client interaction to their owning decisions
+   content: User's two live-demo complaints diagnosed. (1) Winding sand paths are NOT tile art: render_diag.py procedurally redraws road connectivity via LOCAL_EXIT edge midpoints because tiles-gen road_*.png were baked for the old non-staggered layout (CREDITS §2.2); using them was ruled out at 004, and SPEC v7 ruled 「先就这样渲染」 with native redraw unscheduled — so no ticket owned replacing it. (2) Client intera
+T160 [design,delegate] delegate+demo-feedback-fixes: user ruled road art + research-first; two opus workers launched
+   content: User rulings: (1) 「路径直接用道路瓦片就行了，不用中间带路径这种，难看」 — road cells must be whole road tiles, the 004-era procedural mid-tile path stripe is rejected; (2) 「先考据原版交互逻辑」 — research before spec for ticket 008. Launched two parallel background opus offload-workers: A) regenerate road tiles anchored on LOCAL_EXIT midpoints for the staggered geometry, rewire render_diag, rebuild assets with pixel-verify + before/
+T164 [review,measure] verify+road-retile-delivery: art worker's rebuild independently confirmed; id() cache bug surfaced
+   content: Road retile verified hands-on: --verify rerun pixel-exact, checksums match worker claims (26590455…/ec7d4315…), geometry self-check green, 31 connectivity combos/1444 road cells, comparison panels opened for user's aesthetic acceptance (commit gated on it). Accepted two worker deviations as correct: 1489 rear-neighbor cells changed only because road tiles drop overhanging grass tufts (all diffs pr
+T168 [ops] commit+road-retile-landed: a32588c committed with cache-bug callout, demo restarted on new atlas
+   content: User accepted the new road art (「美术就用改后的」). Committed a32588c (74 files): 62 tiles-gen-diag road tiles (31 combos ×2 variants), render_diag road_sprite rewrite, rebaked assets/map 四件套, CREDITS §1 132→128 + §2.2 note; id() cache-key bug fix called out separately in the message with the 132/128/127 nondeterminism evidence. Staged by explicit path so docs/research/ (video worker still writing) and KO
+T179 [fix,ops] fix+client-window-size: default viewport was engine fallback, bumped to 1920×1080
+   content: User reported the game window too small. Root cause: project.godot never had a [display] section — client ran Godot's default 1152×648 viewport since M1. Added viewport 1920×1080, committed 5c97488, relaunched client against the running server (state preserved, rebake 210ms). Offered fullscreen/remember-size as follow-ups if wanted.
+T196 [fix,research,measure] fix+iso-map-render-resolution: blur traced to Linear filtering of 32x16 pixel tiles, nearest+mipmaps and integer zoom ladder landed
+   content: "分辨率低" = three multiplied causes, measured: tile art is natively 32x16 px (atlas 512x256, 128 sprites, bake 6392x3220) = hard detail ceiling; project.godot never overrode default_texture_filter (probed =1 Linear) so magnified pixel art is interpolated to mush; screen scale 2.0 on 4608x2592 with window sized in physical px = 960x540 points, forcing zoom-in that hits cause 2. Fixed in IsoMapView.gd 
+T197 [research] research+map-render-direction: monolith-terrain demo assessed, 3D relief blocked by absent elevation data
+   content: kaolti.github.io/monolith-terrain is three.js/WebGL extruding Mapzen/Tilezen DEM tiles (InstancedMesh, SMAA, bokeh, contours, camera tour) — an observational art piece with no cell semantics. Adopting the look is blocked by data: mapA.json cell_format is terrain/region/flags/byte4/byte9 and the 考据 note already rules byte4 "Not a height field", so relief would need invented elevation. Two counterpo
+T198 [research,measure] research+san11-k3st-heightfield: 4793.K3ST decoded as mapA elevation, 4x4 samples per cell
+   content: 4793.K3ST (16.8MB, the untouched "probably the height field" lead in mapA-notes §7) is confirmed as mapA's terrain elevation: header K3ST0006, 8-byte records, two 1025x1024 vertex blocks; block B lane0 = height 0-249 in 62 quantized steps. Alignment came from a normalized cross-correlation search over scale and offset against the land mask: peak exactly at 4.0 lattice px per map cell (r=0.668), th
+T199 [implement,measure] implement+height-shaded-map: hillshade preview from K3ST delivered, elevation-vs-combat evidence gap pinned
+   content: Option A (2D tiles × K3ST hillshade) rendered offline and shown: per-cell 4x4 heights → map-space gradient → screen-space light via the isometric chain rule (M=[[-16,16],[8,8]], ∇_s h=(M⁻¹)ᵀ∇_p h), flat ground normalized to 1.0 so water and plains keep their exact original tone. Terraced shadows come from the 62 quantized height steps, matching the original's stepped mountains. Zero art, zero arch
+   edges written this window (visual-style):
+   T160 --override--> T133 (tail:visual-style head:visual-style)
+   T160 --grounds--> T159 (tail:visual-style head:visual-style)
+   T164 --verifies--> T160 (tail:visual-style head:visual-style)
+   T168 --grounds--> T164 (tail:visual-style head:visual-style)
+   T196 --grounds--> T179 (tail:visual-style head:visual-style)
+   T197 --grounds--> T101 (tail:visual-style head:map-data-extraction)
+   T197 --grounds--> T196 (tail:visual-style head:visual-style)
+   T198 --override--> T197 (tail:visual-style head:visual-style)
+   T199 --consume--> T? (tail:visual-style head:client-interaction)
+   T199 --extends--> T198 (tail:visual-style head:visual-style)
+
+--- lane #map-data-extraction: 2 member turns in this window ---
+T198 [research,measure] research+san11-k3st-heightfield: 4793.K3ST decoded as mapA elevation, 4x4 samples per cell
+   content: 4793.K3ST (16.8MB, the untouched "probably the height field" lead in mapA-notes §7) is confirmed as mapA's terrain elevation: header K3ST0006, 8-byte records, two 1025x1024 vertex blocks; block B lane0 = height 0-249 in 62 quantized steps. Alignment came from a normalized cross-correlation search over scale and offset against the land mask: peak exactly at 4.0 lattice px per map cell (r=0.668), th
+T199 [implement,measure] implement+height-shaded-map: hillshade preview from K3ST delivered, elevation-vs-combat evidence gap pinned
+   content: Option A (2D tiles × K3ST hillshade) rendered offline and shown: per-cell 4x4 heights → map-space gradient → screen-space light via the isometric chain rule (M=[[-16,16],[8,8]], ∇_s h=(M⁻¹)ᵀ∇_p h), flat ground normalized to 1.0 so water and plains keep their exact original tone. Terraced shadows come from the 62 quantized height steps, matching the original's stepped mountains. Zero art, zero arch
+   edges written this window (map-data-extraction):
+   T197 --grounds--> T101 (tail:visual-style head:map-data-extraction)
+   T198 --extends--> T103 (tail:map-data-extraction head:map-data-extraction)
+   T199 --extends--> T198 (tail:map-data-extraction head:map-data-extraction)

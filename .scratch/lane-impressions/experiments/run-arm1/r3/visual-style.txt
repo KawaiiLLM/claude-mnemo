@@ -1,0 +1,5 @@
+REPLACE
+SAN11 visual-fidelity lane: 2:1 isometric drawn as diagonal-brick diamond tiles, overturning the earlier 3/4 top-down lock (S18993/T105, T124, T125), on odd-r hex adjacency — the identical projection (T103) — over the CC BY 4.0 scrabling pack (T104); ticket 004's rendering spec is written and its six acceptance criteria hand-verified (T135, T149).
+Causal law: top-down reading is geometry, not style — axis-aligned gridlines cause it, not 2:1 foreshortening; diagonal gridlines with half-offset T-junctions make the stagger visible (S18993/T124, T125).
+Binding: visible stagger is mandatory or the asset is void (S18993/T119); tile form locked on collage tiles, native regen unscheduled; officer stats and portraits from the 萌战 package (T133).
+Frontier: the diagonal formula exists only in the offline Python render; the Godot viewer still runs the no-stagger placement until ticket 004 amends (S18993/T132); art track closed, tickets 001 and 003 open (T135).

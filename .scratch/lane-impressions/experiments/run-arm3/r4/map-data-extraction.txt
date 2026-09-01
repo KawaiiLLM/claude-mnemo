@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 map-data-extraction lane: san11pkres.bin decoded as SHEX — 200x200 cells, terrain+region per cell, two embedded maps (S18993/T101). mapA is the build target over mirror-defective mapB (T102). Hex adjacency is odd-r, proven via city-flower parity (T103). mapA.json plus tooling delivered, verified 42/42 cities; mapB conversion remains open (T103). Elevation is now decoded too: 4793.K3ST, 1025x1024 vertex blocks in 62 quantized height steps, aligned at exactly 4.0 lattice px per cell (T198).

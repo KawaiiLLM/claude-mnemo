@@ -1,0 +1,6 @@
+REPLACE
+SAN11 visual-fidelity lane: 2:1 isometric diagonal-brick diamond tiles on odd-r hex adjacency (S18993/T103, T125) over the CC BY 4.0 scrabling pack (T104), officer stats and portraits from the 萌战 package (T133); road art is now whole connected road tiles, committed (T160, T168), and the 32x16 blur is fixed by nearest+mipmap integer zoom (T196).
+Causal law: top-down reading is geometry, not style — axis-aligned gridlines cause it, not 2:1 foreshortening; diagonal gridlines with half-offset T-junctions make the stagger visible (S18993/T124, T125).
+Render quality is configuration, not art: 32x16 native tiles, default Linear filtering and a 2.0 screen scale multiplied into the blur (S18993/T196); a missing [display] section left the client at 1152×648 (T179).
+Binding: visible stagger is mandatory or the asset is void (S18993/T119); road cells are whole road tiles, never the 004-era procedural stripe (T160, T168); collage tile form locked, native regen unscheduled.
+Frontier: K3ST is mapA's elevation (S18993/T198), overturning the "relief needs invented data" verdict (T197); the hillshade is an offline preview only — client integration and any elevation-combat rule stay open (T199).

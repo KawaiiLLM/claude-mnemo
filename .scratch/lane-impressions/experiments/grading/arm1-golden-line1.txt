@@ -1,0 +1,1 @@
+The SAN11 visual-fidelity lane: the look is locked and shipped through ticket 004 — 2:1 isometric with diagonal-brick diamond tiles (S18993/T125, T149), connected road tiles (S18993/T160, T168), officer stats and portraits from the 萌战 package (S18993/T133) — and the original's elevation data is decoded (S18993/T198) but its client integration and combat meaning remain open.

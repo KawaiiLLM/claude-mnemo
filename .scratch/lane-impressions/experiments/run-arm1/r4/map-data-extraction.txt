@@ -1,0 +1,3 @@
+REPLACE
+SAN11 map-data lane: SHEX is cracked — 200×200 cells, terrain and ownership decoded — and mapA converts to engine JSON, 42/42 city flowers confirming odd-r adjacency (S18993/T101, T103); 4793.K3ST is mapA's elevation, 4x4 heights per cell (T198).
+Causal law: decoding beat the Windows-only reader, a spent source; mirror-defective mapB waits on mapA's converter (S18993/T102).

@@ -1,0 +1,3 @@
+REPLACE
+SAN11 map-data lane: tile data must be pulled from the game package's san11pkres.bin by a Windows-only editor; package and editor are byte-verified on the Win box (S18993/T98, T99), export still pending.
+Causal law: the reader is Windows-only, so this line is transfer-and-handoff, not decoding; the extraction recipe is written (S18993/T95).

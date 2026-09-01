@@ -1,0 +1,2 @@
+REPLACE
+120ms end-to-end (capture 25/transform 60/playback 35) is a ruling not a measurement — legs reallocate only via new ruling (S22040/T41). Capture landed (T44). Transform's cost was misdiagnosed as the FFT; profiling found the resampler's per-block coefficient recompute costs 48 of 74ms, overriding T41 (T51). A precomputed-coefficient prototype cuts transform to 21ms, bit-identical, but is UNWIRED — /tmp only, memory cost unmeasured (T57). Playback's 35ms is unexamined, deferred not accepted (T60).

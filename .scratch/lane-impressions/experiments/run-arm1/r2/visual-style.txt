@@ -1,0 +1,3 @@
+REPLACE
+SAN11 visual-fidelity lane: style is locked as retro pixel art in 3/4 top-down, formalized in SPEC v4 (S18993/T89, T93) over the earlier oblique/vector lock (T85).
+Causal law: pixel plus oblique aliases, so art choice fixes projection (S18993/T89); composition proceduralizes as placement rules, not drawing (T88).

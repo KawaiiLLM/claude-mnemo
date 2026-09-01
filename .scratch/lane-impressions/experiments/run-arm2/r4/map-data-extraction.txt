@@ -1,0 +1,2 @@
+REPLACE
+SAN11 map-data-extraction lane: pkres.bin's SHEX format is reverse-engineered, revealing mapB, a second embedded map (S18993/T101); mapA is picked over mirror-defective mapB, converted to mapA.json + tools/ (T102), odd-r hex adjacency locked by a 42/42-city proof (T103); 4793.K3ST decoded as mapA's elevation (T198) — mapB's conversion, engine integration, elevation-combat rule stay open (T199).

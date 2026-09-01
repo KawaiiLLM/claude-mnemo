@@ -1,0 +1,4 @@
+REPLACE
+Latency lane: 120ms total, split capture 25 / transform 60 / playback 35 by ruling — legs trade, the total never grows (S22040/T41); capture landed under its leg (T44).
+Transform's cost is the coefficient recompute, not the FFT (S22040/T51).
+Open: the fix stays a /tmp prototype (S22040/T57); playback's 35ms deferred, unexamined (T60).

@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 visual-style lane: pixel art, 3/4 top-down is locked as M3's visual milestone in SPEC v4 (S18993/T89, T93), overriding the earlier oblique 2.5D vector/Board2D plan (S18993/T82, T85) — oblique+pixel causes forbidden aliasing; pixel art was also judged proceduralizable via placement rules, not drawing (S18993/T88). 3-tier asset sourcing locked: ~80% CC0/paid packs, ~15% AI pixel generators (S18993/T89). The placement pipeline remains design-only.

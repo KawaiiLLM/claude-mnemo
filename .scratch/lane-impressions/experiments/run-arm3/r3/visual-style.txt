@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 visual-style lane: locked to 2:1 isometric, diagonal-brick diamond tiles with visible stagger (S18993/T124, T125), reversing the earlier 3/4-top-down pick (S18993/T105). Top-down misreads trace to axis-aligned gridlines, not foreshortening — a yawed diagonal grid over brick-square ground yields the stagger (S18993/T119, T124). MVP scope: cities/corps/combat, tickets 001-004 (S18993/T122); officer portraits from 萌战 (S18993/T133). Ticket 004 verified, commit staged not landed (S18993/T149).

@@ -1,0 +1,83 @@
+=== settlement window 3: turns T101-T150 ===
+
+--- lane #visual-style: 21 member turns in this window ---
+T103 [design] Locked odd-r hex adjacency; hex and isometric projection are identical
+   content: Opus worker [T11091] delivered mapA.json (engine intermediate format) + mapA-notes.md + reusable tools/ scripts, verified: 42/42 cities are 7-tile hex flowers, 35 ports, 10 passes all road-adjacent. Locked adjacency convention as odd-r offset hex with mathematical proof — city-flower shape flips by row parity (only an adjacency rule can do that, not art), and odd-r scores 42/42 vs 0/42 for the oth
+T104 [research,delegate] Cleared tileset licensing block; dispatched Codex to fill gap tiles
+   content: Resolved [T11097]'s licensing blocker: the isometric tileset traces to scrabling.itch.io/pixel-isometric-tiles, licensed CC BY 4.0 — commercial use allowed, attribution not required, modification allowed, only restriction is no standalone redistribution of the assets themselves (fine for a shipped game). Dispatched a background Codex worker to generate the missing ~40-60 tiles matching the referen
+T105 [correction,design] Locked isometric (2:1) projection game-wide, overturning 3/4 top-down pick
+   content: Identified the downloaded tileset as true 2:1 dimetric isometric (Into the Breach-style: 32×32 canvas, top-face diamond in rows 8-23, 8px extruded side below) — distinct from both the 3/4 top-down reference (曹操传/tutorial video) and 明日方舟's 3D perspective camera. This reverses [T11052]'s "3/4 top-down" projection pick back to isometric, since [T11097] already proved odd-r hex adjacency and 2:1 isome
+T106 [design] Set art north-star reference: same isometric, dark palette + density
+   content: User's second reference image (chinese-style isometric game, likely 大江湖之苍龙与白鸟) confirmed as the same 2:1 isometric projection as [T11103]'s locked choice — no projection change, but designated as the art-direction north star. Named 4 concrete, roadmappable techniques to close the gap from the base scrabling pack [T11101]: (1) dark low-saturation palette + red accent color, achievable via programma
+T107 [review] Verified pipeline end-to-end; cliff rendering flagged as worst gap
+   content: Reviewed Codex's [T11101] gap-fill delivery (89 new tiles): roads render as genuinely connected lines (31 hex-direction combos, 1410 adjacent edges self-checked with zero misalignment), cities read clearly (2-tier center-keep+outer-district render), ports/passes recognizable, style matches the base pack (palette sampled, no-outline/row-count constraints held), 2-4 variants per terrain using the by
+T108 [fix,research] Widened road tiles; confirmed official movement costs for M4
+   content: Fixed road rendering per user critique (too thin, should read as a dedicated wide lane): widened the road band from 6px to 13px core, drawn on a separate layer and clipped to the top-face diamond mask (unclipped, the wide line bled onto the side extrusion) — regenerated tiles-gen/contact_sheet.png and preview_mapA_iso2_zoom.png. One known cosmetic tradeoff left: vertex-adjacent (top/bottom) road c
+T109 [research,discuss] Evaluated Autumn Forest asset pack; dispatched Godot viewer worker
+   content: User proposed splitting into parallel mechanic/art tracks and shared a reference asset (Seliel the Shaper's "Autumn Forest" pixel tileset). Researched: paid pack ($19.99, or $39.95 for a 4-season bundle), Mana Seed User License (commercial use permitted, attribution required, 100%-human-made/no-AI), and — unlike the strategic-layer isometric pack — appears to be 3/4 top-down, raising an open quest
+T117 [design] Ruling+gameplay: player = single avatar, all other officers AI; letter-delayed intel
+   content: User three-point pivot: ①asked whether 六角 meant action slots and noted our rendered tiles show no 错位 (seeded the stagger investigation); ②gameplay = 任命/指挥/用人 like roleplay-era SAN titles/舰队collection — player plays one avatar, every other officer is AI (LLM cost set aside), subordinates may 背叛/抗命/能力不足; ③intel via delayed 书信, fog as human cognition. Landed as SPEC v6② post-MVP direction records.
+T118 [correction,design] design+gameplay: three auto-battler loops; conceded diamond render shows no stagger
+   content: User observed our render has no visible stagger — correct: retracted my earlier T-junction claim for diamond packing. Visible hex evidence is adjacency derivatives only (city 7-flower hexagon outlines, 6-direction movement). Mapped auto-battler/KanColle fun onto three loops: 用人 (variance from personality, not RNG), 委任观战 (attributable war reports — 「败因：张飞抗命」), 养成 (deferred M4+); player verbs 任命/编成/
+T119 [discuss] Design+art: tile-stagger options debated under user's 「不然这个素材不成立」 hard requirement
+   content: Text-only turn in the stagger debate: compared placement-formula options for making 错位 visible on the odd-r 200×200 map (interlock diamonds vs brick-staggered rects vs edge-direction slide), against the user's ruling that visible stagger is mandatory or the isometric asset is invalid. No tools ran; conclusions materialized in the later brick-geometry and diagonal-brick turns (brick rects falsified
+T120 [design,delegate] implement+delegation: brick-rect geometry pinned, sample-gen worker launched
+   content: User ruled MVP mechanics stay minimal (任命+委任+战报 only). Pinned brick spec: 32×16 top face, sx=y*32, sy=x*16+(y&amp;1)*8, road exits U(16,0)/D(16,16)/UR(32,4)/LR(32,12)/UL(0,4)/LL(0,12); regeneration needed but cheap — all 89 diamond tiles are parametric-script products, palettes reusable, building sprites re-basable. Launched a sonnet offload-worker to build generate_tiles_brick.py + render_brick.p
+T121 [review,measure] review+delivery: verified brick-rect sample against diamond baseline, shipped comparison
+   content: Worker's brick sample passed my re-verification: gap-pixel recheck 0 over the 10M-px interior; N-S road crops show diamond version beading (vertex-touching blobs) vs brick's unbroken band; city 7-flowers render as hex blobs; zoom window provably identical via imported pick_zoom (xs 130-166, ys 28-64). Delivered with four disclosed sample flaws: single water family, diamond-era building sprites on 
+T122 [design,review] design+fix: MVP cut to cities/corps/combat; flat sample faulted as top-down, decoration pass launched
+   content: User rulings: ① MVP drops 任命/委任/可归因战报 too — scope is 城池、军团、战斗机制 only, which maps exactly onto tickets 001–004; SPEC v6 player-experience clauses demoted to post-MVP direction records. ② 「你这不是俯视图吗，素材都没用上」 — the flat brick sample reads top-down because oblique feel = foreshortening (already in 32×16) + standing elevation art (trees/boulders/buildings/shore banks), which the flat sample omitted entir
+T123 [review,measure] review+delivery: verified decorated brick sample, shipped with four asset-level flaws
+   content: Worker's decoration pass verified: standing boulders/bushes/buildings restore height cues, stagger visible in the grid-line variant, N-S road continuous, my interior-leak re-run = 0 (rows 40–3231). Delivered with honest flaws: zoom window is 529/1296 cliff cells so the scene reads gray; reference-pack rocks 72–83 carry a baked wet blue fringe making inland boulders look soaked; water is a LANCZOS-
+T124 [correction,design] fix+geometry: top-down root cause = axis-aligned gridlines; derived diagonal-brick diamond projection
+   content: User's 「为什么是俯视」 exposed my error: oblique reading comes from DIAGONAL gridlines (camera yaw), not from 2:1 foreshortening — axis-aligned brick rects read top-down regardless of standing sprites. Also retracted my "rhombus tiling is unique / diamonds can't stagger" claim: rhombi slide half-a-step along their own edge direction, and projecting SAN11's brick-square ground through a yawed camera yield
+T125 [review,measure] review+delivery: diagonal-brick diamond render verified, art direction converged
+   content: Verified the diag render: my re-run of check_diag_geometry.py passed (25600/25600 pixels covered exactly once; 6-neighbor shared edges 16/16/9/8/8/9 px both parities); grid crop shows both line families diagonal with half-offset T-junctions = SAN11-isomorphic stagger; roads continuous, cities intact, leak 0, all iso2 assets reused unmodified. Worker's step-0 gate had caught a real 220-px double-co
+T126 [implement] write+spec: folded session rulings into SPEC v6, reported program-track doc status
+   content: User asked whether program-track docs/tickets are done. State: SPEC was v5 + tickets 001–005 written pre-compact, but this session's rulings weren't folded in. Added v6 revision block: ① MVP locked to 城池/军团/战斗 = tickets 001–004, 005 deferred; ② post-MVP direction records (player single-avatar seat + all-AI officers, auto combat + delegation loops, letter-delay intel, per-旬 bounded actions; v5② spa
+T132 [design] Docs+art: identified shown render as offline diag candidate; 战场设施 deferred
+   content: Clarified the user-shown preview_mapA_diag_zoom_grid.png is the Python offline candidate render of the diagonal-brick formula — Godot viewer still runs the old no-stagger formula until ticket 004 amends; pointed to the T-junction diagonal family as the stagger evidence. User ruling 「战场设施暂不考虑」 landed in SPEC v7: dropped from the M4 milestone line, not folded into 007, separate ticket if ever needed
+T133 [design] Ruling+docs: tile form confirmed as-is; officer stats+portraits from 萌战 package
+   content: 「地图的美术先就这样渲染」 locked diagonal-brick diamonds with current collage tiles, native tile regen unscheduled → SPEC v7 + ticket 004 gained a definitive rendering-spec section (placement/picking/road-exit formulas, ground-truth scripts, half-open mask condition). 「武将可以直接用萌战无双的数值和头像」 → SPEC v7 + ticket 003 gained portraits-extraction requirement and acceptance; KOEI ban unchanged, mod fan-art display-lice
+T135 [implement] implement+tile-portrait-rulings: T133's rulings written into SPEC v7/ticket 004/ticket 003, art track closed, frontier = 001+003
+   content: Executed both rulings from [S18993/T133] into docs. Tile-form ruling: SPEC v7 gained the addendum "地图美术先就这样渲染"; ticket 004 gained a definitive "渲染规格(定案)" section — placement formula (sx=(v−u)·16, sy=(v+u)·8), cell-center/picking inverse, hex shared-edge property, road-exit-as-shared-edge-midpoint rule, half-open diamond mask condition — with the old non-staggered y-only plan marked void and ground
+T149 [review,measure,delegate] verify+t004-acceptance: all six criteria hand-verified, codex review launched, commit set staged
+   content: Re-ran pytest (111 green), cross-language geometry digests byte-identical (440k pick round-trip zero fail), smoke log + screenshots confirm march/siege flow and 12/37 off-view report entries; grep proves no refs/ runtime dependency. Commit-scope findings: build pipeline's import closure (render_diag/render_iso2/tilegen trio + tiles-gen 91 PNGs + refs/.gdignore) was untracked — staged it for reprod
+   edges written this window (visual-style):
+   T104 --extends--> T102 (tail:visual-style head:map-data-extraction)
+   T104 --extends--> T103 (tail:visual-style head:visual-style)
+   T105 --override--> T89 (tail:visual-style head:visual-style)
+   T105 --grounds--> T103 (tail:visual-style head:visual-style)
+   T106 --extends--> T105 (tail:visual-style head:visual-style)
+   T107 --verifies--> T106 (tail:visual-style head:visual-style)
+   T108 --extends--> T107 (tail:visual-style head:visual-style)
+   T109 --extends--> T108 (tail:visual-style head:visual-style)
+   T117 --narrows--> T105 (tail:visual-style head:visual-style)
+   T118 --override--> T117 (tail:visual-style head:visual-style)
+   T119 --extends--> T118 (tail:visual-style head:visual-style)
+   T120 --narrows--> T119 (tail:visual-style head:visual-style)
+   T121 --verifies--> T120 (tail:visual-style head:visual-style)
+   T122 --override--> T121 (tail:visual-style head:visual-style)
+   T123 --narrows--> T122 (tail:visual-style head:visual-style)
+   T124 --override--> T123 (tail:visual-style head:visual-style)
+   T125 --verifies--> T124 (tail:visual-style head:visual-style)
+   T126 --indexes--> T120 (tail:visual-style head:visual-style)
+   T126 --indexes--> T124 (tail:visual-style head:visual-style)
+   T126 --indexes--> T125 (tail:visual-style head:visual-style)
+   T132 --narrows--> T125 (tail:visual-style head:visual-style)
+   T133 --verifies--> T125 (tail:visual-style head:visual-style)
+   T135 --grounds--> T133 (tail:visual-style head:visual-style)
+   T149 --verifies--> T125 (tail:visual-style head:visual-style)
+
+--- lane #map-data-extraction: 3 member turns in this window ---
+T101 [research] Cracked SHEX map format; confirmed hex adjacency, found 2nd embedded map
+   content: Reverse-engineered the SAN11 SHEX binary tile format from exported bin-editor files: 8-byte header + 200×200 cells × 11 bytes/cell (byte[0]=terrain id, 20 distinct values, render-verified; byte[1]=region ownership, 93 distinct ≈ 42 cities+10 passes+35 ports+borders; remaining bytes are sparse trap/bandit/flood flags). Found the 963MB san11pkres.bin contains TWO SHEX maps (signature appears twice) 
+T102 [design,delegate] Picked mapA over mirrored mapB; dispatched Opus worker to build it
+   content: Resolved [T11089]'s open map choice: mapB (China candidate) has flip/mirror defects, so proceed with mapA (mod fantasy continent) first — mapB will reuse the same converter once mapA's pipeline works. Introduced a new asset candidate (/Users/zhaoqixuan/Downloads/isometric tileset) for evaluation. Dispatched a background Opus worker (async) to: (1) pin down the hex-adjacency convention by per-city 
+T103 [design] Locked odd-r hex adjacency; hex and isometric projection are identical
+   content: Opus worker [T11091] delivered mapA.json (engine intermediate format) + mapA-notes.md + reusable tools/ scripts, verified: 42/42 cities are 7-tile hex flowers, 35 ports, 10 passes all road-adjacent. Locked adjacency convention as odd-r offset hex with mathematical proof — city-flower shape flips by row parity (only an adjacency rule can do that, not art), and odd-r scores 42/42 vs 0/42 for the oth
+   edges written this window (map-data-extraction):
+   T101 --extends--> T99 (tail:map-data-extraction head:map-data-extraction)
+   T102 --narrows--> T101 (tail:map-data-extraction head:map-data-extraction)
+   T103 --extends--> T102 (tail:map-data-extraction head:map-data-extraction)
+   T104 --extends--> T102 (tail:visual-style head:map-data-extraction)

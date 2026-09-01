@@ -1,0 +1,2 @@
+REPLACE
+The SAN11 map-data-extraction lane: san11pkres.bin (963MB) decoded as the SHEX binary format — 200×200 cells, terrain id + region ownership per cell, containing two embedded maps (S18993/T101). mapA is the build target, picked over the mirror-defective mapB, deferred to reuse mapA's pipeline (S18993/T102). Hex adjacency locked odd-r, proven via city-flower row-parity; hex and isometric projection are identical (S18993/T103). mapA.json plus tooling delivered and verified (42/42 cities) — closing the prior converter-export gap; mapB conversion open (S18993/T103).
