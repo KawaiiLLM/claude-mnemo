@@ -488,6 +488,36 @@ export function resetTurnExtractionFields(
   }
 }
 
+/**
+ * The turns named by `turnIds`, in the SAME prompt-number order
+ * `getTurnsForSession` returns — so a caller that only wants a handful of a
+ * session's turns reads a handful of rows instead of the whole session
+ * (first-settlement-feedback ticket 02: `renderGroupedSearchResults` ran this
+ * read once per page-boundary probe, and on a 2,365-turn session that whole-
+ * session scan, not the rendering, was the per-probe cost). Identical
+ * mapping and null-filtering, so the result is exactly the subsequence
+ * `getTurnsForSession(...).filter(turn => ids.has(turn.id))` produces.
+ *
+ * `turnIds` is expected to be page-sized (one page's hits at most). Duplicates
+ * are harmless — `IN` collapses them.
+ */
+export function getTurnsByIds(
+  db: Database,
+  turnIds: readonly number[],
+): TurnRecord[] {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  return db
+    .query<TurnRow, number[]>(
+      `${TURN_SELECT} WHERE id IN (${placeholders}) ORDER BY prompt_number ASC`,
+    )
+    .all(...turnIds)
+    .map((row) => mapTurnRow(row))
+    .filter((turn): turn is TurnRecord => turn !== null);
+}
+
 export function getTurnsForSession(
   db: Database,
   sessionId: number,

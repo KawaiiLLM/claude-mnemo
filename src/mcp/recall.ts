@@ -29,6 +29,7 @@ import {
   getFirstTurn,
   getTurn,
   getTurnById,
+  getTurnsByIds,
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
@@ -914,7 +915,7 @@ function paginateItems<T>(
   items: T[],
   page: number,
   pageSize: number,
-): { items: T[]; total: number; pageCount: number } {
+): { items: T[]; total: number; pageCount: number; pageCountExact: boolean } {
   const total = items.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const offset = (page - 1) * pageSize;
@@ -923,6 +924,10 @@ function paginateItems<T>(
     items: items.slice(offset, offset + pageSize),
     total,
     pageCount,
+    // A pure `pageSize` cut prices nothing: this count is arithmetic on a
+    // length and is always exact (see `paginateByRenderedPageCost` for the
+    // sibling where it is not).
+    pageCountExact: true,
   };
 }
 
@@ -946,60 +951,184 @@ function paginateItems<T>(
  * read grants or mutates a `TruncationSignal` passes `readerId: null` /
  * `signal: undefined` here and performs the real, once-only render (with
  * the real values) against the chosen page's items afterward.
+ *
+ * ------------------------------------------------------------------------
+ * FIRST-SETTLEMENT-FEEDBACK TICKET 02 (user ruling S15069/T2367,
+ * 过滤分页器也改进下). Two independent inefficiencies lived here, and together
+ * they made `recall(filter={session:"15069",…}, pageSize:100, page:1)` take
+ * 6 minutes 10 seconds in production (job 170) to return `page 1 / 4612` —
+ * 62% of a 10-minute settlement lease, on a job already on its last attempt.
+ *
+ *   1. EAGER OVER ALL PAGES. Every item was packed so `pageCount` could be
+ *      exact, even when the caller asked for page 1. `maxPages` now stops
+ *      the fold as soon as the requested page is complete. Packing is a
+ *      strictly left-to-right greedy fold, so stopping early cannot move a
+ *      boundary at or before the page that was asked for — the returned
+ *      page is byte-identical to what the exhaustive fold produced.
+ *
+ *   2. QUADRATIC WITHIN A PAGE. Each candidate item re-rendered the WHOLE
+ *      accumulating page (and on the session routes each item render is its
+ *      own `renderSessionDetail`, with its own reads), so a page of k items
+ *      cost ~k²/2 item renders. Now every item is rendered ALONE exactly
+ *      once, and the whole-page render runs only when the cheap bound below
+ *      cannot settle the question.
+ *
+ * THE CHEAP BOUND, and why it does not move a single boundary. These
+ * renderers GROUP: `renderTurnScope` emits one session header above the
+ * turns of that session, `renderGroupedSearchResults` folds every hit for a
+ * session under one block, `renderObservationScope` renders each parent
+ * once. Grouping can only DEDUPLICATE — the page holding both items never
+ * contains more than the two pages holding each alone — so
+ *
+ *     R(renderPage(A ∪ {x})) ≤ R(renderPage(A)) + R(renderPage([x])) + ¼
+ *
+ * where R is `estimateTokens`' unrounded character-class value and the ¼ is
+ * the one extra `\n` the join adds (a newline costs one `rest` character,
+ * priced at ¼ of a token; blocks are `\n`-joined, so a space RUN can never
+ * merge across the seam and every block prices identically alone or in
+ * company). `estimateTokens` is `Math.ceil` of R, and ceil(a) + ceil(b) + 1
+ * ≥ ceil(a + b + ¼), so carrying an integer upper bound and adding
+ * `PAGE_JOIN_TOKEN_SLACK` keeps it an upper bound. When the bound says the
+ * candidate FITS, it fits — no render needed. When it cannot say so, the
+ * exact whole-page render decides, exactly as before, and its result
+ * replaces the bound (tightening it back to the truth). Every accept/split
+ * decision is therefore either proven by a sound upper bound or taken by the
+ * unchanged exact measurement: the boundaries are the old boundaries.
+ * `tests/mcp/recall.pager.test.ts` pins that equivalence against a reference
+ * implementation of the old fold, and pins the render counts that make the
+ * two repairs visible.
  */
-function packItemsByRenderedPageCost<T>(
+/**
+ * The `\n` the page join inserts between an item's own blocks and the rest of
+ * the page, rounded up to a whole token — see the subadditivity argument
+ * above. One token, not ¼: the bound is carried as an integer.
+ */
+const PAGE_JOIN_TOKEN_SLACK = 1;
+
+export function packItemsByRenderedPageCost<T>(
   items: readonly T[],
   pageSize: number,
   pageBudget: number,
   renderPage: (pageItems: T[]) => string,
-): T[][] {
+  /** Stop once this many pages are complete. Omitted = pack every item. */
+  maxPages?: number,
+): { pages: T[][]; complete: boolean } {
   const pages: T[][] = [];
   let current: T[] = [];
+  /** An integer UPPER BOUND on `estimateTokens(renderPage(current))`. */
+  let currentBound = 0;
+  let stoppedEarly = false;
+
+  const openPage = (item: T, cost: number): void => {
+    current = [item];
+    currentBound = cost;
+  };
 
   for (const item of items) {
-    const candidate = [...current, item];
-    const overflowsCount = current.length >= pageSize;
-    const overflowsBudget =
-      current.length > 0 && estimateTokens(renderPage(candidate)) > pageBudget;
+    if (maxPages !== undefined && pages.length >= maxPages) {
+      stoppedEarly = true;
+      break;
+    }
 
-    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+    // ONE render per item, ever: its own cost, alone, which is also exactly
+    // the cost of the page it opens when the current page has to close.
+    const itemCost = estimateTokens(renderPage([item]));
+
+    if (current.length === 0) {
+      openPage(item, itemCost);
+      continue;
+    }
+
+    // A page always holds at least one item, so a single oversized item can
+    // never stall pagination — unchanged.
+    if (current.length >= pageSize) {
       pages.push(current);
-      current = [item];
+      openPage(item, itemCost);
+      continue;
+    }
+
+    const bound = currentBound + itemCost + PAGE_JOIN_TOKEN_SLACK;
+    if (bound <= pageBudget) {
+      current.push(item);
+      currentBound = bound;
+      continue;
+    }
+
+    const exact = estimateTokens(renderPage([...current, item]));
+    if (exact > pageBudget) {
+      pages.push(current);
+      openPage(item, itemCost);
     } else {
-      current = candidate;
+      current.push(item);
+      currentBound = exact;
     }
   }
-  if (current.length > 0 || pages.length === 0) {
+
+  if (!stoppedEarly && (current.length > 0 || pages.length === 0)) {
     pages.push(current);
   }
-  return pages;
+  return { pages, complete: !stoppedEarly };
 }
+
+/**
+ * Above this many candidate items the page COUNT stops being computed
+ * exactly (ticket 02). An exact count costs one render per item in the whole
+ * set; below this limit that is a tenth of a second even on the heaviest
+ * route measured, and every result set an agent actually pages through sits
+ * far below it. Above it — the 2,166- and 12,874-item sets this ticket
+ * exists for — the count becomes a stated LOWER BOUND rather than a number
+ * that looks exact and is not.
+ */
+const EXACT_PAGE_COUNT_ITEM_LIMIT = 200;
 
 /**
  * `paginateItems`'s pageBudget-aware sibling (ticket 03). Same offset
  * semantics as `paginateItems` — an out-of-range `page` yields an empty
- * slice, `pageCount` still the true page count, no clamping — but the page
- * boundary itself comes from `packItemsByRenderedPageCost` instead of a
- * pure `pageSize` cut.
+ * slice, no clamping — but the page boundary itself comes from
+ * `packItemsByRenderedPageCost` instead of a pure `pageSize` cut.
+ *
+ * `total` is always EXACT: it is the candidate count, and costs nothing.
+ * `pageCount` is exact whenever the fold consumed every item — which it does
+ * for any set at or under `EXACT_PAGE_COUNT_ITEM_LIMIT`, and for any request
+ * that reaches the last page. Otherwise the fold stops at the requested page
+ * and `pageCount` is a LOWER BOUND, flagged by `pageCountExact: false` so
+ * the header can say `≥N` instead of printing an estimate as if it were the
+ * count (ticket 02's own instruction: never silently print an exact-looking
+ * number that is not one).
  */
-function paginateByRenderedPageCost<T>(
+export function paginateByRenderedPageCost<T>(
   items: readonly T[],
   page: number,
   pageSize: number,
   pageBudget: number,
   renderPage: (pageItems: T[]) => string,
-): { items: T[]; total: number; pageCount: number } {
-  const pages = packItemsByRenderedPageCost(items, pageSize, pageBudget, renderPage);
+): { items: T[]; total: number; pageCount: number; pageCountExact: boolean } {
+  const { pages, complete } = packItemsByRenderedPageCost(
+    items,
+    pageSize,
+    pageBudget,
+    renderPage,
+    items.length <= EXACT_PAGE_COUNT_ITEM_LIMIT ? undefined : Math.max(1, page),
+  );
   const index = page - 1;
   return {
     items: index >= 0 && index < pages.length ? pages[index]! : [],
     total: items.length,
-    pageCount: pages.length,
+    // Stopping early means at least one item is left over, so at least one
+    // more page exists: `pages.length + 1` is a bound the data supports.
+    pageCount: complete ? pages.length : pages.length + 1,
+    pageCountExact: complete,
   };
 }
 
-function formatPageHeader(page: number, pageCount: number, total: number): string {
-  return `page ${page} / ${pageCount} (total ${total})`;
+function formatPageHeader(
+  page: number,
+  pageCount: number,
+  total: number,
+  pageCountExact = true,
+): string {
+  const count = pageCountExact ? `${pageCount}` : `≥${pageCount}`;
+  return `page ${page} / ${count} (total ${total})`;
 }
 
 function joinPage(header: string, body: string, pageCount: number): string {
@@ -1998,11 +2127,13 @@ function renderGroupedSearchResults(
     // render in RELEVANCE order (best rank first), not `getTurnsForSession`'s
     // chronological one — ties (a turn with no direct relevance entry, e.g.
     // pulled in only via an observation hit) fall back to prompt order.
-    const turns = getTurnsForSession(db, session.id)
-      .filter(
-        (turn) =>
-          group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id),
-      )
+    // Ticket 02: exactly this group's hit turns, by id — the same rows, in the
+    // same prompt-number order, that `getTurnsForSession(...).filter(...)`
+    // selected, without reading every turn the session ever had once per
+    // page-boundary probe.
+    const turns = getTurnsByIds(db, [
+      ...new Set([...group.turnIds, ...group.observationIdsByTurnId.keys()]),
+    ])
       .sort((left, right) => {
         const leftRank = relevanceRank.get(left.id) ?? Number.POSITIVE_INFINITY;
         const rightRank = relevanceRank.get(right.id) ?? Number.POSITIVE_INFINITY;
@@ -2152,7 +2283,7 @@ function renderSegmentMemberOrdinals(
     ]);
   }
 
-  const header = formatPageHeader(page, paged.pageCount, paged.total);
+  const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
@@ -2307,7 +2438,7 @@ function renderRoutedId(
     }
 
     const body = texts.join("\n");
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -2362,7 +2493,7 @@ function renderRoutedId(
     }
 
     const body = cards.join("\n");
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -2555,7 +2686,7 @@ function renderRoutedId(
       ledger,
       filter.fieldBudgets,
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -2630,7 +2761,7 @@ function renderRoutedId(
         { entityType: "session", entityId: routed.sessionId },
       ]);
     }
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -2686,7 +2817,7 @@ function renderRoutedId(
         })),
       ]);
     }
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -3749,7 +3880,7 @@ function recallMemoryBody(
       text || undefined,
       ledger,
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(searchCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }

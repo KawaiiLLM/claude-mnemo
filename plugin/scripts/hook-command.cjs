@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtj6ocpm" : "dev";
+var BUILD_ID = true ? "0.29.0-mtj7g07i" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -9587,6 +9587,15 @@ function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }
 }
+function getTurnsByIds(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  return db.query(
+    `${TURN_SELECT} WHERE id IN (${placeholders}) ORDER BY prompt_number ASC`
+  ).all(...turnIds).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
 function getTurnsForSession(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
@@ -11997,39 +12006,80 @@ function paginateItems(items, page, pageSize) {
   return {
     items: items.slice(offset, offset + pageSize),
     total,
-    pageCount
+    pageCount,
+    // A pure `pageSize` cut prices nothing: this count is arithmetic on a
+    // length and is always exact (see `paginateByRenderedPageCost` for the
+    // sibling where it is not).
+    pageCountExact: true
   };
 }
-function packItemsByRenderedPageCost(items, pageSize, pageBudget, renderPage) {
+var PAGE_JOIN_TOKEN_SLACK = 1;
+function packItemsByRenderedPageCost(items, pageSize, pageBudget, renderPage, maxPages) {
   const pages = [];
   let current = [];
+  let currentBound = 0;
+  let stoppedEarly = false;
+  const openPage = (item, cost) => {
+    current = [item];
+    currentBound = cost;
+  };
   for (const item of items) {
-    const candidate = [...current, item];
-    const overflowsCount = current.length >= pageSize;
-    const overflowsBudget = current.length > 0 && estimateTokens(renderPage(candidate)) > pageBudget;
-    if (current.length > 0 && (overflowsCount || overflowsBudget)) {
+    if (maxPages !== void 0 && pages.length >= maxPages) {
+      stoppedEarly = true;
+      break;
+    }
+    const itemCost = estimateTokens(renderPage([item]));
+    if (current.length === 0) {
+      openPage(item, itemCost);
+      continue;
+    }
+    if (current.length >= pageSize) {
       pages.push(current);
-      current = [item];
+      openPage(item, itemCost);
+      continue;
+    }
+    const bound = currentBound + itemCost + PAGE_JOIN_TOKEN_SLACK;
+    if (bound <= pageBudget) {
+      current.push(item);
+      currentBound = bound;
+      continue;
+    }
+    const exact = estimateTokens(renderPage([...current, item]));
+    if (exact > pageBudget) {
+      pages.push(current);
+      openPage(item, itemCost);
     } else {
-      current = candidate;
+      current.push(item);
+      currentBound = exact;
     }
   }
-  if (current.length > 0 || pages.length === 0) {
+  if (!stoppedEarly && (current.length > 0 || pages.length === 0)) {
     pages.push(current);
   }
-  return pages;
+  return { pages, complete: !stoppedEarly };
 }
+var EXACT_PAGE_COUNT_ITEM_LIMIT = 200;
 function paginateByRenderedPageCost(items, page, pageSize, pageBudget, renderPage) {
-  const pages = packItemsByRenderedPageCost(items, pageSize, pageBudget, renderPage);
+  const { pages, complete } = packItemsByRenderedPageCost(
+    items,
+    pageSize,
+    pageBudget,
+    renderPage,
+    items.length <= EXACT_PAGE_COUNT_ITEM_LIMIT ? void 0 : Math.max(1, page)
+  );
   const index = page - 1;
   return {
     items: index >= 0 && index < pages.length ? pages[index] : [],
     total: items.length,
-    pageCount: pages.length
+    // Stopping early means at least one item is left over, so at least one
+    // more page exists: `pages.length + 1` is a bound the data supports.
+    pageCount: complete ? pages.length : pages.length + 1,
+    pageCountExact: complete
   };
 }
-function formatPageHeader(page, pageCount, total) {
-  return `page ${page} / ${pageCount} (total ${total})`;
+function formatPageHeader(page, pageCount, total, pageCountExact = true) {
+  const count = pageCountExact ? `${pageCount}` : `\u2265${pageCount}`;
+  return `page ${page} / ${count} (total ${total})`;
 }
 function joinPage(header, body, pageCount) {
   if (pageCount <= 1) {
@@ -12588,9 +12638,9 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, eraCutoffEp
         { turnBudget, signal }
       )
     ];
-    const turns = getTurnsForSession(db, session.id).filter(
-      (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
-    ).sort((left, right) => {
+    const turns = getTurnsByIds(db, [
+      .../* @__PURE__ */ new Set([...group.turnIds, ...group.observationIdsByTurnId.keys()])
+    ]).sort((left, right) => {
       const leftRank = relevanceRank.get(left.id) ?? Number.POSITIVE_INFINITY;
       const rightRank = relevanceRank.get(right.id) ?? Number.POSITIVE_INFINITY;
       if (leftRank !== rightRank) {
@@ -12668,7 +12718,7 @@ function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOr
       ...paged.items.map((ordinal) => chronologicalMembers[ordinal - 1]).filter((member) => member !== void 0).map((member) => ({ entityType: "turn", entityId: member.turnId }))
     ]);
   }
-  const header = formatPageHeader(page, paged.pageCount, paged.total);
+  const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
   return joinPage(header, body, paged.pageCount);
 }
@@ -12727,7 +12777,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       ledger?.mark(cursor, [{ entityType: "session", entityId: sessionId }]);
     }
     const body = texts.join("\n");
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -12767,7 +12817,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       ledger?.mark(cursor, [{ entityType: "segment", entityId: segmentId }]);
     }
     const body = cards.join("\n");
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -12914,7 +12964,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       ledger,
       filter.fieldBudgets
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -12973,7 +13023,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
         { entityType: "session", entityId: routed.sessionId }
       ]);
     }
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -13017,7 +13067,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
         }))
       ]);
     }
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
@@ -13544,7 +13594,7 @@ function recallMemoryBody(db, input, signal, ledger) {
       text || void 0,
       ledger
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total);
+    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
     ledger?.shiftFrom(searchCheckpoint, pageBodyOffset(header, body, paged.pageCount));
     return joinPage(header, body, paged.pageCount);
   }
