@@ -4,7 +4,23 @@
 
 **Blocked by:** 03 (the merge/rename write paths and the STALE flag), 04 (the display that stops suppressing).
 
-**Status:** implemented — awaiting review. `npx tsc --noEmit` clean; full `bun test` 4673 pass / 0 fail; bundles rebuilt, stale-bundle guard green; `git diff --check` clean. 10 red-capable mutation probes run, every source file restored byte-identical (md5-verified).
+**Status:** RESOLVED — implemented at `d9a54afc`, reviewer-verified 2026-09-01: tsc clean, full suite 4673 pass / 0 fail reproduced independently, `git diff --check` clean, no raw control bytes, no live reference to the retired marker outside comments that document its retirement.
+
+Reviewer mutation probes (independent of the worker's ten; each restored from a file copy, tree verified clean after):
+- join order reversed → 6 fail. Blank-side degeneration made to emit a stray separator → 3 fail. The terminal fence's STALE-retain refusal disabled → 3 fail (i.e. STALE kept its forcing job after losing its display job — the exact thing this ticket risked breaking).
+
+Design calls ADJUDICATED — all five as the worker resolved them:
+1. **A degenerate fold carries the folded side's `origin`** when the survivor is a freshly minted empty row. Correct: the ruling's whole point is that a relabel destroys nothing, and `origin` is what the future comparison test's eligibility filter reads.
+2. **The task tier joins with ONE newline**, not `mergeProseField`'s blank line. An impression is newline-delimited lines; a blank line inside one is not a line.
+3. **Settlement's own folds concatenate too**, without a debt or a flag. Keeping the material is not a judgment anyone is exempt from, and the run doing the fold is the run that decides — it may legally retain its own join.
+4. **`clear` and `delete` untouched.** `delete` takes the impression with the row. `clear` remains an OPEN user ruling (a lane emptied of members keeps prose describing them).
+5. **Whitespace-only counts as blank** on both sides — a shape no writer can currently produce.
+
+PROCESS FAULT, disclosed by the worker and verified by the reviewer: one probe-restore used `git checkout-index -f -- src/db/lanes.ts`, a working-tree revert, which the brief forbids. Verified harmless — that file carried only this ticket's own edits, they were re-applied, the fold is present (the order-reversal probe could not go red otherwise), and `git status` is clean. The standing constraint now has to name `checkout-index` explicitly; "never checkout/restore/stash" was read too narrowly.
+
+SPEC RESIDUE SWEPT by the reviewer (the worker correctly flagged it as outside its patch mandate): `## Testing Decisions` bullets 1 and 2 still demanded the retired `[impression pending synthesis]` fixture and the "response ≤ status quo + 500 tok" bound, contradicting the paragraphs amended above them. Both now carry the T2269 amendment.
+
+Original worker report follows. `npx tsc --noEmit` clean; full `bun test` 4673 pass / 0 fail; bundles rebuilt, stale-bundle guard green; `git diff --check` clean. 10 red-capable mutation probes run, every source file restored byte-identical (md5-verified).
 
 Landed shapes:
 - `src/db/impressions.ts` — `concatenateImpressions` (THE join: survivor first, ONE newline, either side blank degenerates to the other's exact bytes, both blank stays NULL) and `foldLaneImpressionIntoSurvivor` (the lane-tier fold; the two sides may sit in different segments, which is what the task merge's colliding-lane loop needs). The fold bumps `impression_revision` and touches NO flag.
