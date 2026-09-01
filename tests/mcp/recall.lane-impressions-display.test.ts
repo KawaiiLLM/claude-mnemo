@@ -143,6 +143,38 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
   });
 
   /**
+   * THE ROUTE SHOWS ITS OWN LANE. With one declared lane every lane-selection
+   * bug is invisible — "the first lane of this task" and "the lane you asked
+   * for" are the same row. A second lane with its own impression is what makes
+   * the assertion mean anything.
+   */
+  test("a task with two lanes shows each route its own impression, never the other's", () => {
+    insertLane(db, segmentId, "read-path", CUTOFF);
+    const otherTurn = makeTurn(4, "reads without the gate", ["read-path"]);
+    addSegmentMembers(db, segmentId, [otherTurn], CUTOFF);
+    const otherImpression =
+      "The read-path lane: reads never take the gate, and that asymmetry is the design (S1/T4).";
+    seedLaneImpression(LANE_IMPRESSION);
+    expect(
+      replaceLaneImpression(db, {
+        segmentId,
+        tag: "read-path",
+        baseRevision: 0,
+        text: otherImpression,
+        origin: "settlement",
+      }),
+    ).toBe(true);
+
+    const writeGate = recallMemory(db, { id: laneId() });
+    expect(writeGate.startsWith(`${LANE_IMPRESSION}\n\n`)).toBe(true);
+    expect(writeGate).not.toContain("The read-path lane:");
+
+    const readPath = recallMemory(db, { id: `E${segmentId}/#read-path` });
+    expect(readPath.startsWith(`${otherImpression}\n\n`)).toBe(true);
+    expect(readPath).not.toContain("The write-gate lane:");
+  });
+
+  /**
    * MEMBER PAGINATION MECHANICS UNCHANGED, pinned by the numbers rather than by
    * eyeballing the preface: the same two pages, the same header totals, the
    * same member on each — with a preface sitting above page 1.
