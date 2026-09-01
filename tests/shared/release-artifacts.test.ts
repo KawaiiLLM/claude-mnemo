@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -81,10 +87,6 @@ describe("release artifacts", () => {
       plugins?: Array<{ version?: string }>;
     };
 
-    const diarySdkQuery = readFileSync(
-      "src/worker/diary-sdk-query.ts",
-      "utf8",
-    );
     const settlementSdkQuery = readFileSync(
       "src/worker/note-settlement-sdk-query.ts",
       "utf8",
@@ -96,13 +98,60 @@ describe("release artifacts", () => {
     // deleted — the unified query above is now the sole registration site for
     // both stages, and its own `settlementSdkQuery` read above already covers
     // it. No separate stage-one version-stamp check is left to guard.
+    //
+    // A SEVENTH SITE retired with dream-retirement ticket 01. The nightly
+    // dream's own SDK query (`src/worker/diary-sdk-query.ts`) stamped this
+    // same version into the agent options it built, and this test read it
+    // here; the file is deleted, so a version bump now touches ONE source
+    // constant, not two. `settlementSdkQuery` is the only one left.
+    expect(existsSync("src/worker/diary-sdk-query.ts")).toBe(false);
 
     expect(packageJson.version).toBe("0.28.0");
     expect(pluginManifest.version).toBe("0.28.0");
     expect(marketplace.metadata?.version).toBe("0.28.0");
     expect(marketplace.plugins?.[0]?.version).toBe("0.28.0");
-    expect(diarySdkQuery).toContain('version: "0.28.0"');
     expect(settlementSdkQuery).toContain('version: "0.28.0"');
+  });
+
+  /**
+   * THE WORKER CORE HOLDS NO MODEL CLIENT — asserted on shipped BYTES.
+   *
+   * dream-retirement ticket 01. Settlement crossed the process boundary at
+   * claim-monitor-repair ticket 02, which left exactly one in-process model
+   * call in this bundle: the nightly dream. Deleting the dream drops the
+   * count from one to zero, and zero is the only number this invariant can
+   * be stated as without an exemption list — so it is pinned here, where a
+   * re-import has to argue with a release gate.
+   *
+   * This is the ARTIFACT half of the pair. The SOURCE half is
+   * `MODEL_SUBPROCESS_ENTRY_POINTS` (now `[]`) in
+   * tests/worker/server.note-settlement-triggers.test.ts, which walks
+   * `server.ts`'s value imports. Neither subsumes the other: a stale bundle
+   * passes the source walk and fails here; a new import behind a lazy
+   * `require` esbuild happens to drop passes here and fails there.
+   *
+   * `settlement-child.cjs` is deliberately absent from this list — it IS the
+   * model client, in its own process, which is the whole point.
+   */
+  test("no model client ships in the worker, hook or mcp bundles", () => {
+    for (const bundle of [
+      "worker.cjs",
+      "hook-command.cjs",
+      "mcp-server.cjs",
+      "replay-parse.cjs",
+    ]) {
+      const source = readFileSync(`plugin/scripts/${bundle}`, "utf8");
+      expect([bundle, source.includes("@anthropic-ai")]).toEqual([
+        bundle,
+        false,
+      ]);
+    }
+    // The negative above is only meaningful if the string is one this
+    // codebase's bundler really does emit when an SDK import survives — so
+    // the child that legitimately carries the client proves the detector
+    // fires.
+    const child = readFileSync("plugin/scripts/settlement-child.cjs", "utf8");
+    expect(child).toContain("@anthropic-ai");
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -278,20 +327,16 @@ describe("release artifacts", () => {
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [
-      // floor-and-render-fidelity ticket 03 retired the "dbid:T" DB-id
-      // correlation token the worker recall used to emit — lane_check and
-      // recall both speak S<n>/T<m> now, so a stale bundle would still carry
-      // the token; a fresh one never does. `audience: "worker"` itself stays
-      // a marker — that gate still exists, for the private-tag-stripped
-      // envelope cap, just not for the dbid token any more.
-      'audience: "worker"', // recall worker envelope-cap surface
+      // `audience: "worker"`, `workerRecallInputShape` and
+      // `allowedDocumentSubtrees` used to be pinned PRESENT here. They were
+      // never worker-core surfaces: they are the MCP tool belt an in-process
+      // AGENT was handed, and the only such agent left in this bundle was the
+      // nightly dream. dream-retirement ticket 01 deleted it, so all three
+      // legitimately fell out of the tree-shake — they are pinned in their
+      // real homes instead (the first two below on settlement-child.cjs and
+      // mcp-server.cjs), and their ABSENCE from the worker is now itself a
+      // rebuild signature, asserted in the removal list further down.
       "OUTCOME_TAGS", // milestone marker logic
-      "workerRecallInputShape", // uncapped worker recall schema
-      "allowedDocumentSubtrees", // read_doc request scope
-      "Dream agent attempted more than one commit", // single-commit dream contract
-      "memory/archive.md", // dream curation workspace
-      "last_successful_date", // durable dream completion marker
-      "recordDreamFailure", // retryable dream queue path
       "note_settlement_jobs", // D9 settlement: the durable settle work unit
       "frozen_member_ids", // cohort frozen at enqueue — retries settle one set
       "claim_generation", // lease ownership fence — a stale worker commits nothing
@@ -354,9 +399,42 @@ describe("release artifacts", () => {
       // retired — lane_check and recall both speak S<n>/T<m> now, so a stale
       // bundle would still carry the token a fresh one never emits.
       "dbid:T",
+      // THE RETIRED DREAM (dream-retirement ticket 01). Every dream output
+      // had been frozen for 24 days while the producer stayed scheduled, so
+      // the producer — not the readers — was deleted. These six markers span
+      // all four of its layers, and a stale worker bundle would carry every
+      // one of them:
+      "Dream agent attempted more than one commit", // dream-job.ts: the single-commit contract
+      "recordDreamFailure", // db/diary-state.ts: the retry ledger, now an inert table
+      "reconcileDreamBacklog", // diary-runtime.ts: the nightly enqueue this worker no longer schedules
+      "last_successful_date", // diary/memory-store.ts: the commit marker — WRITE side
+      "memory/archive.md", // the curation workspace only the writer knew about
+      "allowedDocumentSubtrees", // diary-agent-tools.ts: the agent's read_doc scope
+      // The two memory-store markers are the sharp ones: `memory-store.ts`
+      // still EXISTS and is still imported — by `hook-command.ts`, for the
+      // persona injection, which this ticket deliberately did not touch. Their
+      // absence here and presence in hook-command.cjs (asserted above) is what
+      // distinguishes "the producer left" from "the reader broke".
     ]) {
       expect(worker).not.toContain(removed);
     }
+
+    // The persona READ path is untouched by the dream's removal and must stay
+    // in the hook bundle — the injected bytes are the same bytes as before,
+    // which is the property that let the persona question be deferred.
+    expect(hookCommand).toContain("memory/user-profile.md");
+    expect(hookCommand).toContain("last_successful_date");
+
+    // The agent-facing recall tool belt moved with its agents rather than
+    // disappearing: the settlement child is the only in-process agent left.
+    // (Both bundles are re-read below for their own blocks; read here too so
+    // this relocation claim sits beside the absence it explains.)
+    expect(
+      readFileSync("plugin/scripts/settlement-child.cjs", "utf8"),
+    ).toContain('audience: "worker"');
+    expect(readFileSync("plugin/scripts/mcp-server.cjs", "utf8")).toContain(
+      "workerRecallInputShape",
+    );
 
     // claim-monitor-repair ticket 02 — the settlement child boundary, on both
     // sides of the pipe. The worker holds only the PARENT half (spawn, kill,

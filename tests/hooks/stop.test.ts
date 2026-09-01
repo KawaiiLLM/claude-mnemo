@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase, runHookWriteTransaction } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getSession,
@@ -152,27 +151,17 @@ describe("handleStopHook", () => {
     });
   });
 
-  test("marks a settled diary day stale only when Stop changes the assistant response", async () => {
+  test("Stop writes nothing into the retired dream tables", async () => {
+    // This replaces "marks a settled diary day stale only when Stop changes
+    // the assistant response". Stop used to call
+    // `markSettledDiaryDayStaleForTurn` whenever it rewrote a turn's response,
+    // so the nightly dream would regenerate that day. dream-retirement ticket
+    // 01 deleted the dream, which made that call a write with no reader — the
+    // ticket's "the tables go INERT" clause — so the call is gone and the
+    // assertion inverts: the same response-changing Stop must now leave both
+    // tables empty. (The tables themselves stay in schema.ts; only the writes
+    // are retired.)
     const createdAtEpoch = Date.parse("2026-07-10T04:00:00Z") / 1_000;
-    const stateStore = createDiaryStateStore(db);
-    stateStore.initializeBootstrap("2026-07-11");
-    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = stateStore.claimNextDiaryItem(
-      Date.parse("2026-07-11T00:00:00Z") / 1_000,
-    )!;
-    stateStore.settleDreamDay({
-      date: "2026-07-10",
-      queueSeq: claimed.seq,
-      watermark: "watermark",
-      settledAtEpoch: 250,
-      remoteAttemptSucceeded: false,
-    });
-
-    // Insert directly after settlement to model a turn arriving in the
-    // watermark race without invoking the normal invalidation write path.
-    // Already terminal, so Stop's own completion settlement (ticket 15) is a
-    // no-op here and the ONLY thing that can mark the day stale is the response
-    // change this test is about.
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, title, user_prompt, assistant_response, created_at_epoch
@@ -181,10 +170,15 @@ describe("handleStopHook", () => {
 
     const handler = createStopHandler({ db, now: () => 500 });
     await handler(createInput({ lastAssistantMessage: "Original answer" }));
-    expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(false);
-
+    // The response CHANGES here — the exact condition that used to write.
     await handler(createInput({ lastAssistantMessage: "Corrected answer" }));
-    expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(true);
+
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_day_state",
+    ).get()!.n).toBe(0);
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_state",
+    ).get()!.n).toBe(0);
   });
 
   test("runs foreground writes through the bounded hook transaction runner", async () => {

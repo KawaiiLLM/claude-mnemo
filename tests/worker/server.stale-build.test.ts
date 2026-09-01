@@ -234,13 +234,13 @@ type WorkerState = ReturnType<typeof createWorkerServerState>;
 interface ExitHarness {
   state: WorkerState;
   deps: WorkerServerDeps;
-  record: { shutdowns: number; exits: number[]; aborts: number };
+  record: { shutdowns: number; exits: number[] };
 }
 
 function createExitHarness(
   overrides: Partial<WorkerServerDeps> = {},
 ): ExitHarness {
-  const record = { shutdowns: 0, exits: [] as number[], aborts: 0 };
+  const record = { shutdowns: 0, exits: [] as number[] };
   const state = createWorkerServerState(1_000);
   const deps: WorkerServerDeps = {
     isStaleBuildImpl: () => true,
@@ -298,6 +298,18 @@ describe("checkForStaleBuildShutdown", () => {
     expect(state.shuttingDown).toBe(false);
   });
 
+  /**
+   * ONE guard, no exception (dream-retirement ticket 01).
+   *
+   * Three cases used to sit below this one, all about the single carve-out
+   * this function had: a running dream skipped the scan guard entirely,
+   * because its query had to be ABORTED before the drain carrying it could
+   * ever settle — so the check reached past the guard, called `abortDreamImpl`,
+   * awaited the unwind and re-read every mutable guard. Deleting the dream
+   * deleted the only work this process could start that would not end on its
+   * own, so the carve-out, the abort seam and the re-check are gone with it,
+   * and the case below is the WHOLE behaviour rather than its default branch.
+   */
   test("a global scan in flight holds the exit off, from either side", async () => {
     const serverSide = createExitHarness();
     serverSide.state.globalScanInFlight = new Promise<void>(() => {});
@@ -313,69 +325,6 @@ describe("checkForStaleBuildShutdown", () => {
       false,
     );
     expect(coreSide.record.shutdowns).toBe(0);
-  });
-
-  test("a running dream is aborted, and then the worker exits", async () => {
-    let dreamRunning = true;
-    const harness = createExitHarness({
-      isDreamRunningImpl: () => dreamRunning,
-    });
-    harness.deps.abortDreamImpl = async () => {
-      harness.record.aborts += 1;
-      dreamRunning = false;
-    };
-
-    expect(await checkForStaleBuildShutdown(harness.state, harness.deps)).toBe(
-      true,
-    );
-    expect(harness.record.aborts).toBe(1);
-    expect(harness.record.shutdowns).toBe(1);
-    expect(harness.record.exits).toEqual([0]);
-  });
-
-  test("a running dream with no abort seam blocks the exit instead of wedging on it", async () => {
-    // Nothing can make this drain settle: the dream exemption skips the hard
-    // scan guard, and with no abort there is nothing to end the query the drain
-    // is waiting on. Refusing up front is what keeps the watchdog able to ask
-    // again — proceeding would park this call, and the `shuttingDown` flag it
-    // set, on a promise that never resolves.
-    const { state, deps, record } = createExitHarness({
-      isDreamRunningImpl: () => true,
-    });
-    state.globalScanInFlight = new Promise<void>(() => {});
-
-    const outcome = await Promise.race([
-      checkForStaleBuildShutdown(state, deps),
-      new Promise<string>((resolve) =>
-        setTimeout(() => resolve("wedged on the un-abortable dream"), 50),
-      ),
-    ]);
-
-    expect(outcome).toBe(false);
-    expect(record.shutdowns).toBe(0);
-    expect(state.shuttingDown).toBe(false);
-  });
-
-  test("work that arrives while the dream unwinds cancels the exit", async () => {
-    let dreamRunning = true;
-    const harness = createExitHarness({
-      isDreamRunningImpl: () => dreamRunning,
-    });
-    harness.deps.abortDreamImpl = async () => {
-      harness.record.aborts += 1;
-      dreamRunning = false;
-      // A hook event landed while the dream was being torn down.
-      harness.state.globalScanInFlight = new Promise<void>(() => {});
-    };
-
-    expect(await checkForStaleBuildShutdown(harness.state, harness.deps)).toBe(
-      false,
-    );
-    expect(harness.record.aborts).toBe(1);
-    expect(harness.record.shutdowns).toBe(0);
-    // Released, so the next watchdog beat re-asks rather than finding a worker
-    // wedged half-way out the door.
-    expect(harness.state.shuttingDown).toBe(false);
   });
 
   test("a shutdown already under way is not started a second time", async () => {

@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
-import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
 import { settleOutstandingTurns } from "../../db/turn-settlement";
 import { getSessionByContentId, touchSessionCompletion } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
@@ -206,16 +205,6 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       // The response is the second half of the turn's original text; index it
       // now, at capture, rather than when (or if) an extraction runs.
       reindexTurnFromDb(dependencies.db, turn.id);
-
-      if (
-        assistantResponse !== null &&
-        assistantResponse !== turn.assistantResponse
-      ) {
-        markSettledDiaryDayStaleForTurn(
-          dependencies.db,
-          turn.createdAtEpoch,
-        );
-      }
 
       if (!hasTurnStopTask(dependencies.db, turn.id)) {
         enqueueQueueItem(dependencies.db, {

@@ -14,8 +14,6 @@ import type { Database } from "bun:sqlite";
 import { BUILD_ID } from "../shared/build-id";
 import { isBuildStaleForDatabase } from "../db/build-state";
 import { createDatabase, runWriteTransaction } from "../db/database";
-import { createDiaryStateStore } from "../db/diary-state";
-import { contentDateAt } from "../diary/calendar";
 import {
   getSession,
   getSessionByContentId,
@@ -61,11 +59,6 @@ import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import { createLogger } from "../shared/logger";
 import { detectAndCleanSubagentTurns } from "./subagent-filter";
 import {
-  createDiaryRuntime,
-  type CreateDiaryRuntimeOptions,
-  type DiaryRuntime,
-} from "./diary-runtime";
-import {
   finalizeUnreachableStrandedTurns,
   listStrandedRepairDates,
   restoreStrandedTurnStops,
@@ -91,8 +84,8 @@ const WATCHDOG_INTERVAL_MS = 10_000;
  * The worker is a librarian, not a reader (spec D10, ticket 15).
  *
  * It owns the serialized write to the database, the mechanical retirement of
- * captured work, the note-settlement trigger and the nightly dream claim —
- * and it hosts NO language model of its own on any path. The resident extraction
+ * captured work and the note-settlement trigger — and it hosts NO language
+ * model of its own on any path. The resident extraction
  * agent that used to live here (its SDK session, compact management, resume
  * pointer, stall watchdog, obs summary pipeline, per-session summary pass and
  * two-phase grade settlement) was removed whole: a turn's record is now written
@@ -102,7 +95,13 @@ const WATCHDOG_INTERVAL_MS = 10_000;
  *
  * The one subprocess the worker can still start is the note-settlement payload,
  * and it is doubly gated: no era cutoff, or the kill switch off, and nothing is
- * even constructed (see `main`).
+ * even constructed (see `main`). It runs OUT OF PROCESS
+ * (`plugin/scripts/settlement-child.cjs`), which — since dream-retirement
+ * ticket 01 deleted the nightly dream, the last in-process model call — leaves
+ * this bundle with no model client in it at all. That is a guarded invariant
+ * now, not an aspiration: `MODEL_SUBPROCESS_ENTRY_POINTS` in
+ * tests/worker/server.note-settlement-triggers.test.ts is EMPTY, and the
+ * release suite asserts `worker.cjs` holds zero SDK bytes.
  */
 
 export interface QueueDrain {
@@ -119,16 +118,6 @@ export interface WorkerCoreDeps {
   sessionEnvRegistry?: Map<string, CapturedSessionEnv>;
   now?: () => number;
   nowMs?: () => number;
-  processDiaryItem?: (
-    item: PendingQueueItem,
-    agentEnv: NodeJS.ProcessEnv,
-  ) => Promise<void>;
-  reconcileDreamBacklog?: (nowEpoch: number) => Promise<string[] | void>;
-  setTimeoutImpl?: (
-    callback: () => void | Promise<void>,
-    delayMs: number,
-  ) => unknown;
-  clearTimeoutImpl?: (handle: unknown) => void;
   /**
    * P2 note settlement payload (spec D9). Defaults to undefined, which is what
    * keeps "the worker never calls a model" true of the shipped wiring; `main`
@@ -160,9 +149,18 @@ export interface WorkerCoreDeps {
 
 export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   dataRoot?: string;
-  createDiaryRuntimeImpl?: (
-    options: CreateDiaryRuntimeOptions,
-  ) => DiaryRuntime;
+  /**
+   * The wake-scan debounce's timer seam, read by the fetch handler alone. It
+   * used to sit on `WorkerCoreDeps` because the core self-scheduled a
+   * zero-delay continuation for the manual `POST /dream`; dream-retirement
+   * ticket 01 deleted that continuation, and the core now schedules nothing at
+   * all — every drain it runs is driven by a caller.
+   */
+  setTimeoutImpl?: (
+    callback: () => void | Promise<void>,
+    delayMs: number,
+  ) => unknown;
+  clearTimeoutImpl?: (handle: unknown) => void;
   BunServeImpl?: typeof Bun.serve;
   scanAndDrainQueue?: QueueDrain;
   handleTurnStopImpl?: (sessionId: number) => Promise<void>;
@@ -171,7 +169,6 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
     sessionId: number,
     transcriptPath?: string | null,
   ) => Promise<void>;
-  handleDreamImpl?: (date: unknown) => ManualDreamResult;
   handleSettleImpl?: (request: ManualSettleRequest) => ManualSettleResult;
   /**
    * Dispatches the target session's due settlement jobs right after a manual
@@ -216,8 +213,6 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
   getGlobalScanInFlightImpl?: () => Promise<void> | null;
-  isDreamRunningImpl?: () => boolean;
-  abortDreamImpl?: () => Promise<void>;
   /** Latches the record-only settlement window before the process exits. */
   beginGracefulExitImpl?: () => void;
   processImpl?: Pick<NodeJS.Process, "pid" | "on" | "exit">;
@@ -228,7 +223,7 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
  * The worker's one idleness clock (spec "One idleness clock", USER RULING
  * S15069/T2083). `busyCount` is the number of outstanding busy tokens — any
  * active HTTP request (console-exempt, see the fetch handler) plus any
- * tracked drain/settlement/dream work genuinely live. `idleSince` is `null`
+ * tracked drain/settlement work genuinely live. `idleSince` is `null`
  * while `busyCount > 0` (a busy worker never exits, however long the work
  * runs) and is stamped with the wall-clock moment the LAST busy token
  * released otherwise — a fresh worker starts idle from its own boot instant,
@@ -286,14 +281,6 @@ export function acquireBusyToken(
     },
   };
 }
-
-/**
- * Result of a manual `POST /dream` trigger: either enqueued, or rejected with an
- * HTTP status the fetch handler can echo verbatim.
- */
-export type ManualDreamResult =
-  | { ok: true; date: string }
-  | { ok: false; status: number; message: string };
 
 /**
  * Result of a manual `POST /settle` backfill: either the one job it created, or
@@ -379,7 +366,6 @@ export interface WorkerCore {
    */
   noteSettlement: NoteSettlementScheduler;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
-  triggerManualDream(date: unknown): ManualDreamResult;
   /**
    * Enqueue ONE explicit backfill window (`POST /settle`). Deliberately an
    * operator surface and not an MCP tool: an MCP tool would hand the main agent
@@ -445,14 +431,6 @@ export function isProcessAlive(pid: number): boolean {
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const nowMs = deps.nowMs ?? Date.now;
-  const setTimeoutImpl =
-    deps.setTimeoutImpl ??
-    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
-      setTimeout(() => void callback(), delayMs));
-  const clearTimeoutImpl =
-    deps.clearTimeoutImpl ??
-    ((handle: unknown): void =>
-      clearTimeout(handle as ReturnType<typeof setTimeout>));
   const logger = deps.logger ?? console;
   const config = deps.config ?? DEFAULT_CONFIG;
   const sessionEnvRegistry =
@@ -529,9 +507,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  const diaryStateStore = createDiaryStateStore(deps.db);
-  let diaryContinuationTimer: unknown | null = null;
-  let pendingDiaryTriggerSessionDbId: number | null | undefined;
+  let pendingEndEventSweep: true | undefined;
   let globalScanInFlight: Promise<void> | null = null;
   // Latches once the transcript-path repair reports it has nothing left to do,
   // so the steady state costs zero — not even the ledger's indexed read.
@@ -630,35 +606,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  function scheduleDiaryContinuation(): void {
-    if (!config.dreamAgentEnabled || !deps.processDiaryItem) {
-      return;
-    }
-
-    if (!diaryStateStore.hasReadyDiaryItem(now())) {
-      if (diaryContinuationTimer !== null) {
-        clearTimeoutImpl(diaryContinuationTimer);
-        diaryContinuationTimer = null;
-      }
-      return;
-    }
-    if (diaryContinuationTimer !== null) {
-      return;
-    }
-
-    let handle: unknown;
-    // This zero-delay continuation is reserved for the explicit manual
-    // trigger. Automatic retries and remaining backlog wait for a turn-stop.
-    handle = setTimeoutImpl(async () => {
-      if (diaryContinuationTimer !== handle) {
-        return;
-      }
-      diaryContinuationTimer = null;
-      await scanAndDrainGlobalQueue(null);
-    }, 0);
-    diaryContinuationTimer = handle;
-  }
-
   async function drainQueue(sessionFilter?: number): Promise<DrainQueueResult> {
     const result: DrainQueueResult = {
       turnStopSessionDbIds: new Set<number>(),
@@ -692,62 +639,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  async function drainOneDiaryItem(
-    triggeringSessionDbId: number | null,
-  ): Promise<void> {
-    // The only executor of dream work: gating here also holds back every retry,
-    // since a failed day is re-dispatched through this same claim.
-    if (!config.dreamAgentEnabled || !deps.processDiaryItem) {
-      return;
-    }
-
-    const diaryItem = diaryStateStore.claimNextDiaryItem(now());
-    if (!diaryItem) {
-      return;
-    }
-
-    const capturedSessionEnv =
-      triggeringSessionDbId === null
-        ? undefined
-        : getRegisteredSessionEnv(triggeringSessionDbId);
-    if (!capturedSessionEnv) {
-      logger.warn?.(
-        "dream triggering session env unavailable; using operational baseline",
-        { triggeringSessionDbId },
-      );
-    }
-    const agentEnv = buildIsolatedEnv(
-      deps.workerEnv ?? process.env,
-      capturedSessionEnv ?? {},
-    );
-
-    try {
-      await deps.processDiaryItem(diaryItem, agentEnv);
-    } catch (error) {
-      logger.error?.("diary queue item failed", {
-        seq: diaryItem.seq,
-        targetId: diaryItem.targetId,
-        error,
-      });
-    }
-  }
-
-  async function coordinateEndEvent(
-    triggeringSessionDbId: number,
-  ): Promise<void> {
-    if (config.dreamAgentEnabled) {
-      try {
-        // Called for its enqueue side effect only. The repair below used to
-        // reuse the due days this returns, which silently switched the whole
-        // cleanup off with the dream kill switch; it now derives its own dates.
-        await deps.reconcileDreamBacklog?.(now());
-      } catch (error) {
-        logger.error?.("dream backlog reconcile failed", { error });
-      }
-    }
-
-    // Read-only, dream-independent: the closed content-days of the stranded
-    // turns themselves.
+  /**
+   * The end-event sweep: stranded-turn repair, and nothing else.
+   *
+   * It used to open with a `reconcileDreamBacklog` call that enqueued the
+   * nightly dream's due days. dream-retirement ticket 01 deleted the producer,
+   * so the sweep is now exactly the repair — which was ALREADY independent of
+   * it: the repair once reused the days the reconcile returned, which silently
+   * switched the whole cleanup off with the dream kill switch, and it was
+   * decoupled to derive its own dates (tests/worker/stranded-repair-decoupled).
+   * That decoupling is why deleting the dream leaves this behaviour untouched.
+   *
+   * `dreamAgentTimeZone`/`dreamAgentHour` below are NOT dream state: they are
+   * this database's content-day boundary, and they keep their historical names
+   * because they are a persisted user config surface.
+   */
+  async function coordinateEndEvent(): Promise<void> {
     const repairDates = listStrandedRepairDates(deps.db, {
       timeZone: config.dreamAgentTimeZone,
       boundaryHour: config.dreamAgentHour,
@@ -798,20 +705,18 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         });
       }
     }
-
-    await drainOneDiaryItem(triggeringSessionDbId);
   }
 
   function scanAndDrainGlobalQueue(
-    requestedTriggerSessionDbId?: number | null,
+    requestEndEventSweep = false,
   ): Promise<void> {
-    // Pure liveness scans only recover session work. A processed turn-stop (or
-    // the explicit manual trigger) earns one diary claim after that work.
-    if (
-      requestedTriggerSessionDbId !== undefined &&
-      pendingDiaryTriggerSessionDbId === undefined
-    ) {
-      pendingDiaryTriggerSessionDbId = requestedTriggerSessionDbId;
+    // Pure liveness scans only recover session work; a processed turn-stop
+    // additionally earns one stranded-turn repair sweep after that work. The
+    // parameter used to be the triggering session's id, threaded through so the
+    // dream could run its agent under that session's captured environment; with
+    // the dream deleted the sweep needs no identity, only the request.
+    if (requestEndEventSweep) {
+      pendingEndEventSweep = true;
     }
     if (globalScanInFlight) {
       return globalScanInFlight;
@@ -821,18 +726,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     tracked = (async () => {
       try {
         do {
-          const requestedTriggerForThisDrain = pendingDiaryTriggerSessionDbId;
-          pendingDiaryTriggerSessionDbId = undefined;
+          const sweepThisDrain = pendingEndEventSweep === true;
+          pendingEndEventSweep = undefined;
           await drainQueue();
-          if (
-            requestedTriggerForThisDrain !== undefined &&
-            requestedTriggerForThisDrain !== null
-          ) {
-            await coordinateEndEvent(requestedTriggerForThisDrain);
-          } else if (requestedTriggerForThisDrain === null) {
-            await drainOneDiaryItem(null);
+          if (sweepThisDrain) {
+            await coordinateEndEvent();
           }
-        } while (pendingDiaryTriggerSessionDbId !== undefined);
+        } while (pendingEndEventSweep !== undefined);
       } finally {
         if (globalScanInFlight === tracked) {
           globalScanInFlight = null;
@@ -856,7 +756,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // Turn-stop wakes share the global drain serializer with ordinary wake
     // scans. A direct session drain can otherwise overtake rows already being
     // claimed by an in-flight global drain and terminalize their owner first.
-    await scanAndDrainGlobalQueue(sessionDbId);
+    await scanAndDrainGlobalQueue(true);
     // The ONLY automatic settlement trigger (spec D9, retargeted by ticket 04,
     // [S15069/T963]). It settles nothing until the threshold's worth of
     // consecutive decided turns have accumulated, so every other turn-stop
@@ -901,7 +801,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // 04's "残余搭车通道保持、只挂 turn-stop") — an unrelated session's own
     // turn-stop is what eventually picks up anything this session left due.
     await drainSessionCompletely(sessionDbId);
-    await scanAndDrainGlobalQueue(sessionDbId);
+    await scanAndDrainGlobalQueue(true);
   }
 
   async function handleCompact(
@@ -930,7 +830,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       });
     }
 
-    await scanAndDrainGlobalQueue(sessionDbId);
+    await scanAndDrainGlobalQueue(true);
 
     // Compact creates and triggers NO settlement work any more (ticket 04,
     // [S15069/T963]): settlement reads the database, never live context, so a
@@ -972,10 +872,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         };
       }
 
-      // The same two gates every settlement path checks, and refused BEFORE the
-      // insert for the same reason the dream refuses before enqueueing: a job
-      // recorded into a system that cannot dispatch it would burn its three
-      // attempts on a payload that is not there and go terminal.
+      // The same two gates every settlement path checks, and refused BEFORE
+      // the insert: a job recorded into a system that cannot dispatch it would
+      // burn its three attempts on a payload that is not there and go terminal.
+      // (The nightly dream refused before enqueueing for the same reason; it is
+      // deleted, and this is the pattern that outlived it.)
       const eraCutoffEpoch = config.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
       if (!config.settlementEnabled) {
         return {
@@ -1024,59 +925,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         reason: result.reason,
         message: MANUAL_SETTLE_REFUSAL_MESSAGE[result.reason],
       };
-    },
-    triggerManualDream(date: unknown): ManualDreamResult {
-      // Reject before any DB write: a disabled dream must leave no queued day
-      // behind that a later re-enable would silently run.
-      if (!config.dreamAgentEnabled) {
-        return {
-          ok: false,
-          status: 503,
-          message: "dream agent is disabled (set dreamAgentEnabled to true)",
-        };
-      }
-      if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        return { ok: false, status: 400, message: "date must be YYYY-MM-DD" };
-      }
-      const parsed = new Date(`${date}T00:00:00Z`);
-      if (
-        Number.isNaN(parsed.getTime()) ||
-        parsed.toISOString().slice(0, 10) !== date
-      ) {
-        return {
-          ok: false,
-          status: 400,
-          message: "date is not a real calendar day",
-        };
-      }
-      // A dream runs for a completed day; today is not due yet. "today" is the
-      // in-progress content-day (4am boundary), so before 4am the just-ended
-      // calendar day is still open and correctly rejected.
-      const today = contentDateAt(
-        now(),
-        config.dreamAgentTimeZone,
-        config.dreamAgentHour,
-      );
-      if (date >= today) {
-        return {
-          ok: false,
-          status: 400,
-          message: "date must be a completed past day",
-        };
-      }
-      const { cutoverDate } = diaryStateStore.initializeBootstrap(today);
-      if (date < cutoverDate) {
-        return {
-          ok: false,
-          status: 400,
-          message: `date is before the dream cutover ${cutoverDate}`,
-        };
-      }
-      // Reset to a clean, non-terminal, retryable state, requeue, and kick a
-      // continuation so the worker picks it up promptly.
-      diaryStateStore.markDayStaleAndEnqueue({ date, enqueuedAtEpoch: now() });
-      scheduleDiaryContinuation();
-      return { ok: true, date };
     },
     registerSessionEnv,
     clearSessionEnv,
@@ -1324,10 +1172,6 @@ export function createWorkerFetchHandler(
     (async (sessionId: number) => {
       await scanAndDrainQueue(sessionId);
     });
-  const handleDreamImpl: (date: unknown) => ManualDreamResult =
-    deps.handleDreamImpl ??
-    runtime?.triggerManualDream ??
-    (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
   const handleSettleImpl: (request: ManualSettleRequest) => ManualSettleResult =
     deps.handleSettleImpl ??
     runtime?.settleBackfillWindow ??
@@ -1350,7 +1194,7 @@ export function createWorkerFetchHandler(
   let resolveGlobalWork: (() => void) | null = null;
 
   // The busy-token layer wraps this source (spec "One idleness clock"):
-  // every drain/settlement/dream run this fetch handler kicks off rides
+  // every drain/settlement run this fetch handler kicks off rides
   // `trackGlobalWork`, so acquiring a token here — alongside the existing
   // `globalScanInFlight` bookkeeping `checkForStaleBuildShutdown` still
   // reads — is what makes that work "genuinely live" to the idleness clock.
@@ -1709,15 +1553,10 @@ export function createWorkerFetchHandler(
         });
       }
 
-      if (req.method === "POST" && url.pathname === "/dream") {
-        const payload = (await req.json()) as { date?: unknown };
-        const result = handleDreamImpl(payload.date);
-        if (!result.ok) {
-          return new Response(result.message, { status: result.status });
-        }
-        return Response.json({ enqueued: result.date });
-      }
-
+      // `POST /dream` used to sit here. dream-retirement ticket 01 deleted the
+      // producer it triggered, so the route is gone rather than left returning
+      // a 503 for something that can no longer be re-enabled: it falls through
+      // to the 404 below like any other path this worker does not serve.
       return new Response("Not found", { status: 404 });
     } finally {
       state.activeRequests = Math.max(0, state.activeRequests - 1);
@@ -1810,7 +1649,7 @@ function createShutdownCleanup(deps: WorkerServerDeps = {}): () => Promise<void>
 /**
  * The worker's one idleness clock (spec "One idleness clock", USER RULING
  * S15069/T2083). `busy` = any active HTTP request OR any tracked
- * drain/settlement/dream work genuinely live — while `state.idleSince` is
+ * drain/settlement work genuinely live — while `state.idleSince` is
  * `null` (busy), this returns `false` outright, however long the work runs.
  * Once a full `workerIdleShutdownMs` has elapsed since the moment the LAST
  * busy token released, shutdown fires — BOUNDED by `createHardExitCleanup`'s
@@ -1826,11 +1665,12 @@ function createShutdownCleanup(deps: WorkerServerDeps = {}): () => Promise<void>
  * because it no longer needs session knowledge to decide when to leave).
  *
  * The `globalScanInFlight`/`getGlobalScanInFlightImpl` guard below is
- * belt-and-braces alongside the token-based clock: it also catches work
- * started off any HTTP request (the manual-dream continuation in
- * `createWorkerCore` self-schedules a queue drain with no request in
- * flight) that the fetch handler's own `trackGlobalWork` wrapping cannot see
- * directly.
+ * belt-and-braces alongside the token-based clock: it catches a global drain
+ * that the fetch handler's own `trackGlobalWork` wrapping cannot see directly.
+ * It used to have a second job — catching work the core self-scheduled off no
+ * HTTP request at all (the manual `POST /dream`'s zero-delay continuation) —
+ * and that job is gone with dream-retirement ticket 01: the core schedules
+ * nothing on its own any more.
  */
 export async function checkForWorkerIdleShutdown(
   state: WorkerServerState,
@@ -1891,48 +1731,23 @@ export async function checkForStaleBuildShutdown(
     return false;
   }
 
-  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
-
   if (state.shuttingDown || state.activeRequests > 0) {
     return false;
   }
 
-  const dreamWasRunning = isDreamRunning();
-  const serverWork = state.globalScanInFlight;
-  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
-
-  // Same division as the last-agent path: ordinary queue work is a hard guard
-  // and gets the next beat, a dream is the sole exception because its query has
-  // to be aborted before the global drain carrying it can ever settle.
-  if (!dreamWasRunning && (serverWork || coreWork)) {
-    return false;
-  }
-  if (dreamWasRunning && !deps.abortDreamImpl) {
+  // Ordinary queue work is a hard guard and gets the next beat. There used to
+  // be exactly ONE exception here — a running dream, whose query had to be
+  // aborted before the global drain carrying it could ever settle, so this
+  // function reached past the guard, called `abortDreamImpl` and re-checked.
+  // dream-retirement ticket 01 deleted the dream, and with it the only work
+  // this process could ever start that would not end on its own; the exception
+  // and its re-check are gone, leaving one unconditional guard.
+  if (state.globalScanInFlight || (deps.getGlobalScanInFlightImpl?.() ?? null)) {
     return false;
   }
 
   state.shuttingDown = true;
   try {
-    if (dreamWasRunning) {
-      await deps.abortDreamImpl?.();
-      await Promise.all([
-        serverWork?.catch(() => {}),
-        coreWork?.catch(() => {}),
-      ]);
-    }
-
-    // Work may have arrived while the dream/global drain unwound. Staleness is
-    // not re-asked: it is monotone — the foreign stamp that caused it cannot be
-    // taken back — so only the guards that can still change are re-read.
-    if (
-      state.activeRequests > 0 ||
-      state.globalScanInFlight !== null ||
-      (deps.getGlobalScanInFlightImpl?.() ?? null) !== null ||
-      isDreamRunning()
-    ) {
-      state.shuttingDown = false;
-      return false;
-    }
 
     await createShutdownCleanup(deps)();
     return true;
@@ -1996,16 +1811,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   } catch (error) {
     logger.error?.("turn-citation edge catch-up failed", { error });
   }
-
-  const diaryRuntime = deps.processDiaryItem
-    ? null
-    : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
-        db,
-        dataRoot: deps.dataRoot ?? DATA_DIR,
-        nowEpoch: deps.now,
-        config,
-        workerEnv: env,
-      });
 
   // THE RESUME DISPATCH (settlement-execution-repair ticket 04) — run only
   // for a claim that STARTS on stage `edges` (a reclaim after a crash between
@@ -2100,12 +1905,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     isStaleBuildImpl,
     now: deps.now,
     nowMs: deps.nowMs,
-    setTimeoutImpl: deps.setTimeoutImpl,
-    clearTimeoutImpl: deps.clearTimeoutImpl,
     config,
-    processDiaryItem: deps.processDiaryItem ?? diaryRuntime?.processDreamItem,
-    reconcileDreamBacklog:
-      deps.reconcileDreamBacklog ?? diaryRuntime?.reconcileDreamBacklog,
     logger,
   });
 
@@ -2118,11 +1918,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     config,
     sessionEnvRegistry,
     getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
-    isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
     isStaleBuildImpl,
-    abortDreamImpl: async () => {
-      await diaryRuntime?.abortDream?.("shutdown");
-    },
     beginGracefulExitImpl: () => {
       serverState.shuttingDown = true;
       core.beginGracefulExit();
@@ -2147,9 +1943,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       registerSessionEnvImpl: core.registerSessionEnv,
       clearSessionEnvImpl: core.clearSessionEnv,
       // Injecting core pieces above leaves the fetch factory's internal
-      // runtime unset, so /dream and /settle must be wired explicitly or they
-      // 503s.
-      handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
+      // runtime unset, so /settle must be wired explicitly or it 503s.
       handleSettleImpl: deps.handleSettleImpl ?? core.settleBackfillWindow,
       drainSettleSessionImpl:
         deps.drainSettleSessionImpl ??

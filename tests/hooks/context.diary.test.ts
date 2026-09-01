@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
@@ -65,17 +64,29 @@ describe("SessionStart dream isolation and injection", () => {
     };
   }
 
-  test("does not bootstrap or queue a due dream after the configured hour", async () => {
-    const stateStore = createDiaryStateStore(db);
+  test("SessionStart writes nothing into the retired dream tables", async () => {
+    // Formerly "does not bootstrap or queue a due dream after the configured
+    // hour" — a hook that ran PAST the 4am trigger still had to leave the
+    // scheduling to the worker. dream-retirement ticket 01 deleted the
+    // producer outright, so the same clock now proves something stronger and
+    // simpler: nothing in the SessionStart path touches `diary_state` or
+    // `diary_day_state` at all. Asserted by raw SQL because no store module
+    // exists to ask any more, and the tables are deliberately still created.
     const nowEpoch = Date.parse("2026-07-11T05:00:00+08:00") / 1_000;
     await createContextHandler({
       db,
     })(session("dream-schedule", nowEpoch));
 
-    expect(stateStore.claimNextDiaryItem(nowEpoch)).toBeNull();
-    expect(db.query<{ value: string }, []>(
-      "SELECT value FROM diary_state WHERE key = 'cutover_date'",
-    ).get()).toBeNull();
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_state",
+    ).get()!.n).toBe(0);
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_day_state",
+    ).get()!.n).toBe(0);
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM pending_queue WHERE kind = 'diary'",
+    ).get()!.n).toBe(0);
+    // The hook's own real side effect still runs, exactly once.
     expect(db.query<{ count: number }, []>(
       "SELECT COUNT(*) AS count FROM session_run_state",
     ).get()?.count).toBe(1);

@@ -42286,68 +42286,6 @@ function touchSessionRememberActivity(db, sessionId) {
   ).run(sessionId, sessionId);
 }
 
-// src/diary/calendar.ts
-var dateFormatters = /* @__PURE__ */ new Map();
-function dateFormatter(timeZone) {
-  let formatter = dateFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-    dateFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-function partNumber(parts, type) {
-  const value = parts.find((part) => part.type === type)?.value;
-  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
-  return Number.parseInt(value, 10);
-}
-function calendarDateAt(epochSeconds, timeZone) {
-  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
-  const year = String(partNumber(parts, "year")).padStart(4, "0");
-  const month = String(partNumber(parts, "month")).padStart(2, "0");
-  const day = String(partNumber(parts, "day")).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function contentDateAt(epochSeconds, timeZone, boundaryHour) {
-  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
-}
-
-// src/db/diary-state.ts
-function readDreamCalendarBoundary(db) {
-  const timeZone = db.query(
-    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
-  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const boundaryHour = Number(
-    db.query(
-      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
-    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
-  );
-  return { timeZone, boundaryHour };
-}
-function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
-  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
-  const date7 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
-  db.query(
-    `UPDATE diary_day_state
-     SET needs_regen = 1,
-         attempt_count = 0,
-         next_attempt_epoch = NULL,
-         retry_disposition = NULL,
-         last_error = NULL
-     WHERE date = ?
-       AND settled_at_epoch IS NOT NULL
-       AND date >= COALESCE(
-         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-         '9999-12-31'
-       )`
-  ).run(date7);
-}
-
 // src/db/turns.ts
 var TURN_SELECT = `
   SELECT
@@ -42512,9 +42450,6 @@ function updateTurnById(db, turnId, input) {
   if (JSON.stringify(existing.type) !== stringifyArray(mergedType) || tagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }
-  if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
-    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
-  }
   return updated;
 }
 function promoteTurnFromNote(db, turnId, input) {
@@ -42540,9 +42475,6 @@ function promoteTurnFromNote(db, turnId, input) {
     return null;
   }
   indexTurnToFTS(db, updated);
-  if (existing.status !== updated.status || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
-    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
-  }
   return updated;
 }
 function getTurnsForSession(db, sessionId) {

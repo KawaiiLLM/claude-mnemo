@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -14,21 +13,55 @@ import { createWorkerCore } from "../../src/worker/server";
  * The stranded-turn repair used to reuse the due days the dream backlog
  * reconcile returned, so the product default (`dreamAgentEnabled: false`, which
  * never reconciles and therefore never returns a day) silently switched the
- * whole cleanup off. Every case here runs with the dream disabled.
+ * whole cleanup off. It was decoupled to derive its own dates.
+ *
+ * DREAM-RETIREMENT TICKET 01 turned that decoupling into the reason this file
+ * did not have to change shape: the dream is deleted, and the repair — which
+ * had already stopped depending on it — keeps every behaviour below. What the
+ * cases USED to prove by mocking `reconcileDreamBacklog`/`processDiaryItem`
+ * and asserting they went uncalled, they now prove structurally: there is no
+ * such dependency to inject, and `queueAfterRepair` asserts the queue the
+ * repair leaves holds nothing at all — INCLUDING no `diary`-kind row, which is
+ * the ticket's "the dream tables go inert" claim seen from the queue side.
  */
 
 // Content-days are Asia/Shanghai with a 4am boundary, so these are 2026-07-10
 // and 2026-07-11 respectively — the stranded turn sits on a closed day.
 const STRANDED_EPOCH = Date.parse("2026-07-10T12:00:00+08:00") / 1_000;
 const END_EVENT_EPOCH = Date.parse("2026-07-11T12:00:00+08:00") / 1_000;
-const DUE_DATE = "2026-07-10";
 
-/** Queue residue that belongs to extraction — the seeded dream day is not it. */
-function extractionQueue(db: Database) {
-  return listPendingQueueItems(db).filter((item) => item.kind !== "diary");
+/**
+ * The WHOLE queue, unfiltered. This used to filter `kind !== "diary"` because
+ * the fixture deliberately seeded a dream day the repair had to leave alone;
+ * with the producer deleted nothing enqueues that kind any more, so dropping
+ * the filter strengthens every `toEqual([])` below into "and no dream row was
+ * created either".
+ */
+function queueAfterRepair(db: Database) {
+  return listPendingQueueItems(db);
 }
 
-describe("stranded repair runs with the dream disabled", () => {
+/**
+ * THE INERTNESS PROBE (dream-retirement ticket 01). `diary_state` and
+ * `diary_day_state` are deliberately NOT dropped — their `CREATE TABLE` still
+ * runs in schema.ts, because dropping is irreversible and buys nothing — so
+ * "the producer is gone" cannot be checked by their absence. It is checked by
+ * their emptiness across the code path that used to fill them: the worker's
+ * end event. Reading them by raw SQL is the point; there is no store module
+ * left to read them with.
+ */
+function dreamTableRowCounts(db: Database): {
+  state: number;
+  dayState: number;
+} {
+  const count = (table: string) =>
+    db
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${table}`)
+      .get()!.n;
+  return { state: count("diary_state"), dayState: count("diary_day_state") };
+}
+
+describe("stranded repair runs with no dream at all", () => {
   const databases: Database[] = [];
   afterEach(() => {
     for (const db of databases.splice(0)) db.close();
@@ -92,13 +125,6 @@ describe("stranded repair runs with the dream disabled", () => {
         ).get(triggerSessionId, options.strandedEpoch ?? STRANDED_EPOCH)!.id
       : null;
 
-    // A day is waiting in the dream queue: with the switch off nothing may
-    // claim it, and the repair must no longer need it either.
-    const stateStore = createDiaryStateStore(db);
-    stateStore.enqueueDay({ date: DUE_DATE, enqueuedAtEpoch: STRANDED_EPOCH });
-
-    const reconcileDreamBacklog = mock(async () => [DUE_DATE]);
-    const processDiaryItem = mock(async () => {});
     const registry = options.reRegisterAfterScan
       ? (() => {
           let probes = 0;
@@ -121,8 +147,6 @@ describe("stranded repair runs with the dream disabled", () => {
       now: () => END_EVENT_EPOCH,
       sessionEnvRegistry: registry,
       config: DEFAULT_CONFIG,
-      reconcileDreamBacklog,
-      processDiaryItem,
       logger: { warn() {}, error() {} },
     });
     return {
@@ -132,9 +156,6 @@ describe("stranded repair runs with the dream disabled", () => {
       triggerSessionId,
       strandedTurnId,
       triggerStrandedTurnId,
-      stateStore,
-      reconcileDreamBacklog,
-      processDiaryItem,
     };
   }
 
@@ -149,10 +170,10 @@ describe("stranded repair runs with the dream disabled", () => {
       }
 
       expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
-      expect(extractionQueue(fixture.db)).toEqual([]);
-      expect(fixture.reconcileDreamBacklog).not.toHaveBeenCalled();
-      expect(fixture.processDiaryItem).not.toHaveBeenCalled();
-      expect(fixture.stateStore.hasQueuedDay(DUE_DATE)).toBe(true);
+      expect(queueAfterRepair(fixture.db)).toEqual([]);
+      // The dream tables stay untouched by an end event (ticket 01: inert, not
+      // dropped — `CREATE TABLE` still runs, and nothing ever writes a row).
+      expect(dreamTableRowCounts(fixture.db)).toEqual({ state: 0, dayState: 0 });
     });
   }
 
@@ -162,8 +183,8 @@ describe("stranded repair runs with the dream disabled", () => {
     await fixture.core.finishSession(fixture.triggerSessionId);
 
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
-    expect(extractionQueue(fixture.db)).toEqual([]);
-    expect(fixture.reconcileDreamBacklog).not.toHaveBeenCalled();
+    expect(queueAfterRepair(fixture.db)).toEqual([]);
+    expect(dreamTableRowCounts(fixture.db)).toEqual({ state: 0, dayState: 0 });
   });
 
   test("PreCompact still drains repair-restored work for its own compacting session", async () => {
@@ -175,7 +196,7 @@ describe("stranded repair runs with the dream disabled", () => {
     await fixture.core.handleCompact(fixture.triggerSessionId, null);
 
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
-    expect(extractionQueue(fixture.db)).toEqual([]);
+    expect(queueAfterRepair(fixture.db)).toEqual([]);
   });
 
   test("a turn on the still-open content-day keeps its live status", async () => {
@@ -197,7 +218,7 @@ describe("stranded repair runs with the dream disabled", () => {
     await fixture.core.finishSession(fixture.triggerSessionId);
 
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
-    expect(extractionQueue(fixture.db)).toEqual([]);
+    expect(queueAfterRepair(fixture.db)).toEqual([]);
   });
 
   test("a session that re-registers during the drain is not floored", async () => {

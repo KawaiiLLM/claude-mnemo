@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { markSettledDiaryDayStaleForTurn } from "./diary-state";
 
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
 import { deriveTurnSegmentMembership, recomputeSegmentFacetsForTurn } from "./segments";
@@ -370,17 +369,6 @@ export function updateTurnById(
     recomputeSegmentFacetsForTurn(db, turnId);
   }
 
-  if (
-    existing.status !== updated.status ||
-    existing.userPrompt !== updated.userPrompt ||
-    existing.assistantResponse !== updated.assistantResponse ||
-    existing.title !== updated.title ||
-    existing.content !== updated.content ||
-    existing.insight !== updated.insight
-  ) {
-    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
-  }
-
   return updated;
 }
 
@@ -456,15 +444,6 @@ export function promoteTurnFromNote(
 
   indexTurnToFTS(db, updated);
 
-  if (
-    existing.status !== updated.status ||
-    existing.title !== updated.title ||
-    existing.content !== updated.content ||
-    existing.insight !== updated.insight
-  ) {
-    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
-  }
-
   return updated;
 }
 
@@ -506,15 +485,6 @@ export function resetTurnExtractionFields(
   }
   if (existing.type.length > 0 || resetTagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
-  }
-
-  if (
-    existing.status !== "active" ||
-    existing.title !== null ||
-    existing.content !== null ||
-    existing.insight !== null
-  ) {
-    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
   }
 }
 
@@ -666,10 +636,6 @@ export function updateTurnBackfill(
     transcriptLineStart ?? null,
     turnId,
   );
-
-  if (existing.assistantResponse !== assistantResponse) {
-    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
-  }
 }
 
 function hasOtherTurnWithContentPromptId(

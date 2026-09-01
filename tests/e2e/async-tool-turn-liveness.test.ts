@@ -5,8 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
-import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
@@ -30,26 +28,17 @@ describe("async tool attribution production-blockade regression", () => {
   let db: Database;
   let dataRoot: string;
   let handlers: Record<string, HookHandler>;
-  let dreamClaims: number;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
     dataRoot = mkdtempSync(join(tmpdir(), "mnemo-async-liveness-"));
-    dreamClaims = 0;
 
     const sessionEnvRegistry = new Map<string, Record<string, string>>();
-    const diaryStore = createDiaryStateStore(db);
     const core = createWorkerCore({
       db,
       now: () => NOW_EPOCH,
       sessionEnvRegistry,
-      config: DREAM_ENABLED_CONFIG,
-      reconcileDreamBacklog: async () => [DUE_DATE],
-      async processDiaryItem(item) {
-        dreamClaims += 1;
-        diaryStore.acknowledgeDiaryItem(item.seq);
-      },
       logger: { warn() {}, error() {} },
     });
 
@@ -128,9 +117,13 @@ describe("async tool attribution production-blockade regression", () => {
     }).id;
   }
 
-  test("repairs all three production shapes before the due diary becomes claimable", async () => {
-    const diaryStore = createDiaryStateStore(db);
-    diaryStore.enqueueDay({ date: DUE_DATE, enqueuedAtEpoch: DUE_EPOCH });
+  // The title used to end "before the due diary becomes claimable": the case
+  // seeded a due dream day and used its claimability as the clock the three
+  // repairs had to beat. dream-retirement ticket 01 deleted the dream, so the
+  // repairs are asserted on their own terminal outcomes — which is what the
+  // case was really about — and the dream tables are asserted EMPTY at the end
+  // instead, pinning the ticket's inertness claim through the real hook path.
+  test("repairs all three production shapes on the end event", async () => {
 
     const completedSessionId = makeSession("completed-root");
     const completedTurnId = db.query<{ id: number }, [number, number]>(
@@ -230,14 +223,12 @@ describe("async tool attribution production-blockade regression", () => {
       "SELECT COUNT(*) AS count FROM observations WHERE turn_id = ?",
     ).get(currentTurnId)?.count).toBe(1);
 
-    expect(diaryStore.hasReadyDiaryItem(NOW_EPOCH)).toBe(false);
     await run("session-end", {
       hook_event_name: "SessionEnd",
       session_id: "current-trigger",
       cwd: "/proj",
     });
 
-    expect(dreamClaims).toBe(1);
     expect(getTurnById(db, provisionalTurnId)?.status).toBe("extracted");
     expect(getTurnById(db, blockedTurnId)?.status).toBe("failed");
     expect(getTurnById(db, currentTurnId)?.status).toBe("active");
@@ -254,8 +245,18 @@ describe("async tool attribution production-blockade regression", () => {
        WHERE (kind = 'turn-stop' AND target_id = ?)
           OR (kind = 'obs' AND target_id = ?)`,
     ).get(blockedTurnId, pollutionObsId)?.count).toBe(0);
-    expect(diaryStore.hasReadyDiaryItem(NOW_EPOCH)).toBe(false);
-    expect(diaryStore.hasQueuedDay(DUE_DATE)).toBe(false);
+    // INERTNESS, end to end: a full hook-driven session — prompt, tool use,
+    // Stop, SessionEnd — writes not one row into either dream table, and
+    // enqueues not one `diary`-kind queue item.
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_state",
+    ).get()!.n).toBe(0);
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM diary_day_state",
+    ).get()!.n).toBe(0);
+    expect(db.query<{ n: number }, []>(
+      "SELECT COUNT(*) AS n FROM pending_queue WHERE kind = 'diary'",
+    ).get()!.n).toBe(0);
   });
 
   test("keeps completion notifications independent from child PostToolUse", async () => {

@@ -111,8 +111,19 @@ interface Harness {
  * worker's turn path now FAILS this test instead of being waved through.
  * (`note-settlement-stage1.ts` had already stopped being imported by
  * anything; it was a dead exemption, and a dead exemption is just a hole.)
- * The nightly dream is the one model subprocess the worker still starts from
- * this process, so `diary-runtime.ts` remains — and remains the only one.
+ *
+ * DREAM-RETIREMENT TICKET 01 EMPTIED THE LIST. `diary-runtime.ts` was the
+ * last entry: the nightly dream was the one model client this process still
+ * constructed, and it is deleted rather than contained. An EMPTY cut list is
+ * the strongest form this check can take — it means no file on the walk is
+ * exempt, so the assertion is now simply "nothing reachable from
+ * `server.ts` names the SDK", with no carve-out to hide behind. Adding an
+ * entry back is re-opening a hole and must argue for itself here.
+ *
+ * The complement is asserted on the ARTIFACT rather than the source, in
+ * tests/shared/release-artifacts.test.ts: `worker.cjs` must contain zero
+ * `@anthropic-ai` bytes. Source reachability and shipped bytes are different
+ * failures — a stale bundle passes this test and fails that one.
  *
  * SECOND, THE WALK FOLLOWS VALUE IMPORTS ONLY. `import type` is erased before
  * a byte of it reaches a bundle, so a type-only edge cannot carry a model
@@ -122,7 +133,7 @@ interface Harness {
  * offender predicate is still a bare substring scan that fires on comments,
  * because naming the package in worker-core prose is itself a smell.
  */
-const MODEL_SUBPROCESS_ENTRY_POINTS = ["src/worker/diary-runtime.ts"];
+const MODEL_SUBPROCESS_ENTRY_POINTS: string[] = [];
 
 /**
  * Drops `import type … from "…";` statements before the edge scan. Both

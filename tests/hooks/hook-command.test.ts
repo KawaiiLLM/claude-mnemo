@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
 import { createRuleStore } from "../../src/db/rules";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -103,18 +102,6 @@ describe("runHookCommand", () => {
         join(dataRoot, "diary", "INDEX.md"),
         "utf8",
       );
-      const diaryStateStore = createDiaryStateStore(db);
-      diaryStateStore.initializeBootstrap("2026-07-11");
-      diaryStateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: nowEpoch });
-      const claimed = diaryStateStore.claimNextDiaryItem(nowEpoch)!;
-      diaryStateStore.settleDreamDay({
-        date: "2026-07-10",
-        queueSeq: claimed.seq,
-        watermark: "production-wiring-watermark",
-        settledAtEpoch: nowEpoch,
-        remoteAttemptSucceeded: false,
-      });
-      diaryStateStore.markDayStale("2026-07-10");
       createRuleStore(db).create({
         name: "production-digest-rule",
         claim: "准备作出排他性断言时，先检查可溯源材料。",
@@ -125,8 +112,10 @@ describe("runHookCommand", () => {
         status: "confirmed",
         createdAtEpoch: nowEpoch,
       });
-      // Model an active turn arriving after the prior dream settled. Claiming
-      // a day that already contains this non-finalized turn is now forbidden.
+      // An active turn on the (closed) content day above. It used to model
+      // "a turn arrived after the prior dream settled, so that day may not be
+      // re-claimed"; with the dream deleted it simply keeps the fixture's
+      // shape — the SessionStart path must be indifferent to it.
       db.query(
         `INSERT INTO turns (
           session_id,
@@ -172,7 +161,20 @@ describe("runHookCommand", () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(false);
+      // Formerly `hasQueuedDay("2026-07-10") === false`: the production hook
+      // wiring must not enqueue a dream day. dream-retirement ticket 01 makes
+      // that unconditional and checkable without the deleted store — no
+      // `diary`-kind queue row, and neither dream table written, on the real
+      // `createDefaultHookHandlers` path with a live diary/persona on disk.
+      expect(db.query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM pending_queue WHERE kind = 'diary'",
+      ).get()!.n).toBe(0);
+      expect(db.query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM diary_day_state",
+      ).get()!.n).toBe(0);
+      expect(db.query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM diary_state",
+      ).get()!.n).toBe(0);
       // `startup` renders the roster (un-gated at review — the cold session
       // is its audience); the segment blocks stay gated to resume/compact.
       // (lane-model-v12 ticket 15 retired the `proposals` slot with the
