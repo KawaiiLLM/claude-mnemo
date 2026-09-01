@@ -4,7 +4,7 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent — user ruling S15069/T2367 (根据反馈开票优化一下提示词).
+**Status:** LANDED `95a14842`, VERIFIED S15069/T2369. Independent check: tsc 0, full suite 4583/0/252, my own probe (degrade the address form to a bare session range) drives the step-1 pin RED. The worker falsified this ticket's third premise — the anchor grammar WAS already in the prose (QUALIFIED FOLD, THE STATE CEILING) in the prompt job 171 received — and restated it at the failure actually made instead of adding a rule; accepted. **UNVERIFIED and stays so until a live run:** whether the new sentences change writer behaviour.
 
 ## What was observed
 

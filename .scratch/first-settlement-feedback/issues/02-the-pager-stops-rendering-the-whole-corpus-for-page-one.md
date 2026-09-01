@@ -4,7 +4,7 @@
 
 **Blocked by:** None. Do not run concurrently with 01 — both rebuild bundles.
 
-**Status:** ready-for-agent — user ruling S15069/T2367 (过滤分页器也改进下).
+**Status:** LANDED `0ad07a10`, VERIFIED S15069/T2369. Independent check: tsc 0, 4583/0/252; my own re-run on the copy: shape A 51.5 s → 0.6 s cold (agent's 0.12 s is the warm figure), B 0.1 s, C 0.0 s; my own `diff` of the agent's 11 before/after captures: every body identical, headers differ only on the two above-limit shapes. Two probes of mine: an unsound bound (`bound <= pageBudget + 8`) → reference-equivalence RED; **`Math.max(1, page - 1)` SURVIVED** — the `page → maxPages` wiring inside `paginateByRenderedPageCost` was pinned only at page 1, so a regression would have served an empty slice for every later page above the limit. Pinned in the adjudication commit (page 3 of 1,200 items through `paginate`, RED under the mutant). Header decision (`≥N`, exact `total`, 200-item threshold) accepted with its reasons. Standing UNVERIFIED as the worker stated: subadditivity of the grouping renderers is checked, not proven.
 
 ## Measured
 

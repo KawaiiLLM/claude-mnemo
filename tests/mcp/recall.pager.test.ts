@@ -241,6 +241,24 @@ describe("ticket 02 repair 1 — page 1 costs page 1, not the whole corpus", () 
     const truth = packItemsByRenderedPageCost(items, 1_000, 200, renderPage).pages.length;
     expect(paged.pageCount).toBeLessThanOrEqual(truth);
   });
+
+  test("a LATER page above the item limit is served through the same wiring, not an empty slice", () => {
+    // Adjudication probe (S15069/T2369): `Math.max(1, page - 1)` in place of
+    // `Math.max(1, page)` survived every test above — page 1 is unaffected,
+    // and the page-3 test drove `packItemsByRenderedPageCost` directly. Job
+    // 170 paged past page 1; this pins the wiring the request actually uses.
+    const items = makeCorpus(1_200, 5);
+    const counters = { calls: 0, itemsRendered: 0, seen: new Set<string>() };
+    const renderPage = makeGroupingRenderer(counters);
+
+    const exhaustive = packItemsByRenderedPageCost(items, 1_000, 200, renderPage).pages;
+    const paged = paginateByRenderedPageCost(items, 3, 1_000, 200, renderPage);
+    expect(paged.items.map((item) => item.block)).toEqual(
+      exhaustive[2]!.map((item) => item.block),
+    );
+    expect(paged.pageCountExact).toBe(false);
+    expect(paged.pageCount).toBe(4);
+  });
 });
 
 describe("ticket 02 repair 2 — an item is priced once, never by re-rendering the page", () => {
