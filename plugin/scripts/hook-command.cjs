@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mti6pruo" : "dev";
+var BUILD_ID = true ? "0.28.0-mti89kfm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11248,6 +11248,21 @@ var SEGMENT_EDITABLE_FIELDS = [
   "content",
   "insight"
 ];
+var SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER = [
+  "decisions",
+  "done",
+  "next_steps"
+];
+var RETIRED_BY_CUTOVER = new Set(
+  SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER
+);
+var SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER = SEGMENT_WORKING_STATE_FIELDS.filter(
+  (field) => !RETIRED_BY_CUTOVER.has(field)
+);
+var SEGMENT_IMPRESSION_SOURCE_FIELDS = [
+  ...SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
+  "content"
+];
 
 // src/db/segment-field-freshness.ts
 function readSegmentFieldFreshness(db, segmentId, sessionId) {
@@ -11340,8 +11355,8 @@ var WORKING_STATE_PROPERTY = {
   next_steps: "nextSteps",
   reference: "reference"
 };
-function segmentWorkingStateRows(segment) {
-  return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
+function segmentWorkingStateRows(segment, fields) {
+  return fields.map((field) => ({
     field,
     rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]])
   }));
@@ -11364,8 +11379,7 @@ function impressionContentSlot(text) {
     ]
   };
 }
-function resolveCardContentSlot(db, segment) {
-  const impression = readTaskImpressionSlot(db, segment.id);
+function resolveCardContentSlot(segment, impression) {
   if (impression === null) {
     return legacyContentSlot(segment.content);
   }
@@ -11375,6 +11389,9 @@ function resolveCardContentSlot(db, segment) {
     case "text":
       return impressionContentSlot(impression.text);
   }
+}
+function laneImpressionPointerLine(segmentId) {
+  return `${CARD_FIELD_INDENT}- lane impressions: recall(id="E${segmentId}/#<tag>")`;
 }
 function renderElidedField(entry) {
   if (entry.totalRows === 0) {
@@ -11465,6 +11482,9 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
+  const taskImpression = readTaskImpressionSlot(db, segment.id);
+  const cutOver = taskImpression !== null;
+  const workingStateFields = cutOver ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER : SEGMENT_WORKING_STATE_FIELDS;
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
@@ -11498,12 +11518,15 @@ function renderSegmentCardRecord(db, segment, options) {
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`
   );
-  const contentSlot = resolveCardContentSlot(db, segment);
+  if (cutOver) {
+    headerLines.push(laneImpressionPointerLine(segment.id));
+  }
+  const contentSlot = resolveCardContentSlot(segment, taskImpression);
   const cardFieldRows = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),
     summaryFieldRows("insight", segment.insight),
-    ...segmentWorkingStateRows(segment)
+    ...segmentWorkingStateRows(segment, workingStateFields)
   ];
   const headerTokens = estimateTokens(headerLines.join("\n"));
   const fieldsBudget = Math.max(0, pageBudget - headerTokens);
@@ -11542,7 +11565,7 @@ function renderSegmentCardRecord(db, segment, options) {
     if (insightText2) {
       lines2.push(`${CARD_FIELD_INDENT}- insight: ${insightText2}`);
     }
-    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    for (const field of workingStateFields) {
       lines2.push(...renderElidedField(fieldByKey.get(field)));
     }
     return lines2.join("\n");
@@ -11556,7 +11579,7 @@ function renderSegmentCardRecord(db, segment, options) {
   if (insightText) {
     overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
-  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+  for (const field of workingStateFields) {
     const entry = fieldByKey.get(field);
     if (entry.totalRows === 0) {
       overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
@@ -11589,7 +11612,7 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageUnits = inRange ? packedPages[fullPageIndex] : [];
   const pageUnitSet = new Set(pageUnits);
   pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
-  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS]) {
+  for (const field of ["content", "insight", ...workingStateFields]) {
     const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
     const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
     pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);

@@ -840,7 +840,17 @@ export const rememberInputShape = {
         "Summary, what an outsider browsing the task reads — " +
         "content: the impression this arc leaves, what it is about and how it went " +
         "(the arc, not per-turn conclusions). " +
-        "insight: reusable experience this task has settled.",
+        "insight: reusable experience this task has settled. " +
+        // Lane-impressions spec Rev 8, "Segment card slimming" clause 2: the
+        // card gains the pointer line AND "the tool teaching names the new
+        // surface". This is that naming — the enums themselves stay until a
+        // LATER release, after every task has cut over, because a deleted enum
+        // before a completed backfill would strand unmaintainable fields.
+        "RETIRING: once a task's card shows a `lane impressions:` pointer, its " +
+        "decisions/done/next_steps have been migrated into settlement-maintained " +
+        'IMPRESSIONS — read a lane\'s at recall(id="E<n>/#<tag>") and the task\'s in the ' +
+        "card's own impression row. Those three fields are no longer yours to maintain " +
+        "on that task; goal/constraints/reference/insight still are.",
     ),
   // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,
   // supplied verbatim (no automatic "- " row prefixing, unlike the retired

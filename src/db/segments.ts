@@ -599,6 +599,58 @@ export function markSegmentTaskImpressionStale(
   );
 }
 
+/**
+ * THE FIELD RETIREMENT half of a task's phase-2 cutover (lane-impressions spec
+ * Rev 8, "Segment card slimming"; ticket 05): `decisions`, `done` and
+ * `next_steps` are cleared because the impressions the same transaction just
+ * seeded now carry what they said.
+ *
+ * IT OPENS NO TRANSACTION AND IT CLEARS NOTHING ON ITS OWN AUTHORITY. The
+ * spec's order is law — "(1) the migration job seeds a task's impressions; (2)
+ * the card gains the mechanical pointer line …; (3) only then do that task's
+ * done/decisions/next_steps retire" — so the ONE caller
+ * (`commitImpressionBackfill`, worker/impression-backfill.ts) runs this LAST
+ * inside the committing transaction, after `replaceSegmentTaskImpression` has
+ * flipped `impression_origin` and with it the card's whole render. A rejection
+ * anywhere earlier rolls this back with everything else, which is what makes
+ * "the fields stay UNCLEARED" a property of the transaction rather than a
+ * branch someone has to remember.
+ *
+ * `content` is NOT in this list, deliberately: it is not cleared but REPLACED,
+ * by `replaceSegmentTaskImpression`, and a second writer touching it here would
+ * be a second answer to who owns that column.
+ *
+ * FTS and citations are reconciled from the RETURNING row, exactly as every
+ * other writer of these columns does — retired text must leave the search index
+ * with the column, and a citation that only a retired field carried must stop
+ * being asserted.
+ */
+export function retireSegmentImpressionSourceFields(
+  db: Database,
+  segmentId: number,
+  nowEpoch: number,
+): SegmentRecord | null {
+  const updated = mapSegmentRow(
+    db
+      .query<SegmentRow, [number, number]>(
+        `UPDATE segments
+            SET decisions = NULL,
+                done = NULL,
+                next_steps = NULL,
+                updated_at_epoch = ?
+          WHERE id = ?
+         RETURNING ${SEGMENT_COLUMNS}`,
+      )
+      .get(nowEpoch, segmentId) ?? null,
+  );
+  if (!updated) {
+    return null;
+  }
+  indexSegment(db, updated);
+  reconcileSegmentCitedPairs(db, updated, nowEpoch);
+  return updated;
+}
+
 // ---------------------------------------------------------------------------
 // Derived facets (spec K5a, ticket 14)
 // ---------------------------------------------------------------------------

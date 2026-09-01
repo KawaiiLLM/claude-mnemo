@@ -1324,6 +1324,24 @@ describe("rememberInputShape", () => {
     expect(description).toContain("insight: reusable experience this task has settled");
   });
 
+  // Lane-impressions ticket 05 (spec "Segment card slimming", order clause 2:
+  // the card gains the pointer line AND "the tool teaching names the new
+  // surface"). The ENUM ITSELF is untouched on purpose — the spec pins that
+  // removal to a later release, after every task has cut over.
+  it("field's describe() names the impression surface the three retiring fields moved to", () => {
+    const description = rememberInputShape.field.description ?? "";
+    expect(description).toContain("decisions/done/next_steps");
+    expect(description).toContain('recall(id="E<n>/#<tag>")');
+    expect(description).toContain("lane impressions:");
+    // The enum is not narrowed in this batch.
+    expect(() =>
+      rememberInputSchema.parse({ verb: "write", id: "E1", field: "done", value: "x" }),
+    ).not.toThrow();
+    expect(() =>
+      rememberInputSchema.parse({ verb: "write", id: "E1", field: "next_steps", value: "x" }),
+    ).not.toThrow();
+  });
+
   it("rejects a verb outside the closed vocabulary", () => {
     // Container-unification ticket 06 made `delete` a real verb — this test
     // needs a word that is NOT one of the nine, so it no longer uses that

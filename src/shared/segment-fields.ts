@@ -44,3 +44,57 @@ export const SEGMENT_EDITABLE_FIELDS = [
 ] as const;
 
 export type SegmentEditableField = (typeof SEGMENT_EDITABLE_FIELDS)[number];
+
+/**
+ * THE CARD SLIMMING, as a field set (lane-impressions spec Rev 8, "Segment card
+ * slimming"; ticket 05).
+ *
+ * Once a task's backfill job has committed — `segments.impression_origin` is
+ * non-null, ticket 01's mechanical discriminator — three of the six Working
+ * State fields are RETIRED: `done` retires outright, `decisions` dissolves into
+ * the impressions' binding lines, and the `next_steps` NARRATIVE retires (what
+ * is still owed lives in an impression's frontier lines). `goal`,
+ * `constraints` and `reference` keep, and `insight` keeps beside them in the
+ * summary layer; `content` becomes the task-tier impression.
+ *
+ * WHAT THIS LIST IS NOT: it does not remove anything from `remember`'s own
+ * `field` enum. The spec pins that removal to a LATER release, after every task
+ * carrying legacy fields has cut over — "a deleted enum before a completed
+ * backfill would strand unmaintainable fields". This is the CARD's render set,
+ * and nothing more.
+ */
+export const SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER = [
+  "decisions",
+  "done",
+  "next_steps",
+] as const satisfies readonly SegmentWorkingStateField[];
+
+const RETIRED_BY_CUTOVER = new Set<string>(
+  SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
+);
+
+/**
+ * The Working State fields a CUT-OVER task's card still renders, in
+ * `SEGMENT_WORKING_STATE_FIELDS`' own declared order — derived from the list
+ * above rather than spelled a second time, so "which three retire" is one fact
+ * with one home.
+ */
+export const SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER =
+  SEGMENT_WORKING_STATE_FIELDS.filter(
+    (field) => !RETIRED_BY_CUTOVER.has(field),
+  ) as readonly SegmentWorkingStateField[];
+
+/**
+ * THE MIGRATION'S SOURCE FIELDS (spec "Legacy backfill": "inputs = the retiring
+ * field contents (done/decisions/next_steps + current content)").
+ *
+ * FOUR, not three: `content` is a source of the TASK-TIER impression even
+ * though it is not cleared — it is REPLACED by the impression it feeds, in the
+ * same transaction. This list is what the source-snapshot fence digests, so it
+ * has to name every input the model was shown, not only the ones that end up
+ * NULL.
+ */
+export const SEGMENT_IMPRESSION_SOURCE_FIELDS = [
+  ...SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
+  "content",
+] as const satisfies readonly SegmentEditableField[];

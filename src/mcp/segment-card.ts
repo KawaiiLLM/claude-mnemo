@@ -13,7 +13,11 @@ import {
 import { latestSegmentFieldWriteEpoch } from "../db/segment-field-freshness";
 import { countTurnsSince, getSession } from "../db/sessions";
 import { getTurnById } from "../db/turns";
-import { SEGMENT_WORKING_STATE_FIELDS, type SegmentWorkingStateField } from "../shared/segment-fields";
+import {
+  SEGMENT_WORKING_STATE_FIELDS,
+  SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER,
+  type SegmentWorkingStateField,
+} from "../shared/segment-fields";
 import { estimateTokens } from "../utils/token-estimate";
 
 import {
@@ -29,7 +33,7 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
-import { readTaskImpressionSlot } from "./impression-display";
+import { readTaskImpressionSlot, type ImpressionDisplay } from "./impression-display";
 import { buildTurnRelationLines } from "./relations-view";
 
 /**
@@ -215,8 +219,11 @@ const WORKING_STATE_PROPERTY: Record<
   reference: "reference",
 };
 
-function segmentWorkingStateRows(segment: SegmentRecord): SegmentCardFieldRows[] {
-  return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
+function segmentWorkingStateRows(
+  segment: SegmentRecord,
+  fields: readonly SegmentWorkingStateField[],
+): SegmentCardFieldRows[] {
+  return fields.map((field) => ({
     field,
     rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]]),
   }));
@@ -286,9 +293,17 @@ function impressionContentSlot(text: string): CardContentSlot {
  * settlement's own retain refusal enforces. Nothing on this surface is
  * suppressed, and the `[impression pending synthesis]` line it used to show has
  * no reachable case left.
+ *
+ * TAKES THE TENANCY ANSWER, DOES NOT ASK IT (lane-impressions ticket 05). The
+ * same `readTaskImpressionSlot` result decides two things now — who owns this
+ * slot, and whether this task's card is SLIMMED — so the caller asks once and
+ * passes it here. Asking twice would let the content slot and the field list
+ * disagree about whether the same task has cut over.
  */
-function resolveCardContentSlot(db: Database, segment: SegmentRecord): CardContentSlot {
-  const impression = readTaskImpressionSlot(db, segment.id);
+function resolveCardContentSlot(
+  segment: SegmentRecord,
+  impression: ImpressionDisplay | null,
+): CardContentSlot {
   if (impression === null) {
     return legacyContentSlot(segment.content);
   }
@@ -298,6 +313,27 @@ function resolveCardContentSlot(db: Database, segment: SegmentRecord): CardConte
     case "text":
       return impressionContentSlot(impression.text);
   }
+}
+
+/**
+ * THE MECHANICAL POINTER LINE (lane-impressions spec Rev 8, "Segment card
+ * slimming", order clause 2: the pointer PRECEDES the retirement).
+ *
+ * It is spelled exactly as the spec spells it, `<tag>` placeholder included:
+ * "no vocabulary expansion on the pointer (tags still come from the milestone
+ * digest)". Enumerating this task's declared lanes here would put a second lane
+ * vocabulary on a card that deliberately carries none — the reason ticket 18
+ * took `- lanes:` off it, and the reason it is not coming back through this
+ * line.
+ *
+ * It renders on exactly the same condition the slimming does, because it is the
+ * same fact: `impression_origin` is non-null, this task's backfill job
+ * committed. A reader who finds `done` missing therefore always finds this line
+ * in the same response — the ordering the spec calls law is a property of one
+ * predicate rather than of two calls in the right sequence.
+ */
+function laneImpressionPointerLine(segmentId: number): string {
+  return `${CARD_FIELD_INDENT}- lane impressions: recall(id="E${segmentId}/#<tag>")`;
 }
 
 /**
@@ -519,6 +555,18 @@ export function renderSegmentCardRecord(
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
 
+  // THE CUTOVER QUESTION, ASKED ONCE (lane-impressions ticket 05). `null` means
+  // the content slot is still legacy field text — this task's backfill job has
+  // not committed — and a non-null answer means all three of: the slot holds
+  // the task-tier impression, the card carries the pointer line, and
+  // done/decisions/next_steps have retired from it. One fact, three
+  // consequences, so it cannot be true of one of them and false of another.
+  const taskImpression = readTaskImpressionSlot(db, segment.id);
+  const cutOver = taskImpression !== null;
+  const workingStateFields = cutOver
+    ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER
+    : SEGMENT_WORKING_STATE_FIELDS;
+
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
@@ -605,6 +653,14 @@ export function renderSegmentCardRecord(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`,
   );
 
+  // The pointer sits in the FIXED HEADER, which is never elided and renders on
+  // every page. A pointer to the surface that now holds the retired narrative
+  // must not be the row a tight budget drops — that would leave a reader with
+  // a card missing `done` and no way to learn where it went.
+  if (cutOver) {
+    headerLines.push(laneImpressionPointerLine(segment.id));
+  }
+
   // -----------------------------------------------------------------------
   // The elision ladder (ticket 08): the summary trio (title/content/
   // insight) and the six Working State fields all compete for what's left
@@ -617,12 +673,12 @@ export function renderSegmentCardRecord(
   // before the ladder, and it is the RENDERED text that competes for budget —
   // an impression by its own bytes, a STALE one by the marker's, legacy prose
   // exactly as before.
-  const contentSlot = resolveCardContentSlot(db, segment);
+  const contentSlot = resolveCardContentSlot(segment, taskImpression);
   const cardFieldRows: SegmentCardFieldRows[] = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),
     summaryFieldRows("insight", segment.insight),
-    ...segmentWorkingStateRows(segment),
+    ...segmentWorkingStateRows(segment, workingStateFields),
   ];
 
   const headerTokens = estimateTokens(headerLines.join("\n"));
@@ -693,7 +749,7 @@ export function renderSegmentCardRecord(
     if (insightText) {
       lines.push(`${CARD_FIELD_INDENT}- insight: ${insightText}`);
     }
-    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    for (const field of workingStateFields) {
       lines.push(...renderElidedField(fieldByKey.get(field)!));
     }
     return lines.join("\n");
@@ -716,7 +772,7 @@ export function renderSegmentCardRecord(
   if (insightText) {
     overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
-  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+  for (const field of workingStateFields) {
     const entry = fieldByKey.get(field)!;
     if (entry.totalRows === 0) {
       overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
@@ -762,7 +818,7 @@ export function renderSegmentCardRecord(
   // ever split one field's rows across two responses. `title` is always
   // complete here (never paginated — see above).
   pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
-  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS] as const) {
+  for (const field of ["content", "insight", ...workingStateFields] as const) {
     const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
     const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
     pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);

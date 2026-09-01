@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path17 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.28.0-mti6pruo" : "dev";
+var BUILD_ID = true ? "0.28.0-mti89kfm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -15333,6 +15333,21 @@ var SEGMENT_EDITABLE_FIELDS = [
   "content",
   "insight"
 ];
+var SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER = [
+  "decisions",
+  "done",
+  "next_steps"
+];
+var RETIRED_BY_CUTOVER = new Set(
+  SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER
+);
+var SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER = SEGMENT_WORKING_STATE_FIELDS.filter(
+  (field) => !RETIRED_BY_CUTOVER.has(field)
+);
+var SEGMENT_IMPRESSION_SOURCE_FIELDS = [
+  ...SEGMENT_FIELDS_RETIRED_BY_IMPRESSION_CUTOVER,
+  "content"
+];
 
 // src/db/segment-field-freshness.ts
 function latestSegmentFieldWriteEpoch(db, segmentId) {
@@ -15439,8 +15454,8 @@ var WORKING_STATE_PROPERTY = {
   next_steps: "nextSteps",
   reference: "reference"
 };
-function segmentWorkingStateRows(segment) {
-  return SEGMENT_WORKING_STATE_FIELDS.map((field) => ({
+function segmentWorkingStateRows(segment, fields) {
+  return fields.map((field) => ({
     field,
     rows: splitBulletField(segment[WORKING_STATE_PROPERTY[field]])
   }));
@@ -15463,8 +15478,7 @@ function impressionContentSlot(text) {
     ]
   };
 }
-function resolveCardContentSlot(db, segment) {
-  const impression = readTaskImpressionSlot(db, segment.id);
+function resolveCardContentSlot(segment, impression) {
   if (impression === null) {
     return legacyContentSlot(segment.content);
   }
@@ -15474,6 +15488,9 @@ function resolveCardContentSlot(db, segment) {
     case "text":
       return impressionContentSlot(impression.text);
   }
+}
+function laneImpressionPointerLine(segmentId) {
+  return `${CARD_FIELD_INDENT}- lane impressions: recall(id="E${segmentId}/#<tag>")`;
 }
 function renderElidedField(entry) {
   if (entry.totalRows === 0) {
@@ -15564,6 +15581,9 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageBudget = options.pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET;
   const page = Math.max(1, options.page ?? 1);
   const elides = page <= 1;
+  const taskImpression = readTaskImpressionSlot(db, segment.id);
+  const cutOver = taskImpression !== null;
+  const workingStateFields = cutOver ? SEGMENT_WORKING_STATE_FIELDS_AFTER_CUTOVER : SEGMENT_WORKING_STATE_FIELDS;
   const members = chronologicalSegmentMembers(db, segment, eraCutoffEpoch);
   const attachedSessionIds = getAttachedSessionIds(db, segment.id);
   const sessionRows = buildAttachedSessionRows(db, segment, members);
@@ -15597,12 +15617,15 @@ function renderSegmentCardRecord(db, segment, options) {
   headerLines.push(
     `${CARD_FIELD_INDENT}- sessions: ${sessionRows.length === 0 ? "(none attached)" : sessionIdList}`
   );
-  const contentSlot = resolveCardContentSlot(db, segment);
+  if (cutOver) {
+    headerLines.push(laneImpressionPointerLine(segment.id));
+  }
+  const contentSlot = resolveCardContentSlot(segment, taskImpression);
   const cardFieldRows = [
     summaryFieldRows("title", segment.title),
     summaryFieldRows("content", contentSlot.ladderText),
     summaryFieldRows("insight", segment.insight),
-    ...segmentWorkingStateRows(segment)
+    ...segmentWorkingStateRows(segment, workingStateFields)
   ];
   const headerTokens = estimateTokens(headerLines.join("\n"));
   const fieldsBudget = Math.max(0, pageBudget - headerTokens);
@@ -15641,7 +15664,7 @@ function renderSegmentCardRecord(db, segment, options) {
     if (insightText2) {
       lines2.push(`${CARD_FIELD_INDENT}- insight: ${insightText2}`);
     }
-    for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+    for (const field of workingStateFields) {
       lines2.push(...renderElidedField(fieldByKey.get(field)));
     }
     return lines2.join("\n");
@@ -15655,7 +15678,7 @@ function renderSegmentCardRecord(db, segment, options) {
   if (insightText) {
     overflowUnits.push({ field: "insight", lines: [`${CARD_FIELD_INDENT}- insight: ${insightText}`] });
   }
-  for (const field of SEGMENT_WORKING_STATE_FIELDS) {
+  for (const field of workingStateFields) {
     const entry = fieldByKey.get(field);
     if (entry.totalRows === 0) {
       overflowUnits.push({ field, lines: [`${CARD_FIELD_INDENT}- ${entry.field}: 0 rows`] });
@@ -15688,7 +15711,7 @@ function renderSegmentCardRecord(db, segment, options) {
   const pageUnits = inRange ? packedPages[fullPageIndex] : [];
   const pageUnitSet = new Set(pageUnits);
   pushFieldCompleteness(options.signal, "segment", segment.id, "title", true);
-  for (const field of ["content", "insight", ...SEGMENT_WORKING_STATE_FIELDS]) {
+  for (const field of ["content", "insight", ...workingStateFields]) {
     const fieldUnits = overflowUnits.filter((unit) => unit.field === field);
     const complete = fieldUnits.length === 0 || fieldUnits.every((unit) => pageUnitSet.has(unit));
     pushFieldCompleteness(options.signal, "segment", segment.id, field, complete);
@@ -61038,7 +61061,7 @@ var rememberInputShape = {
     // main agent's standing source for what a segment field IS, and the
     // settlement surface has no `field` parameter at all (it writes
     // membership, never segment fields), so nothing else needed a copy.
-    "write/edit only (required): which field. Working State, what a resuming session needs to continue \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. decisions: concrete rulings about the task itself, settled and binding. done: what is finished and verified. next_steps: what is waiting to be done. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary, what an outsider browsing the task reads \u2014 content: the impression this arc leaves, what it is about and how it went (the arc, not per-turn conclusions). insight: reusable experience this task has settled."
+    "write/edit only (required): which field. Working State, what a resuming session needs to continue \u2014 goal: what this task is trying to achieve. constraints: how the work must be done \u2014 norms, habits, standing preferences. decisions: concrete rulings about the task itself, settled and binding. done: what is finished and verified. next_steps: what is waiting to be done. reference: durable pointers \u2014 source locations, specs, PRs, URLs; not plans. Summary, what an outsider browsing the task reads \u2014 content: the impression this arc leaves, what it is about and how it went (the arc, not per-turn conclusions). insight: reusable experience this task has settled. RETIRING: once a task's card shows a `lane impressions:` pointer, its decisions/done/next_steps have been migrated into settlement-maintained IMPRESSIONS \u2014 read a lane's at recall(id=\"E<n>/#<tag>\") and the task's in the card's own impression row. Those three fields are no longer yours to maintain on that task; goal/constraints/reference/insight still are."
   ),
   // Ticket 05: `write`'s own payload — the field's WHOLE replacement text,
   // supplied verbatim (no automatic "- " row prefixing, unlike the retired
