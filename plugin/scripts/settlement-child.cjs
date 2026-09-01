@@ -53432,7 +53432,7 @@ function renderLaneError(error49, addresses) {
       return head + renderEdgeArrow(error49.citingId, error49.relation, error49.citedId, addresses) + ": DRAFT edge -- " + (error49.unsettledSides.length === 2 ? "neither side names a lane" : "the " + error49.unsettledSides[0] + " side names no lane (the " + (error49.unsettledSides[0] === "tail" ? "head" : "tail") + " side is {" + error49.tags.join(",") + "})");
   }
 }
-var LANE_CHECK_WARNING_NOTICE = "WARNING \u2014 informational; does not block commit. Do not call justify or delay commit. Add a stitch only if a truthful relation is already supported by the material you are processing.";
+var LANE_CHECK_WARNING_NOTICE = "WARNING \u2014 informational; does not block commit. Do not delay commit to act on it. Add a stitch only if a truthful relation is already supported by the material you are processing.";
 var WARNINGS_SECTION_HEADER = "## WARNINGS -- informational; nothing below this line blocks commit";
 var ERRORS_SECTION_HEADER = "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains";
 var MAX_AGGREGATE_ADDRESS_SAMPLES = 5;

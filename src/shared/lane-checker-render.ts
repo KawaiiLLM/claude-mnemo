@@ -794,16 +794,22 @@ export function renderLaneCheckerReports(
  * this batch exists to remove — job 166 spent 21 refused commits and ~54M
  * cache-read tokens on a demand it could not satisfy. So the text states three
  * things a reader would otherwise have to infer: that nothing here blocks,
- * that the two round-trip-buying moves (`justify`, delaying `commit`) are not
- * wanted, and that a stitch is legitimate only when the material the run is
- * already holding supports it — never as a way to silence the line.
+ * that delaying `commit` to work on this line is not wanted, and that a stitch
+ * is legitimate only when the material the run is already holding supports it
+ * — never as a way to silence the line.
+ *
+ * Ticket 06 review: the notice used to name `justify` as one of the two
+ * round-trip-buying moves. That verb is retired, and a warning that forbids a
+ * call the tool no longer offers is stale text sitting in the model's context —
+ * the exact class of thing this batch exists to remove. The ticket-04 freeze
+ * protected the no-action INSTRUCTION, not a reference to a deleted action.
  *
  * It lives in this SHARED module rather than beside the gate because both
  * printers must emit the identical bytes; a second copy in the worker is how
  * the two would come to word it differently.
  */
 export const LANE_CHECK_WARNING_NOTICE =
-  "WARNING — informational; does not block commit. Do not call justify or delay commit. " +
+  "WARNING — informational; does not block commit. Do not delay commit to act on it. " +
   "Add a stitch only if a truthful relation is already supported by the material you are processing.";
 
 /**
