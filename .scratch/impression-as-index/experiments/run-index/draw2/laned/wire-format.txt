@@ -1,0 +1,5 @@
+REPLACE
+S24117/T34..T44: zstd beat gzip 2.9x/31% but logged EVALUATION ONLY, no ruling; migration script drafted, nothing wired in — gzip stays the only encoding any reader accepts.
+S24117/T38..T41: histogram exporter added (9b02e51); 0-length-frame crash fixed as a keepalive (c77b3e2); no format change, pure hardening of the shipped implementation.
+S24117/T23: reference encoder/decoder committed 3d1f7ac, 214 round-trip tests green, fuzzer clean at 2M cases — every deployed reader builds from this.
+S24117/T12..T19: frame locked as 4-byte length prefix + atomic gzip body, zlib-only fleet-wide, no streaming — stands; field tags later overturned to varint ids via the schema registry, UTF-8 string form REMOVED, no compat window.

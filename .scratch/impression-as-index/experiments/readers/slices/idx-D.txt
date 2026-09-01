@@ -1,0 +1,3 @@
+S24117/T44: drafted a zstd migration script, tested on a sample in tmp; nothing wired in, gzip remains the only accepted encoding
+S24117/T41: decoder crash on empty frames fixed and committed, now treated as keepalive; no format change
+S24117/T38: frame size histogram exporter added and committed; no format change

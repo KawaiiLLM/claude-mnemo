@@ -1,0 +1,3 @@
+REPLACE
+S18993/T89..T93: retro pixel 3/4 top-down locked over the oblique-vector plan; sourcing ~80% off-the-shelf packs + ~15% AI pixel gen; SPEC v4 formalizes it
+S18993/T82..T88: M3 redefined around SAN11 mechanic+visual fidelity; oblique 2.5D then pure-2D vector projection locked then overturned; pixel-art feasibility research grounded the final pick

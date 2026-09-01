@@ -1,0 +1,4 @@
+REPLACE
+S22040/T60: playback's 35ms stays deferred, unmeasured, not endorsed while transform work continues.
+S22040/T51..T57: transform leg's real cost is the resampler's recompute, not the FFT as assumed; a precomputed prototype cuts it to 21ms, unwired — prototype only.
+S22040/T41..T44: locked the 120ms budget as 25ms capture, 60ms transform, 35ms playback — a ruling, not a measurement; capture leg landed and committed, within budget.

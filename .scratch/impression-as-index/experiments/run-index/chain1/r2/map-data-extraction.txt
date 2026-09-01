@@ -1,0 +1,3 @@
+REPLACE
+S18993/T97..T99: username resolved (win-ssh script override), 1.5G 萌战无双4++ and bin-editor v1.095 both scp'd to Win, byte-verified intact
+S18993/T93..T96: SAN11 map layout researched; decoded the bin-editor's download link, wrote the export recipe (decoded-only, nothing extracted); Win machine confirmed SSH-reachable, blocked on username

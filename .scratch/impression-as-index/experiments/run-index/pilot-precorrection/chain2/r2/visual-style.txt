@@ -1,0 +1,2 @@
+REPLACE
+S18993/T82..T93: SAN11 mechanic+visual fidelity became M3's goal, LLM deprioritized; pure-2D oblique lock overturned, retro pixel 3/4 top-down locked instead (~80% CC0 packs, ~15% AI-gen), formalized into SPEC v4

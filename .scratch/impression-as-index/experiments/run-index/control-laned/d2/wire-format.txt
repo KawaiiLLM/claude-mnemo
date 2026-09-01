@@ -1,0 +1,4 @@
+REPLACE
+The wire-format lane: the on-wire frame is length-prefixed, atomic (no streaming), gzip-body under a standing ruling (S24117/T12); field tags are varint ids via the schema registry, the prior UTF-8 string-tag form is removed outright with no compatibility window (T19), grounded by a committed reference encoder/decoder passing 214 round-trip tests and a 2M-case fuzzer clean (T23).
+zstd evaluated only vs gzip: 2.9x faster, 31% smaller; no ruling made, gzip still governs every frame (S24117/T34). Migration script is /tmp-only, unwired, unowned (T44).
+The decoder now treats a 0-length frame as a keepalive instead of crashing, no frame-grammar change (S24117/T41).

@@ -1,0 +1,8 @@
+REPLACE
+S18993/T196..T199: render blur fixed by nearest+mipmap and an integer zoom ladder; 4793.K3ST decoded as mapA's elevation and rendered as an offline hillshade — zero art, zero client change, so integration and elevation-combat rules stay open
+S18993/T159..T179: road cells became whole regenerated road tiles, replacing the mid-tile stripe the user rejected, committed a32588c; the client viewport was raised to 1920x1080, committed 5c97488
+S18993/T124..T149: diagonal-brick diamond geometry ruled+verified — top-down reading comes from axis-aligned gridlines, not 2:1 foreshortening; ticket 004's six acceptance criteria hand-verified, commit set staged
+S18993/T132..T135: tile form locked on the current collage tiles, native regen unscheduled — since scheduled and rebuilt for road tiles; officer stats and portraits ruled to come from the 萌战 package, extraction not built
+S18993/T117..T123: visible stagger ruled mandatory or the isometric asset is void; brick-rect placement built and faulted for still reading top-down
+S18993/T103..T109: 2:1 isometric locked game-wide over 3/4 top-down; the scrabling.itch.io pack cleared as CC BY 4.0 and gap-filled to 89 tiles
+S18993/T82..T93: SAN11 mechanic and visual fidelity became M3's goal; retro pixel art in 3/4 top-down was picked over the oblique vector plan, since overturned

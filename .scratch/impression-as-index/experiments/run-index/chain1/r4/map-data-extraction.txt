@@ -1,0 +1,3 @@
+REPLACE
+S18993/T198..T199: 4793.K3ST cracked as mapA's height field, alignment cross-correlated to the map grid (r=0.668), confirmed by an offline hillshade
+S18993/T93..T103: bin-editor link decoded and export recipe written, decoded-only with nothing extracted; SHEX map format then cracked, mapA picked over mirrored mapB, odd-r hex adjacency locked 42/42 vs 0

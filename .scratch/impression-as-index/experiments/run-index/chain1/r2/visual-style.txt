@@ -1,0 +1,3 @@
+REPLACE
+S18993/T93: SPEC v4 locked — M3's visual milestone formalized to pixel-art 3/4 top-down (asset+gen pipeline), per T89's pick
+S18993/T82..T89: M3 redefined to SAN11 mechanic+visual fidelity; oblique/vector projection churned then superseded by retro pixel art 3/4 top-down, locking 3-tier sourcing (~80% packs, ~15% AI gen)

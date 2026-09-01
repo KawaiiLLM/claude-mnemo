@@ -1,0 +1,4 @@
+REPLACE
+S22040/T60: playback's 35ms deferred, unendorsed -- inherited unexamined from T41
+S22040/T51..T57: transform's real cost is the resampler, not FFT -- 48 of 74ms; prototype cuts it to 21ms, unwired, /tmp only
+S22040/T41..T44: 120ms locked, split 25/60/35ms; capture landed, committed, within 25ms

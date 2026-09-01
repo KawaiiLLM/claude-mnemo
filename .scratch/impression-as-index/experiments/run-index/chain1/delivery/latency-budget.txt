@@ -1,0 +1,5 @@
+REPLACE
+#latency-budget
+S22040/T60: playback's 35ms deferred, unruled, from T41
+S22040/T51..T57: transform cost is the resampler not the FFT; prototype cuts 74ms to 21ms, /tmp only, unwired
+S22040/T41..T44: 120ms ruled 25/60/35ms, legs borrow only by new ruling, never the total; capture leg shipped

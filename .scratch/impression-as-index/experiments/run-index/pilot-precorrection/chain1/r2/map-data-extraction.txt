@@ -1,0 +1,2 @@
+REPLACE
+S18993/T93..T99: SAN11 map-data extraction path built — decoded the bin-editor link and export recipe, confirmed Win-machine SSH, byte-verified transfers of the game data and bin editor v1.095; the tile-info export itself not yet run

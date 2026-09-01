@@ -1,0 +1,24 @@
+=== settlement window D: turns T10-T50 ===
+
+--- lane #wire-format: 7 member turns in this window ---
+T12 [design] Locked the frame format: length-prefixed, gzip body, no streaming
+   content: User ruled the on-wire body compression is gzip and nothing else: every consumer in the fleet already links zlib, and a second codec would fork the reader. The frame is a 4-byte big-endian length prefix plus a gzip body. Chunked/streaming bodies were rejected outright — a frame is atomic or it does not exist, because partial frames are how a decoder desynchronises and then lies about what it read. This is a RULING, not a measurement: it stands until a new ruling replaces it, and a benchmark on its own may not replace it.
+T19 [correction,design] Field tags moved from UTF-8 names to varint ids; the string form is removed
+   content: Overturns T12's companion decision to carry field names as UTF-8 strings in every frame. Tags are now varint ids resolved through the schema registry that already existed for validation. The string form is REMOVED, not deprecated — the decoder rejects a frame that carries it, and there is no compatibility window. Measured motivation: name repetition was 41% of a typical production frame. The length-prefix and gzip parts of T12 are untouched by this.
+T23 [implement,ops] Reference encoder and decoder landed
+   content: Encoder and decoder for the length-prefixed gzip frame with varint tags committed as 3d1f7ac on main after review; 214 round-trip tests green over the captured corpus, fuzzer clean at 2M cases. This is the reference implementation every deployed reader is built from.
+T34 [research,measure] zstd evaluated against gzip on the production corpus
+   content: Benchmarked zstd-19 against gzip-6 over 4.2GB of captured production frames: zstd decodes 2.9x faster and lands 31% smaller at equal encode CPU. Written up as an EVALUATION ONLY — no ruling was requested and none was made. T12's gzip ruling is untouched and still governs every frame on the wire. The fleet-wide zlib-only constraint that motivated T12 was not re-checked here, so the number that would actually decide a cutover is missing.
+T38 [implement,measure] Frame-size histogram exporter added
+   content: Added a per-connection frame-size histogram to the metrics exporter, committed 9b02e51: 12 buckets, p99 frame 41KB, p50 2.3KB. Ordinary instrumentation on the existing format — no format change, no ruling touched.
+T41 [fix,ops] Decoder crashed on 0-length frames; they are keepalives now
+   content: A 0-length frame was reaching the gzip path and crashing the decoder. Fixed to treat length 0 as a keepalive and skip it, committed c77b3e2, with a regression test over the captured corpus. No format change — the frame grammar is unchanged, only the decoder's handling of a legal empty body.
+T44 [research] Migration script drafted for a hypothetical zstd cutover
+   content: Drafted tools/migrate_frames.py, which would rewrite stored frames from gzip to zstd, and exercised it against a 200MB sample in /tmp. NOTHING IS WIRED IN and no ruling authorises a cutover — the script exists so that IF T12 is ever re-ruled the cost is already known. gzip remains the only body encoding any deployed reader accepts, and no ticket owns a migration.
+   edges written this window (wire-format):
+   T19 --override--> T12 (tail:wire-format head:wire-format)
+   T23 --grounds--> T19 (tail:wire-format head:wire-format)
+   T34 --extends--> T12 (tail:wire-format head:wire-format)
+   T38 --extends--> T23 (tail:wire-format head:wire-format)
+   T41 --extends--> T23 (tail:wire-format head:wire-format)
+   T44 --extends--> T34 (tail:wire-format head:wire-format)

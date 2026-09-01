@@ -1,0 +1,1 @@
+The pipeline's 120ms budget splits capture 25ms/transform 60ms/playback 35ms (S22040/T41). Capture committed (T44). Transform's real cost is the resampler, not the FFT (T51); the fix is prototyped, unwired, open (T57). Playback's 35ms is unexamined and unre-ruled (T60).
