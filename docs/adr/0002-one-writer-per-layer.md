@@ -30,6 +30,19 @@
 > window sees it on the roster) and reassign a turn to any open segment, on this session's
 > roster or not — the "only among the session's attached segments" limit is revoked, while the
 > proposal verb and its ask-the-user discipline stand for the cases where nothing fits.
+>
+> **Amendment 4 — the impression is the one field class settlement writes ALONE
+> (lane-impressions, spec Rev 8, 2026-09-01).** Amendment 3 read the table as *primary*
+> writer, with correction rights settled by one gate. The **Impression** (CONTEXT.md) is the
+> exception that stays a SOLE-writer row: settlement writes it at its terminal commit, under a
+> CAS fence, and the main agent has no verb that reaches it at either tier. That is not a
+> narrower ownership rule bolted on — it is what made the retirement affordable. `done`,
+> `decisions` and `next_steps` left `remember` entirely, and `content` left the main agent's
+> write vocabulary with them, because their maintenance burden was the reason to move the
+> narrative to a writer that already reads the whole window. Consequences for this ADR's own
+> text: the "Segment fields (semantic) | main agent" row now means `goal` / `constraints` /
+> `reference` / `insight`; and Amendment 2's note about `decisions` sitting outside the cadence
+> is moot a second time — the field is gone. The cadence receipt itself is unchanged.
 
 ## Context
 

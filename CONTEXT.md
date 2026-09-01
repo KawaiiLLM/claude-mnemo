@@ -11,7 +11,10 @@ until that release the CODE still speaks the flow-era semantics), and the
 shipped — a lane-first structural election replaces effGrade-based
 milestone selection wholesale), and the 2026-08-29 staged-settlement redesign
 (`.scratch/staged-settlement/`, ADR-0014 — settlement splits into a topic pass
-and an edge pass, and turns carry a `topic:` subject word).
+and an edge pass, and turns carry a `topic:` subject word), and the 2026-09-01
+lane-impressions redesign (`.scratch/lane-impressions/`, spec Rev 8 — settlement
+maintains a per-lane mental model, and the Task's narrative fields retire into
+it).
 
 ## Language
 
@@ -63,11 +66,73 @@ The episodic container for one conversation. Carries no semantic memory.
 _Avoid_: task (a session is a slice of one or more tasks)
 
 **Summary layer**:
-The Task fields written for outsiders browsing it.
+The Task fields written for outsiders browsing it. Now `insight` plus the
+task-tier **Impression** below; the narrative prose the main agent used to
+write into `content` left the product with the retired fields.
 
 **Working State**:
-The Task fields a resuming session needs to continue it.
+The Task fields a resuming session needs to continue it: `goal`,
+`constraints`, `reference` — three, since `done` / `decisions` /
+`next_steps` retired.
 _Avoid_: working set (that's the attached tasks), summary
+
+**Retired task fields** — _retired_:
+`done`, `decisions`, `next_steps`, and `content`'s legacy narrative prose.
+They duplicated compact summaries and git history, and their maintenance was
+main-agent work; the Impression below is their successor and settlement
+writes it. The COLUMNS survive unread (`content` survives as the task-tier
+impression's home) — nothing was deleted from storage — but they left the
+write face, the card, the tool schema, the search index and the teaching, and
+`content` left the main agent's write vocabulary entirely.
+_Avoid_: "the card's narrative fields" as a live concept; writing them back
+onto `remember` as a shortcut for an impression
+
+**Impression**:
+The settlement-maintained mental model of one container: why the line exists,
+what understanding governs it, what binds, what is proven and what hangs —
+what a reader keeps after the chronology is forgotten. One per LANE, plus one
+thin TASK-TIER impression per Task. Newline-delimited LINES, at most 8, ordered
+by newcomer loss (global impression / causal model / bindings / frontier);
+**LINE 1 is the GLOBAL IMPRESSION** — self-contained, ≤150 tokens, written to
+stand ALONE, because any fixed-size surface takes exactly line 1 and nothing
+below it. Per-lane total cap `clamp(10 × settledMembers, 100, 500)` tokens,
+recomputed locally at each write; the task tier is a flat 500. SETTLEMENT IS
+THE SOLE WRITER, at its terminal commit, under an optimistic-concurrency fence
+on every touched container (a `retain` is as fenced as a `replace`). Revision
+is WHOLE REPLACEMENT; unchanged means byte-identical. The STATE CEILING is the
+law that matters: every claim written only to the state its anchors PROVE — a
+/tmp preview reads as a /tmp preview, never as shipped, because what a reader
+absorbs becomes its belief. Displayed in exactly two places: the lane tier at
+the head of page 1 of `recall(id="E<n>/#<tag>")`, the task tier in the segment
+card's content slot.
+_Avoid_: per-turn event bullets, a maintenance ledger about the impression
+itself, a second stored "short form" (the fixed-size form is DERIVED — it is
+line 1), main-agent authorship, `filter.tag` as a display route (a global
+exact match cannot bind a qualified lane)
+
+**Lifecycle debt**:
+The durable obligation a MANUAL container operation leaves behind when it can
+invalidate an impression — lane declare / rename / merge, task merge / retag —
+inserted in the same transaction as the operation, keyed by `(task, lane?)`.
+A settlement run whose session is ATTACHED to the debt's task claims it, folds
+it into its touched set, and acks it only in its successful terminal commit; a
+failed run's claims release. A debt with no eligible run waits durably.
+_Avoid_: read-and-delete consumption, the job-scoped touch ledger as its home
+(that ledger cannot host job-less writes)
+
+**Impression fold**:
+What a MERGE does to two impressions: it CONCATENATES them into the survivor —
+survivor's text first, one newline, the folded side's after — and leaves the
+join READABLE. Uncapped: the cap binds settlement REPLACEMENTS only, exactly
+as it declines to force-trim retained text. Either side blank degenerates to
+the other's exact bytes; both blank leaves nothing. A lane RENAME folds too
+(mint-then-fold), so a relabel destroys no understanding. The fold moves the
+CAS fence, and marks the survivor STALE — which now means exactly one thing,
+**this container must be REWRITTEN**: settlement refuses a `retain` over it and
+the flag clears only on a qualified CAS rewrite.
+_Avoid_: STALE as a display rule (the `[impression pending synthesis]`
+suppression is retired — concatenated prose is stale, not misleading); a
+capped or truncated fold
 
 **Attachment (挂靠)**:
 A session's reference to a task as loaded working memory. Not a lifecycle object.
@@ -426,6 +491,16 @@ The only legal citation form for a turn — stable, render-independent.
 A turn's position in a task's chronological render. Selection-only: attaching an
 earlier turn later shifts every ordinal after it.
 _Avoid_: citing an ordinal
+
+**Canonical lane route (`E<n>/#<tag>`)**:
+The one address that uniquely resolves a lane, and its ONE display surface: it
+validates the declaration, scopes results to the lane's members, writes the lane
+read receipt, and renders the lane's **Impression** as a fixed preface at the
+head of page 1 — outside the member paginator, exactly the stored bytes spliced
+in front. Deeper pages carry no repeat; a lane without one renders no
+placeholder.
+_Avoid_: `filter.tag` as a lane route (a global exact match binds no qualified
+lane, and a mixed result set under one lane's impression misattributes)
 
 ### Tools
 
