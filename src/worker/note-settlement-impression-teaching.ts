@@ -37,6 +37,26 @@
  * form, the caps, lane relevance, anchor discipline, the revision law and the
  * submission protocol — is still the spec's text, unreworded.
  *
+ * FIRST-SETTLEMENT-FEEDBACK TICKET 01 ADDS ONE PARAGRAPH, and only one: THE
+ * FOLD RESETS AT EVERY NEWLINE, under ANCHOR DISCIPLINE. Job 171 (2026-09-02,
+ * the second production settlement run under 0.29.0) had its first `commit`
+ * refused on ELEVEN `anchor-format` violations plus one `delivery-anchor` —
+ * the writer used a bare `T<m>` for every anchor in every line of a four-line
+ * impression and never wrote the full form once.
+ *
+ * THE TICKET'S OWN PREMISE FOR THIS REPAIR IS FALSE, and is recorded as false
+ * rather than quietly acted on: it says the anchor grammar "is a rule the
+ * validator enforces that the teaching states only in the sample, never in the
+ * prose". It does not. QUALIFIED FOLD below states the per-line rule verbatim,
+ * and the delivery-word rule sits in THE STATE CEILING — both were present, to
+ * the byte, in the prompt job 171 was shown (verified against that run's own
+ * transcript, not against HEAD). So this is not a missing rule being supplied;
+ * it is the SAME rule restated at the failure the run actually made — writing
+ * the bare form as if it were the citation form, on every line — plus the
+ * consequence the old text left the reader to derive (one rejection per
+ * anchor, and the fold not carrying across a newline). Nothing else is
+ * reworded, and no rule is added that the validator does not enforce.
+ *
  * ONE TEXT, BOTH RUN SHAPES. The unified run (topic pass → `finalize` → edge
  * pass) and the resume dispatch (a reclaim that starts already on `edges`) both
  * render this same block, because both reach the same terminal `commit` carrying
@@ -200,6 +220,14 @@ export function renderImpressionTeaching(): string {
     "line is the full `S<n>/T<m>`; later anchors in that SAME line from the same",
     "session may fold to a bare `T<m>`. A bare `T<m>` with no full anchor before",
     "it on its own line is refused. Every anchor must resolve to a real turn.",
+    "",
+    "THE FOLD RESETS AT EVERY NEWLINE. A bare `T<m>` is not this system's",
+    "citation form here: line 1 pays the full `S<n>/T<m>` before anything may",
+    "fold, and so does every line after it, however plain the session is from",
+    "the lines above — an impression whose anchors are all bare is refused",
+    "once per anchor, not once. The same per-line reading governs the delivery",
+    "rule above: a line carrying shipped, landed, committed or released must",
+    "carry a well-formed anchor on THAT line.",
     "",
     "WHEN TO REVISE. Revise only when the existence reason, the causal model, the",
     "bindings, the evidence state, or the open boundaries CHANGED. Continuing an",

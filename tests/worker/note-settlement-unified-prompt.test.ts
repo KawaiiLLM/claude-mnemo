@@ -256,3 +256,62 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     expect(step1).toContain("the default `metadata` field already carries both");
   });
 });
+
+/**
+ * FIRST-SETTLEMENT-FEEDBACK TICKET 01 (user ruling S15069/T2367). Two
+ * additions, each a rule the tools already enforce that this prompt never
+ * stated, each anchored to a cost a production run under 0.29.0 actually
+ * paid. Pinned the same way ticket 09 pinned its four: a needle on the
+ * rendered text, scoped to the step that owns the duty, so a passing test
+ * means the run actually sees the sentence at the point it needs it.
+ */
+describe("first-settlement-feedback ticket 01 — the read step names the ADDRESS", () => {
+  test("step 1 teaches the task's event-order range, the plain session-range fallback, and refuses filter.session as a window read", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderPromptFor(context);
+
+    const step1 = prompt.slice(
+      prompt.indexOf("1. READ the writable set in chronological batches"),
+      prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
+    );
+    // Job 170's first tool call obeyed every part of this step that existed
+    // — fields, fieldBudgets, pageSize — and still cost 6m10s, because the
+    // step never said which address to pass.
+    expect(step1).toContain("ADDRESS THE BATCH, NEVER SEARCH FOR IT");
+    expect(step1).toContain('`id="E<n>/S<a>/T<b>..S<c>/T<d>"`');
+    // The range is segment-scoped and refuses a window turn that is not a
+    // member — job 170 hit exactly that and had to re-address.
+    expect(step1).toContain('"S<n>/T<m> is not a member of E<n>"');
+    expect(step1).toContain('`id="S<n>/T<a>..<b>"`');
+    // The route that was actually taken, named as what it is.
+    expect(step1).toContain("`filter.session` with no `id` is a WHOLE-SESSION SEARCH");
+    expect(step1).toContain("before it can return page 1");
+  });
+});
+
+describe("first-settlement-feedback ticket 01 — the edge pass places the edge AT WRITE", () => {
+  test("step 6 names the two-sided form, the both-or-neither rule, and E6 as the cost of a bare address", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderPromptFor(context);
+
+    const step6 = prompt.slice(
+      prompt.indexOf("6. Work the worklist lane by lane"),
+      prompt.indexOf("7. Run ONE crossing pass"),
+    );
+    // Job 171 wrote 66 bare edges, took 39 E6 errors on its first
+    // `lane_check`, and spent ~80 tool calls retracting and re-adding them.
+    expect(step6).toContain("PLACE EVERY EDGE AT WRITE");
+    expect(step6).toContain("`{turn, tailTag, headTag}` in the call that writes it");
+    expect(step6).toContain("`tailTag` the lane THIS turn writes from");
+    expect(step6).toContain("both sides or neither");
+    expect(step6).toContain("A bare address writes a DRAFT");
+    expect(step6).toContain("E6 ERROR that blocks your");
+    expect(step6).toContain("retract-and-re-add round");
+  });
+});

@@ -1102,6 +1102,54 @@ describe("the writing law and both golden samples ship in the settlement prompt"
       expect(result.anchors.every((anchor) => resolved.has(`S${anchor.sessionId}/T${anchor.promptNumber}`))).toBe(true);
     }
   });
+
+  // -------------------------------------------------------------------------
+  // FIRST-SETTLEMENT-FEEDBACK TICKET 01, third repair (user ruling
+  // S15069/T2367). Job 171's first `commit` was refused on ELEVEN
+  // `anchor-format` violations and one `delivery-anchor`: every anchor in
+  // every line of a four-line impression was a bare `T<m>` and the full form
+  // was never written once.
+  //
+  // The ticket's premise — that the grammar lives only in the sample and
+  // never in the prose — is FALSE, and the header of the teaching module
+  // records it as false: QUALIFIED FOLD stated the per-line rule verbatim in
+  // the very prompt that run was shown. What ships is therefore the SAME rule
+  // restated at the failure the run made, plus the consequence the old text
+  // left the reader to derive. Both halves are validator rules
+  // (`anchor-format`, `delivery-anchor`); neither is new law.
+  // -------------------------------------------------------------------------
+  test("REPAIR 4 — the fold's per-line reset ships in prose, and the delivery rule is read the same way", () => {
+    // The rule the shipped text already carried stays byte-intact.
+    expect(teaching).toContain(
+      "line is the full `S<n>/T<m>`; later anchors in that SAME line from the same",
+    );
+    // What the refusal proved the writer still had to derive.
+    expect(teaching).toContain("THE FOLD RESETS AT EVERY NEWLINE");
+    expect(teaching).toContain("A bare `T<m>` is not this system's");
+    expect(teaching).toContain("line 1 pays the full `S<n>/T<m>` before anything may");
+    expect(teaching).toContain("refused");
+    expect(teaching).toContain("once per anchor, not once");
+    // The `delivery-anchor` rejection from the same commit: the delivery rule
+    // is per LINE, exactly like the fold.
+    expect(teaching).toContain(
+      "rule above: a line carrying shipped, landed, committed or released must",
+    );
+    expect(teaching).toContain("carry a well-formed anchor on THAT line");
+  });
+
+  test("REPAIR 4 — every anchor the shipped samples teach obeys the rule the prose now restates", () => {
+    // The samples are the effective teaching, so they are the second pin: on
+    // EVERY line of both samples the first anchor is the full form. A sample
+    // that opened a line on a bare `T<m>` would teach the exact defect job
+    // 171 shipped, whatever the prose says.
+    for (const sample of [IMPRESSION_GOLDEN_SAMPLE_FULL, IMPRESSION_GOLDEN_SAMPLE_THIN]) {
+      for (const line of sample.split("\n")) {
+        const first = line.match(/\bS\d+\/T\d+\b|\bT\d+\b/);
+        expect(first).not.toBeNull();
+        expect(first![0]).toMatch(/^S\d+\/T\d+$/);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

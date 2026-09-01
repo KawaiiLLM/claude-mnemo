@@ -159,6 +159,30 @@ function renderTaskRoster(context: NoteSettlementContext): string {
  * ladder ever reaches the `prompt` line, dropping it entirely — `fieldBudgets`
  * caps `prompt`'s own cut, it does not reserve it a floor inside the
  * whole-block ladder.
+ *
+ * FIRST-SETTLEMENT-FEEDBACK TICKET 01 (user ruling S15069/T2367) adds TWO
+ * paragraphs, each one a rule a tool already enforces that this text never
+ * stated, each anchored to what a production run under 0.29.0 actually paid:
+ *
+ *   ADDRESS THE BATCH, in step 1. The read procedure dictated fields, budgets
+ *   and `pageSize` but never the ADDRESS, so job 170 reached for
+ *   `filter.session` with no `id` — a whole-session SEARCH. On a 2365-turn
+ *   session that materialised 12,874 items into 4,612 pages before returning
+ *   page 1: 6 minutes 10 seconds, 62% of a 10-minute lease, on a job already
+ *   on its last attempt. The same shape cost 0.6 s on a 156-turn session. The
+ *   run then found the range form unaided and every later read came back in
+ *   0-8 s, including the `E<n>` range's own "not a member" refusal — which is
+ *   why the plain session range is named here as its fallback.
+ *
+ *   PLACE EVERY EDGE AT WRITE, in step 6. Job 171 wrote 66 `note` calls with
+ *   bare addresses; its first `lane_check` returned 39 E6 errors and the run
+ *   spent ~45 seconds and ~80 tool calls retracting and re-adding every one of
+ *   them with `tailTag`/`headTag`. The gate is correct — E6 is an ERROR by
+ *   spec — and the writer was simply never told that an edge is PLACED at
+ *   write rather than repaired after.
+ *
+ * Ticket 09 is the precedent for the scope: a few sentences each, at the point
+ * the duty is introduced, nothing else reworded.
  */
 export function renderNoteSettlementUnifiedPrompt(
   context: NoteSettlementContext,
@@ -288,7 +312,16 @@ export function renderNoteSettlementUnifiedPrompt(
     "   `turn` free to keep a typical note's title/metadata/content whole. An",
     "   unusually long `content` can still exhaust `turn` before `prompt`'s own",
     "   line is even reached, dropping it entirely; that is a fact about the",
-    "   note, not a reason to chase it with a bigger budget. YIELD-REPAIR: a write refused",
+    "   note, not a reason to chase it with a bigger budget.",
+    "   ADDRESS THE BATCH, NEVER SEARCH FOR IT: read it as the task's own",
+    "   event-order range, `id=\"E<n>/S<a>/T<b>..S<c>/T<d>\"` — cheap, and",
+    "   members only. A window turn that is NOT a member of that task is",
+    "   refused by name (\"S<n>/T<m> is not a member of E<n>\"); read that",
+    "   stretch as the plain session range `id=\"S<n>/T<a>..<b>\"` instead.",
+    "   `filter.session` with no `id` is a WHOLE-SESSION SEARCH, never a way",
+    "   to read a window: it materialises every turn the session ever had",
+    "   before it can return page 1, which on a long session is minutes of",
+    "   your lease. YIELD-REPAIR: a write refused",
     "   as never-read or stale names the one address that needs it — re-read",
     "   THAT address alone, never the whole batch again; for a `type`/`tags`",
     "   repair the default `metadata` field already carries both, so the",
@@ -313,7 +346,13 @@ export function renderNoteSettlementUnifiedPrompt(
     "   `turn` budget — and identify the claim-level links wholly visible among",
     "   them; a shared topic, adjacency or state-only pairing is never a link on",
     "   its own. Write the relations you find, judged by the Memory Rubric's",
-    "   **七个关系词** entry above. Before any edge write, recall the citing",
+    "   **七个关系词** entry above. PLACE EVERY EDGE AT WRITE: each relation",
+    "   entry is `{turn, tailTag, headTag}` in the call that writes it —",
+    "   `tailTag` the lane THIS turn writes from, `headTag` the lane the cited",
+    "   turn sits in, both sides or neither. A bare address writes a DRAFT, and",
+    "   a draft with either side unnamed is an E6 ERROR that blocks your",
+    "   `commit`; repairing it afterwards costs a full retract-and-re-add round",
+    "   per edge. Before any edge write, recall the citing",
     "   turn with `filter={fields:[\"relations\"]}` first — a relation write",
     "   states how that turn's edges stand, and the call is refused naming that",
     "   read if you skip it.",

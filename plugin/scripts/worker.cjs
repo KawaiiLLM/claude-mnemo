@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtj4jx4s" : "dev";
+var BUILD_ID = true ? "0.29.0-mtj6ocpm" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -19201,6 +19201,14 @@ function renderImpressionTeaching() {
     "session may fold to a bare `T<m>`. A bare `T<m>` with no full anchor before",
     "it on its own line is refused. Every anchor must resolve to a real turn.",
     "",
+    "THE FOLD RESETS AT EVERY NEWLINE. A bare `T<m>` is not this system's",
+    "citation form here: line 1 pays the full `S<n>/T<m>` before anything may",
+    "fold, and so does every line after it, however plain the session is from",
+    "the lines above \u2014 an impression whose anchors are all bare is refused",
+    "once per anchor, not once. The same per-line reading governs the delivery",
+    "rule above: a line carrying shipped, landed, committed or released must",
+    "carry a well-formed anchor on THAT line.",
+    "",
     "WHEN TO REVISE. Revise only when the existence reason, the causal model, the",
     "bindings, the evidence state, or the open boundaries CHANGED. Continuing an",
     "existing design is not a change. Unchanged means BYTE-IDENTICAL \u2014 you keep",
@@ -20199,7 +20207,16 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   `turn` free to keep a typical note's title/metadata/content whole. An",
     "   unusually long `content` can still exhaust `turn` before `prompt`'s own",
     "   line is even reached, dropping it entirely; that is a fact about the",
-    "   note, not a reason to chase it with a bigger budget. YIELD-REPAIR: a write refused",
+    "   note, not a reason to chase it with a bigger budget.",
+    "   ADDRESS THE BATCH, NEVER SEARCH FOR IT: read it as the task's own",
+    '   event-order range, `id="E<n>/S<a>/T<b>..S<c>/T<d>"` \u2014 cheap, and',
+    "   members only. A window turn that is NOT a member of that task is",
+    '   refused by name ("S<n>/T<m> is not a member of E<n>"); read that',
+    '   stretch as the plain session range `id="S<n>/T<a>..<b>"` instead.',
+    "   `filter.session` with no `id` is a WHOLE-SESSION SEARCH, never a way",
+    "   to read a window: it materialises every turn the session ever had",
+    "   before it can return page 1, which on a long session is minutes of",
+    "   your lease. YIELD-REPAIR: a write refused",
     "   as never-read or stale names the one address that needs it \u2014 re-read",
     "   THAT address alone, never the whole batch again; for a `type`/`tags`",
     "   repair the default `metadata` field already carries both, so the",
@@ -20224,7 +20241,13 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   `turn` budget \u2014 and identify the claim-level links wholly visible among",
     "   them; a shared topic, adjacency or state-only pairing is never a link on",
     "   its own. Write the relations you find, judged by the Memory Rubric's",
-    "   **\u4E03\u4E2A\u5173\u7CFB\u8BCD** entry above. Before any edge write, recall the citing",
+    "   **\u4E03\u4E2A\u5173\u7CFB\u8BCD** entry above. PLACE EVERY EDGE AT WRITE: each relation",
+    "   entry is `{turn, tailTag, headTag}` in the call that writes it \u2014",
+    "   `tailTag` the lane THIS turn writes from, `headTag` the lane the cited",
+    "   turn sits in, both sides or neither. A bare address writes a DRAFT, and",
+    "   a draft with either side unnamed is an E6 ERROR that blocks your",
+    "   `commit`; repairing it afterwards costs a full retract-and-re-add round",
+    "   per edge. Before any edge write, recall the citing",
     '   turn with `filter={fields:["relations"]}` first \u2014 a relation write',
     "   states how that turn's edges stand, and the call is refused naming that",
     "   read if you skip it.",
