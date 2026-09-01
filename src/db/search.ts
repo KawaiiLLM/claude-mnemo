@@ -64,7 +64,24 @@ export function normalizeTrigramText(value: string): string {
 export interface SegmentFtsRecord {
   id: number;
   title: string;
+  /**
+   * The `segments.content` column's STORED bytes, whatever they are. Whether
+   * they reach the index is not this caller's decision — see
+   * `tenantedSegmentContent` below and `impressionOrigin`.
+   */
   content: string | null;
+  /**
+   * `segments.impression_origin`, the TENANCY of the `content` column above:
+   * non-null means those bytes are the task-tier impression, NULL means they
+   * are the pre-ticket-05 prose the main agent used to write there, which no
+   * card renders and no reader reads (db/segments.ts).
+   *
+   * REQUIRED, not optional, and deliberately so: every caller that projects a
+   * segment into FTS has to state the tenancy, so neither the incremental path
+   * (`indexSegment`, db/segments.ts) nor the full rebuild below can quietly
+   * omit it and get the old behaviour back.
+   */
+  impressionOrigin: string | null;
   /** Ticket 14 (spec K5): shares the `extra` slot with the facets below, exactly as a turn's own `insight` occupies that slot. */
   insight?: string | null;
   // Ticket 03 (spec.md:55 — "segment field rows as first-class search hits
@@ -508,6 +525,35 @@ export function indexObservationToFTS(
  * which is the same gap ticket 05 closes for `content`/`insight`'s WRITE path
  * (this is that gap's read-side twin).
  */
+/**
+ * THE TENANCY PREDICATE, and the only copy of it (user ruling S15069/T2331,
+ * 「已经退役的文本，不要参与检索」): retired text leaves retrieval.
+ *
+ * `segments.content` has one column and two possible tenants. Since
+ * lane-impressions ticket 05 it is the task-tier impression's home — but only
+ * once `impression_origin` is written, which is what CLAIMS the slot
+ * (`replaceSegmentTaskImpression`, db/segments.ts). Until then the column still
+ * holds the prose the main agent used to write there before ticket 05 took the
+ * field off the write face, and `readSegmentTaskImpression` already answers
+ * `text: null` for it, so no card renders a byte of it.
+ *
+ * Text no card will render is text no search may find. Without this, a
+ * `recall(query=…)` hits a segment on words the product retired and then shows
+ * a card that refuses to display them — the live path and the stored index
+ * disagreeing, which is the one outcome the ruling forbids.
+ *
+ * It lives HERE, inside the single function both index paths funnel through,
+ * rather than at either caller: `indexSegment` (the incremental path) and
+ * `rebuildSearchIndex` (the full sweep) must never be able to answer the same
+ * query differently depending on which last touched a row.
+ *
+ * SCOPE: the index only. The bytes stay in their column — clearing storage is
+ * a separate, separately-irreversible decision (ticket "Out of scope").
+ */
+function tenantedSegmentContent(segment: SegmentFtsRecord): string | null {
+  return segment.impressionOrigin === null ? null : segment.content;
+}
+
 export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void {
   const facets = [segment.type, segment.tags]
     .flatMap((value) => {
@@ -538,13 +584,51 @@ export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void
     "segment",
     segment.id,
     segment.title,
-    segment.content,
+    tenantedSegmentContent(segment),
     [segment.insight ?? "", workingState, facets]
       .filter((part) => part.trim() !== "")
       .join("\n"),
     null,
     null,
   );
+}
+
+/**
+ * Re-project EVERY segment row into FTS.
+ *
+ * The segment layer of `rebuildSearchIndex` below, lifted out as its own
+ * function so a caller that needs only THIS layer re-derived — a rule change
+ * about segments, and nothing else — does not have to restate the column set,
+ * and cannot restate it differently.
+ *
+ * Ticket 03: the same column set `indexSegment` (db/segments.ts) passes on the
+ * incremental path. The full rebuild and the per-write reindex must never
+ * answer a `type:`/`tag:`/text query differently depending on which path last
+ * touched a given segment.
+ *
+ * `impression_origin` joins that set for exactly the same reason
+ * (retired-text-leaves-retrieval ticket 01). It is not indexed itself; it is
+ * the tenancy `tenantedSegmentContent` needs in order to decide whether
+ * `content` holds an impression or retired prose. A sweep that omitted it would
+ * re-admit every untenanted `content` the incremental path has just stopped
+ * indexing — half the ruling, which is worse than none.
+ *
+ * Returns how many rows it re-projected.
+ */
+export function reindexAllSegments(db: Database): number {
+  const segmentRows = db
+    .query<SegmentFtsRecord, []>(
+      `SELECT
+         id, title, content, impression_origin AS impressionOrigin, insight,
+         goal, constraints, reference,
+         type, tags
+       FROM segments ORDER BY id`,
+    )
+    .all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
+  }
+  return segmentRows.length;
 }
 
 export function rebuildSearchIndex(db: Database): void {
@@ -641,22 +725,7 @@ export function rebuildSearchIndex(db: Database): void {
     indexObservationToFTS(db, observation);
   }
 
-  // Ticket 03: same column set `indexSegment` (db/segments.ts) passes on the
-  // incremental path — the full rebuild and the per-write reindex must never
-  // answer a `type:`/`tag:`/text query differently depending on which path
-  // last touched a given segment.
-  const segmentRows = db
-    .query<SegmentFtsRecord, []>(
-      `SELECT
-         id, title, content, insight,
-         goal, constraints, reference,
-         type, tags
-       FROM segments ORDER BY id`,
-    )
-    .all();
-  for (const segment of segmentRows) {
-    indexSegmentToFTS(db, segment);
-  }
+  reindexAllSegments(db);
 
   const ruleRows = db
     .query<RuleFtsRecord, []>("SELECT id, name, claim FROM rules ORDER BY id")

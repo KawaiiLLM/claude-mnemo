@@ -11,6 +11,7 @@ import {
   applySegmentWrites,
   createSegment,
   getSegment,
+  replaceSegmentTaskImpression,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory, recallMemoryDelivery } from "../../src/mcp/recall";
@@ -104,17 +105,19 @@ describe("recall segment selector and cross-granularity filters", () => {
       [turnIds.research!, turnIds.design!, turnIds.implement!],
       CUTOFF,
     );
-    applySegmentWrites(
-      db,
-      [
-        {
-          segmentId,
-          expectedRevision: getSegment(db, segmentId)!.revision,
-          content: `The ledger ships. Load-bearing: [S${sessionId}/T3].`,
-        },
-      ],
-      { nowEpoch: CUTOFF },
-    );
+    // `content` is the task-tier impression's home and settlement is its only
+    // writer, so the fixture CLAIMS the slot the way settlement does
+    // (`impression_origin`) rather than dropping prose into the column. An
+    // unclaimed `content` is retired text: no card renders it and — since
+    // retired-text-leaves-retrieval ticket 01 — no search finds it.
+    expect(
+      replaceSegmentTaskImpression(db, {
+        segmentId,
+        baseRevision: 0,
+        text: `The ledger ships. Load-bearing: [S${sessionId}/T3].`,
+        nowEpoch: CUTOFF,
+      }),
+    ).toBe(true);
 
     const delivered = createSegment(db, {
       title: "ops release 1.2.3",

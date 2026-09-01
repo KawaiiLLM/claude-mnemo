@@ -435,12 +435,34 @@ function reconcileSegmentCitedPairs(
  * paths cannot drift onto different column sets. Ticket 05 narrowed BOTH to
  * three: retired text stops being indexed at a segment's next write, and a
  * full rebuild agrees with that.
+ *
+ * `content` is the one retired-text case ticket 05 could NOT close by deleting
+ * a property, because the column stayed — it is the task-tier impression's home
+ * (see below). So the tenancy travels with it: `impressionOrigin` is read off
+ * the row here and `indexSegmentToFTS` decides what that means. The predicate
+ * itself is deliberately not written on this side — one rule, one place
+ * (retired-text-leaves-retrieval ticket 01).
+ *
+ * The re-read is a point lookup on the primary key, inside the caller's own
+ * transaction, immediately after the write it is projecting; it sees exactly
+ * the origin that write left. It is done here rather than by widening
+ * `SegmentRecord` on purpose: the tenancy is index-and-reader machinery, not a
+ * product field, and ticket 05's whole method was that a property which does
+ * not exist on the record cannot be rendered or merged by accident.
  */
 function indexSegment(db: Database, segment: SegmentRecord): void {
+  const impressionOrigin =
+    db
+      .query<{ origin: string | null }, [number]>(
+        "SELECT impression_origin AS origin FROM segments WHERE id = ?",
+      )
+      .get(segment.id)?.origin ?? null;
+
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
+    impressionOrigin,
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,

@@ -37315,6 +37315,9 @@ function indexTurnToFTS(db, turn) {
     turn.assistantResponse
   );
 }
+function tenantedSegmentContent(segment) {
+  return segment.impressionOrigin === null ? null : segment.content;
+}
 function indexSegmentToFTS(db, segment) {
   const facets = [segment.type, segment.tags].flatMap((value) => {
     if (!value) {
@@ -37337,7 +37340,7 @@ function indexSegmentToFTS(db, segment) {
     "segment",
     segment.id,
     segment.title,
-    segment.content,
+    tenantedSegmentContent(segment),
     [segment.insight ?? "", workingState, facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
@@ -38830,10 +38833,14 @@ function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
   );
 }
 function indexSegment(db, segment) {
+  const impressionOrigin = db.query(
+    "SELECT impression_origin AS origin FROM segments WHERE id = ?"
+  ).get(segment.id)?.origin ?? null;
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
+    impressionOrigin,
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,

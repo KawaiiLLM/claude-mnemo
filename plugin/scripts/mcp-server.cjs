@@ -8354,6 +8354,9 @@ function indexObservationToFTS(db, observation) {
     truncateOriginal(observation.toolResult)
   );
 }
+function tenantedSegmentContent(segment) {
+  return segment.impressionOrigin === null ? null : segment.content;
+}
 function indexSegmentToFTS(db, segment) {
   const facets = [segment.type, segment.tags].flatMap((value) => {
     if (!value) {
@@ -8376,11 +8379,24 @@ function indexSegmentToFTS(db, segment) {
     "segment",
     segment.id,
     segment.title,
-    segment.content,
+    tenantedSegmentContent(segment),
     [segment.insight ?? "", workingState, facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
   );
+}
+function reindexAllSegments(db) {
+  const segmentRows = db.query(
+    `SELECT
+         id, title, content, impression_origin AS impressionOrigin, insight,
+         goal, constraints, reference,
+         type, tags
+       FROM segments ORDER BY id`
+  ).all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
+  }
+  return segmentRows.length;
 }
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
@@ -8431,16 +8447,7 @@ function rebuildSearchIndex(db) {
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
   }
-  const segmentRows = db.query(
-    `SELECT
-         id, title, content, insight,
-         goal, constraints, reference,
-         type, tags
-       FROM segments ORDER BY id`
-  ).all();
-  for (const segment of segmentRows) {
-    indexSegmentToFTS(db, segment);
-  }
+  reindexAllSegments(db);
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
     indexRuleToFTS(db, rule);
@@ -9650,10 +9657,14 @@ function reconcileSegmentCitedPairs(db, segment, nowEpoch) {
   );
 }
 function indexSegment(db, segment) {
+  const impressionOrigin = db.query(
+    "SELECT impression_origin AS origin FROM segments WHERE id = ?"
+  ).get(segment.id)?.origin ?? null;
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
+    impressionOrigin,
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,
@@ -11854,7 +11865,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtj7g07i" : "dev";
+    BUILD_ID = true ? "0.29.0-mtj8ucoi" : "dev";
   }
 });
 
@@ -11991,6 +12002,7 @@ __export(schema_exports, {
   LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT: () => LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT,
   LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT: () => LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT,
   MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT: () => MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
+  SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT: () => SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT,
   TURN_ERA_GRANT_SEED_RECEIPT: () => TURN_ERA_GRANT_SEED_RECEIPT,
   backfillAllIntraChains: () => backfillAllIntraChains,
   ensureLaneReadMemberCoverageReceipts: () => ensureLaneReadMemberCoverageReceipts,
@@ -13214,6 +13226,7 @@ function initializeSchema(db) {
   runSegmentOneTagMigration(db);
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
+  retireUntenantedSegmentContentFromSearch(db);
 }
 function runLaneModelV12EdgeMigration(db) {
   assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
@@ -13627,6 +13640,36 @@ function ensureSegmentImpressionColumns(db) {
     "impression_stale",
     "INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1))"
   );
+}
+function retireUntenantedSegmentContentFromSearch(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "segments") || !hasTable2(db, "memory_fts")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+      return;
+    }
+    const withheld = db.query(
+      `SELECT COUNT(*) AS rows,
+                COALESCE(SUM(LENGTH(content)), 0) AS characters
+           FROM segments
+          WHERE impression_origin IS NULL AND content IS NOT NULL`
+    ).get() ?? { rows: 0, characters: 0 };
+    const receipt = {
+      segmentsReindexed: reindexAllSegments(db),
+      untenantedRows: withheld.rows,
+      charactersWithheld: withheld.characters
+    };
+    writeMigrationReceipt(
+      db,
+      SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT,
+      nowEpoch,
+      receipt
+    );
+  });
 }
 function ensureSegmentDerivedFacets(db) {
   addColumnIfMissing(
@@ -14418,7 +14461,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -15972,6 +16015,7 @@ var init_schema = __esm({
     LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT = "lane-model-v12-me-merged-tag-set-retired";
     MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT = "memory-edges-relation-turn-scoped";
     NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE = "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) \u2014 resettle via manual backfill";
+    SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT = "retired-text-leaves-retrieval-segment-content";
     segmentsStatusVocabularyRebuildDdl = (tableName) => `
   CREATE TABLE ${tableName} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

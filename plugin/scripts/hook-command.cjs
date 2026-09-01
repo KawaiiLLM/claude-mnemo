@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtj7g07i" : "dev";
+var BUILD_ID = true ? "0.29.0-mtj8ucoi" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1327,6 +1327,9 @@ function indexObservationToFTS(db, observation) {
     truncateOriginal(observation.toolResult)
   );
 }
+function tenantedSegmentContent(segment) {
+  return segment.impressionOrigin === null ? null : segment.content;
+}
 function indexSegmentToFTS(db, segment) {
   const facets = [segment.type, segment.tags].flatMap((value) => {
     if (!value) {
@@ -1349,11 +1352,24 @@ function indexSegmentToFTS(db, segment) {
     "segment",
     segment.id,
     segment.title,
-    segment.content,
+    tenantedSegmentContent(segment),
     [segment.insight ?? "", workingState, facets].filter((part) => part.trim() !== "").join("\n"),
     null,
     null
   );
+}
+function reindexAllSegments(db) {
+  const segmentRows = db.query(
+    `SELECT
+         id, title, content, impression_origin AS impressionOrigin, insight,
+         goal, constraints, reference,
+         type, tags
+       FROM segments ORDER BY id`
+  ).all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
+  }
+  return segmentRows.length;
 }
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
@@ -1404,16 +1420,7 @@ function rebuildSearchIndex(db) {
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
   }
-  const segmentRows = db.query(
-    `SELECT
-         id, title, content, insight,
-         goal, constraints, reference,
-         type, tags
-       FROM segments ORDER BY id`
-  ).all();
-  for (const segment of segmentRows) {
-    indexSegmentToFTS(db, segment);
-  }
+  reindexAllSegments(db);
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
     indexRuleToFTS(db, rule);
@@ -2077,10 +2084,14 @@ function mapSegmentRow(row) {
   } : null;
 }
 function indexSegment(db, segment) {
+  const impressionOrigin = db.query(
+    "SELECT impression_origin AS origin FROM segments WHERE id = ?"
+  ).get(segment.id)?.origin ?? null;
   indexSegmentToFTS(db, {
     id: segment.id,
     title: segment.title,
     content: segment.content,
+    impressionOrigin,
     insight: segment.insight,
     goal: segment.goal,
     constraints: segment.constraints,
@@ -6067,6 +6078,7 @@ function initializeSchema(db) {
   runSegmentOneTagMigration(db);
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
+  retireUntenantedSegmentContentFromSearch(db);
 }
 function runLaneModelV12EdgeMigration(db) {
   assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
@@ -6481,6 +6493,37 @@ function ensureSegmentImpressionColumns(db) {
     "impression_stale",
     "INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1))"
   );
+}
+var SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT = "retired-text-leaves-retrieval-segment-content";
+function retireUntenantedSegmentContentFromSearch(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "segments") || !hasTable2(db, "memory_fts")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+      return;
+    }
+    const withheld = db.query(
+      `SELECT COUNT(*) AS rows,
+                COALESCE(SUM(LENGTH(content)), 0) AS characters
+           FROM segments
+          WHERE impression_origin IS NULL AND content IS NOT NULL`
+    ).get() ?? { rows: 0, characters: 0 };
+    const receipt = {
+      segmentsReindexed: reindexAllSegments(db),
+      untenantedRows: withheld.rows,
+      charactersWithheld: withheld.characters
+    };
+    writeMigrationReceipt(
+      db,
+      SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT,
+      nowEpoch,
+      receipt
+    );
+  });
 }
 function ensureSegmentDerivedFacets(db) {
   addColumnIfMissing(

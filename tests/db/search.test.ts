@@ -403,6 +403,7 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
       id: 1,
       title: "t",
       content: "c",
+      impressionOrigin: "settlement",
       insight: "i",
       goal: "reach the goal",
       constraints: "stay under budget",
@@ -535,12 +536,18 @@ describe("segment Working State fields are searchable (ticket 03)", () => {
       id: segmentRecord.id,
       title: segmentRecord.title,
       content: segmentRecord.content,
+      // The tenancy of `content` travels with it on BOTH paths
+      // (retired-text-leaves-retrieval ticket 01) — read off the row, exactly
+      // as `indexSegment` reads it.
+      impressionOrigin:
+        db
+          .query<{ origin: string | null }, [number]>(
+            "SELECT impression_origin AS origin FROM segments WHERE id = ?",
+          )
+          .get(segmentRecord.id)?.origin ?? null,
       insight: segmentRecord.insight,
       goal: segmentRecord.goal,
       constraints: segmentRecord.constraints,
-      decisions: segmentRecord.decisions,
-      done: segmentRecord.done,
-      nextSteps: segmentRecord.nextSteps,
       reference: segmentRecord.reference,
       type: JSON.stringify(segmentRecord.type),
       tags: JSON.stringify(segmentRecord.tags),

@@ -30,7 +30,7 @@ import {
 } from "./memory-edges";
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
 import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
-import { rebuildSearchIndex } from "./search";
+import { rebuildSearchIndex, reindexAllSegments } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
 import { ERA_GRANT_COLUMN } from "../segment-era";
 
@@ -4503,6 +4503,9 @@ export function initializeSchema(db: Database): void {
   // final shape — added earlier, the rebuild would silently drop them.
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
+  // Strictly after `ensureSegmentImpressionColumns`: this sweep READS
+  // `segments.impression_origin`, the column that call is what guarantees.
+  retireUntenantedSegmentContentFromSearch(db);
 }
 
 /**
@@ -5431,6 +5434,121 @@ function ensureSegmentImpressionColumns(db: Database): void {
     "impression_stale",
     "INTEGER NOT NULL DEFAULT 0 CHECK (impression_stale IN (0, 1))",
   );
+}
+
+export const SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT =
+  "retired-text-leaves-retrieval-segment-content";
+
+export interface SegmentContentTenancyReindexReceipt {
+  /** Segment rows re-projected through `indexSegmentToFTS`. */
+  segmentsReindexed: number;
+  /**
+   * Of those, the rows whose `content` the tenancy predicate withheld —
+   * `impression_origin IS NULL` with bytes still in the column.
+   */
+  untenantedRows: number;
+  /** Characters of `content` that stopped being findable. The bytes stay stored. */
+  charactersWithheld: number;
+}
+
+/**
+ * Retired text leaves retrieval — the sweep half (user ruling S15069/T2331,
+ * 「已经退役的文本，不要参与检索」).
+ *
+ * `indexSegmentToFTS` (db/search.ts) now withholds a `content` whose
+ * `impression_origin` is NULL: those bytes are the prose the main agent used to
+ * write there before lane-impressions ticket 05 took the field off the write
+ * face, and no card renders them. That fixes every segment from its NEXT write
+ * onward. The rows already in `memory_fts` are the other half, and half of this
+ * ruling is worse than none — it leaves the live path and the stored index
+ * disagreeing about the same words.
+ *
+ * WHY THIS SEAM — a receipt-guarded one-shot in `initializeSchema` — AND NOT
+ * THE ALTERNATIVES:
+ *
+ *   - It is the seam this codebase already uses for "existing rows must be
+ *     re-derived after a rule change": `migration_receipts`, the same shell as
+ *     `LANE_MODEL_V12_*`, `MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT` and
+ *     `TURN_ERA_GRANT_SEED_RECEIPT`. One name, one row, runs once per database
+ *     no matter how many processes open it, and states in its payload what it
+ *     did.
+ *
+ *   - NOT a full `rebuildSearchIndex`. Measured on a copy of the live database
+ *     (2.28 GB, 14k turns / 95k observations), a full rebuild runs for many
+ *     minutes and — because `memory_fts` is deliberately PARTIAL there, holding
+ *     26k of 95k observations and 12k of 14k turns — it would also re-admit
+ *     roughly seventy thousand rows this ticket never asked anyone to index.
+ *     `initializeSchema` runs in EVERY hook process, so that cost lands on the
+ *     hook critical path; and the row explosion is a corpus-wide change smuggled
+ *     in under a segment-scoped ruling. The rule that changed is about segments,
+ *     so the layer that is re-derived is segments: `reindexAllSegments` is the
+ *     segment half of `rebuildSearchIndex` itself, the same query and the same
+ *     projection, so the two cannot disagree. `rebuildSearchIndex` still carries
+ *     the predicate for every path that legitimately calls it.
+ *
+ *   - NOT an operator command. The ruling would then land only when somebody
+ *     remembered to type it, which is the difference between "new installs are
+ *     clean" and "the ruling actually landed".
+ *
+ *   - NOT the worker's `repair_ledger` watchdog (transcript-path-backfill's
+ *     seam). That exists for repairs that touch the FILESYSTEM and cannot be
+ *     bounded — an unbounded directory scan has no business on a hook's path.
+ *     This sweep is one indexed table scan of the segment roster (70 rows live),
+ *     entirely inside SQLite, and deferring it to a resident worker would only
+ *     add a window in which recall still answers from retired words.
+ *
+ * Guarded on the receipt INSIDE the transaction as well as outside it, the
+ * `ensureMemoryEdgesLaneModelV12MergedTagSetRetired` idiom: two hook processes
+ * open the database concurrently for a single Claude Code event, and the loser
+ * of the insert must not double-count its own re-projection into a receipt the
+ * winner already wrote. Re-running would be harmless — `indexFtsRecord` deletes
+ * before it inserts — but a receipt that describes a sweep nobody can attribute
+ * is not worth writing.
+ *
+ * SCOPE, restated because it is irreversible in one direction only: this
+ * changes what the index points at. Not one stored byte is cleared; the columns
+ * keep their text, and a segment whose slot is later CLAIMED by a settlement
+ * impression write becomes findable again at that write, through the ordinary
+ * incremental path.
+ */
+function retireUntenantedSegmentContentFromSearch(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "segments") || !hasTable(db, "memory_fts")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+    return;
+  }
+
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
+      return;
+    }
+
+    const withheld = db
+      .query<{ rows: number; characters: number }, []>(
+        `SELECT COUNT(*) AS rows,
+                COALESCE(SUM(LENGTH(content)), 0) AS characters
+           FROM segments
+          WHERE impression_origin IS NULL AND content IS NOT NULL`,
+      )
+      .get() ?? { rows: 0, characters: 0 };
+
+    const receipt: SegmentContentTenancyReindexReceipt = {
+      segmentsReindexed: reindexAllSegments(db),
+      untenantedRows: withheld.rows,
+      charactersWithheld: withheld.characters,
+    };
+
+    writeMigrationReceipt(
+      db,
+      SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT,
+      nowEpoch,
+      receipt,
+    );
+  });
 }
 
 /**
