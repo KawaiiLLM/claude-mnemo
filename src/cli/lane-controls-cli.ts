@@ -1,5 +1,4 @@
 import { Database } from "bun:sqlite";
-import { readFileSync, writeFileSync } from "node:fs";
 
 import {
   loadDeclaredLaneRegistry,
@@ -7,7 +6,6 @@ import {
   loadLaneCheckScope,
   loadLaneControlCapability,
   loadLaneControlEdges,
-  loadLaneTagsForTurns,
   loadSegmentsWithDeclaredLanes,
   type LaneControlCapability,
   type LaneControlEdge,
@@ -24,49 +22,44 @@ import { resolveDatabasePath } from "../shared/paths";
 import { openReadOnlyLaneCheckDatabase, type OpenLaneCheckDatabase } from "./lane-check-cli";
 
 /**
- * THE ATTRIBUTION CONTROLS (lane-model-v12 spec "验证", ticket 13).
+ * THE ATTRIBUTION CONTROL (lane-model-v12 spec "验证", ticket 13; C1/C3/C4
+ * retired by main-agent-edges spec D10, ticket 8).
  *
  * ## What this tool is for, and why it is not a checker report
  *
- * The v12 checker's reports are about to be read for the first time. A report
- * that reads as NOISE has two possible causes and, on its own, no way to tell
- * them apart: the DEFINITION is wrong, or the ATTRIBUTION is simply not done
- * yet. Get that ordering wrong and a correct model is thrown away because
- * nobody had settled the edges first.
+ * C2 answers "is the per-side attribution right" -- whether a SETTLED edge's
+ * stored side tag is both a lane its own segment ever declared and a tag the
+ * endpoint turn itself carries. It is deliberately NOT a new checker report
+ * (spec D6's "不重新设计报表结构"): it lives in its own CLI, reads the
+ * database directly, and no gate, prompt or renderer of the checker's
+ * consumes it.
  *
- * These four controls answer "is the attribution finished?" — the question that
- * has to be settled BEFORE a report is evidence about anything. They are
- * deliberately NOT new checker reports (spec D6's "不重新设计报表结构"): they
- * live in their own CLI, they read the database directly, and no gate, prompt
- * or renderer of the checker's consumes them.
- *
- *   C1  edges with either side the `''` sentinel                    target 0
  *   C2  per-side declaration/subset violations on SETTLED edges      target 0
- *   C3  nodes that have edges but carry no declared lane             target 0
- *   C4  two-sided-tag accuracy on a hand-graded, stratified sample   NO TARGET
  *
- * C4 sets no threshold and never will: the spec's own do-not list forbids
- * inventing a bar where there is neither a denominator nor a ruling ("不发明门
- * 限"). It is reported, and that is the whole of it.
+ * C1 (blank sides), C3 (lane-less endpoints) and C4 (sampled side audit)
+ * were diagnostics over the STORED-side model and are retired without
+ * replacement (main-agent-edges D10): E6 accounting now lives in
+ * `lane_check`, a lane-less edge is legal, and a declaration is validated at
+ * write rather than audited after the fact.
  *
  * ## Every finding carries an address and BOTH side LaneKeys
  *
- * `LaneControlFinding` has no shape in which either can be missing. That is the
- * ticket's own requirement and it is what makes the causal matrix usable: a
- * reader judges "is THIS attribution right" from the address (which turn) and
- * the two side LaneKeys (which lane each end claims), and only then judges the
- * definition. A finding that named a count without an address would force the
- * reader back to step 2 with nothing to look at.
+ * `LaneControlFinding` has no shape in which either can be missing. That is
+ * the ticket's own requirement: a reader judges "is THIS attribution right"
+ * from the address (which turn) and the two side LaneKeys (which lane each
+ * end claims), and only then judges the definition. A finding that named a
+ * count without an address would force the reader back to step 2 with
+ * nothing to look at.
  *
  * ## NEVER A ZERO STANDING IN FOR AN UNMEASURABLE
  *
- * `LaneControl.measured` is `number | null`. `null` means COULD NOT MEASURE and
- * always arrives with `unmeasurableReason`; a control never reports `0` unless
- * it actually counted zero. This is not defensive decoration — the production
- * database has NOT run the v12 edge migration (verified read-only: `tail_tag`/
- * `head_tag` absent, `memory_edge_side_tags` and `lanes` absent), so the FIRST
- * live run of this tool is exactly the case where a fabricated zero would read
- * as "the attribution is finished".
+ * `LaneControl.measured` is `number | null`. `null` means COULD NOT MEASURE
+ * and always arrives with `unmeasurableReason`; the control never reports
+ * `0` unless it actually counted zero. This is not defensive decoration --
+ * the production database has NOT run the v12 edge migration (verified
+ * read-only: `tail_tag`/`head_tag` absent, `memory_edge_side_tags` and
+ * `lanes` absent), so the FIRST live run of this tool is exactly the case
+ * where a fabricated zero would read as "the attribution is finished".
  *
  * ## READ-ONLY, and how that is established
  *
@@ -75,25 +68,22 @@ import { openReadOnlyLaneCheckDatabase, type OpenLaneCheckDatabase } from "./lan
  *      in the lane tooling and no second place to get it wrong;
  *   2. every statement this tool reaches (`db/lane-checker-load.ts`'s control
  *      loaders and the projection loader they share) is a `SELECT`;
- *   3. the only file this tool ever writes is the one `--export` names, which
- *      is never the database — and it is written through `node:fs`, not
- *      through the handle.
+ *   3. this tool writes no file at all.
  *
  * `tests/cli/lane-controls-cli.test.ts` pins all three, the third by hashing
- * the database file before and after a full run WITH `--export`.
+ * the database file before and after a full run.
  */
 
 // ------------------------------------------------------------------ shapes
 
-export type LaneControlId = "C1" | "C2" | "C3" | "C4";
+export type LaneControlId = "C2";
 
 /**
  * ONE control finding. The three identity fields are mandatory BY TYPE: the
  * ticket's requirement is that a reader can judge the attribution before the
  * definition, and that judgement needs the source address and the lane each
  * SIDE claims. `tailLane`/`headLane` are always both present — an unsettled
- * side prints `<unsettled>` (`formatLaneSide`), never an empty string, because
- * "this side names no lane" is itself the finding in control 1.
+ * side prints `<unsettled>` (`formatLaneSide`), never an empty string.
  */
 export interface LaneControlFinding {
   /** `S<session>/T<prompt>` for a node, `S<n>/T<m> --relation--> S<n>/T<m>` for an edge — the ONE address vocabulary the checker's renderer already speaks. */
@@ -127,64 +117,6 @@ export interface LaneControl {
   findingCount: number;
 }
 
-export type LaneGoldVerdict = "" | "correct" | "wrong" | "unsure";
-
-/** The full STORAGE identity of one edge (spec D1: `(citing, cited, relation, tail_tag, head_tag)`) — a graded row names an exact row, so a re-tagged one reads as STALE rather than silently scoring the old verdict against new tags. */
-export interface LaneGoldSampleEdgeId {
-  citingId: number;
-  citedId: number;
-  relation: string;
-  tailTag: string;
-  headTag: string;
-}
-
-export interface LaneGoldSampleRow {
-  edge: LaneGoldSampleEdgeId;
-  /** `<relation> @ <segment>` — the stratum this row was drawn for. */
-  stratum: string;
-  address: string;
-  tailLane: string;
-  headLane: string;
-  /** The CITING turn's own stored tags — carried so a grader can judge the subset half without a second query. `null` = unparseable. */
-  citingTurnTags: readonly string[] | null;
-  citedTurnTags: readonly string[] | null;
-  /** The grader fills these. `""` = not yet graded, and an ungraded row is EXCLUDED from the accuracy denominator rather than counted wrong. */
-  verdict: { tail: LaneGoldVerdict; head: LaneGoldVerdict };
-}
-
-export interface LaneGoldSample {
-  kind: "lane-model-v12 gold sample";
-  /** Stated in the artifact, not only in the ticket: a sample whose stratification is unknown cannot be read later. */
-  stratifiedBy: string;
-  perStratum: number;
-  strata: number;
-  rows: LaneGoldSampleRow[];
-}
-
-export interface LaneGoldStratumScore {
-  stratum: string;
-  graded: number;
-  bothSidesCorrect: number;
-}
-
-export interface LaneGoldScore {
-  /** Rows whose BOTH verdicts are a decision (`correct`/`wrong`) and whose edge still exists as graded — the accuracy denominator. */
-  graded: number;
-  bothSidesCorrect: number;
-  /** Percentage, or `null` when nothing is gradable — never `0` for "nobody graded anything". */
-  accuracy: number | null;
-  /** At least one side left `""`. */
-  ungraded: number;
-  /** No blank, at least one `unsure` — a grader's honest refusal, excluded from the denominator and named. */
-  unsure: number;
-  /** The graded row's exact stored identity is no longer in the database (retracted, or re-tagged since the draw). Excluded whatever its verdict says. */
-  stale: number;
-  /** Per-side supporting counts over the graded rows. */
-  tailCorrect: number;
-  headCorrect: number;
-  perStratum: LaneGoldStratumScore[];
-}
-
 export interface LaneControlsReport {
   databasePath: string;
   capability: LaneControlCapability;
@@ -193,12 +125,6 @@ export interface LaneControlsReport {
   /** Provenance breakdown of the domain — a denominator fact, never a filter. */
   provenanceCounts: Record<string, number>;
   controls: LaneControl[];
-  /** The freshly drawn sample, `null` when it could not be drawn. */
-  sample: LaneGoldSample | null;
-  /** Where `--export` wrote, or `null`. */
-  exportPath: string | null;
-  /** What `--graded` was read from, or `null`. */
-  gradedPath: string | null;
 }
 
 // ----------------------------------------------------------- capabilities
@@ -294,75 +220,6 @@ function cap(findings: readonly LaneControlFinding[], limit: number): {
   return { findings: findings.slice(0, limit), findingCount: findings.length };
 }
 
-// -------------------------------------------------------------- control 1
-
-/**
- * C1 — edges with EITHER side the `''` sentinel (target 0).
- *
- * Two shapes are counted, and the context line keeps them apart because their
- * repairs differ:
- *
- *   - BOTH sides unsettled: the legal draft state (spec D3c) and settlement's
- *     own to-do queue. This is the number that goes to 0 when attribution is
- *     finished.
- *   - EXACTLY ONE side unsettled: the half-settled shape spec D2 forbids
- *     outright ("两侧要么都有 tag,要么都没有"). No write face can produce one,
- *     so any occurrence is pre-gate stock or a migration defect — a different
- *     finding wearing the same count.
- */
-export function controlUnsettledSides(
-  edges: readonly LaneControlEdge[],
-  capability: LaneControlCapability,
-  findingLimit: number,
-): LaneControl {
-  const title = "edges with either side unsettled ('')";
-  const target = "0";
-  const unit = "edge(s)";
-  const reason = missingCapabilityReason(capability, ["edgeSideTagColumns"]);
-  if (reason !== null) {
-    return unmeasurable("C1", title, target, unit, reason);
-  }
-  const addressOf = addressLookupForEdges(edges);
-  const findings: LaneControlFinding[] = [];
-  let both = 0;
-  let half = 0;
-  for (const edge of edges) {
-    const tailUnsettled = edge.tailTag === UNSETTLED_LANE_TAG;
-    const headUnsettled = edge.headTag === UNSETTLED_LANE_TAG;
-    if (!tailUnsettled && !headUnsettled) continue;
-    if (tailUnsettled && headUnsettled) {
-      both += 1;
-    } else {
-      half += 1;
-    }
-    findings.push({
-      address: edgeAddress(edge, addressOf),
-      tailLane: tailLaneOf(edge),
-      headLane: headLaneOf(edge),
-      note:
-        tailUnsettled && headUnsettled
-          ? "both sides unsettled -- settlement has not decided this row"
-          : "HALF-SETTLED: only the " +
-            (tailUnsettled ? "head" : "tail") +
-            " side names a lane, a shape spec D2 forbids outright",
-    });
-  }
-  return {
-    id: "C1",
-    title,
-    target,
-    measured: findings.length,
-    unit,
-    unmeasurableReason: null,
-    context: [
-      both + " with BOTH sides unsettled (settlement's own queue)",
-      half + " HALF-settled (the shape D2's write gate refuses; stock or migration defect)",
-      "out of " + edges.length + " live relation-carrying turn->turn edge(s)",
-    ],
-    ...cap(findings, findingLimit),
-  };
-}
-
 // -------------------------------------------------------------- control 2
 
 /** One per-side violation on a SETTLED edge — the shape control 2 counts. */
@@ -374,9 +231,10 @@ export interface LaneSideAttributionViolation {
 }
 
 /**
- * C2's raw list. Domain: SETTLED edges only (both sides non-`''`) — a
- * half-settled or fully unsettled row is control 1's finding, and judging its
- * absent tag against a registry would double-count one defect as two.
+ * C2's raw list. Domain: SETTLED edges only (both sides non-`''`) — an
+ * unsettled row (either side `''`) is out of scope, and judging its absent
+ * tag against a registry would manufacture a defect that is not this
+ * control's to report.
  *
  * Both kinds can fire on ONE side, and then both are listed: "the word was
  * never declared here" and "the word is not on the turn" have different
@@ -394,7 +252,7 @@ export function computeSideAttributionViolations(
   const violations: LaneSideAttributionViolation[] = [];
   for (const edge of edges) {
     if (edge.tailTag === UNSETTLED_LANE_TAG || edge.headTag === UNSETTLED_LANE_TAG) {
-      continue; // control 1's domain, not this one's
+      continue; // an unsettled side has no assignment to judge
     }
     const sides = [
       {
@@ -474,397 +332,7 @@ export function controlSideAttribution(
   };
 }
 
-// -------------------------------------------------------------- control 3
-
-/** One node that has edges but claims no declared lane. */
-export interface LaneLanelessNode {
-  id: number;
-  /** `LaneKey.segment` form of the node's owning segment. */
-  segment: string;
-  /** The incident edge that anchors the finding — the lowest `(citingId, citedId, relation)`, so the choice is a pure function of the graph. */
-  anchorEdge: LaneControlEdge;
-  /** How many live edges touch this node. */
-  edgeCount: number;
-  /** Every incident edge's OTHER endpoint is ALSO laneless — the ticket's literal "两端都无" shape, reported as a named subset rather than silently substituted for the count. */
-  bothEndsLaneless: boolean;
-}
-
-/**
- * C3's raw list: every turn that is an endpoint of at least one live edge and
- * whose RESOLVED membership (`loadLaneTagsForTurns` — the turn's stored `tags`
- * intersected with its OWNING segment's declared lanes, the one membership rule
- * ticket 10 established) is empty.
- *
- * THE TICKET'S PHRASE IS AMBIGUOUS AND THIS RESOLVES IT ONE WAY, NAMING THE
- * OTHER. "有边但两端都无任何已声明 lane 的节点数" reads either as "a node with
- * edges that carries no declared lane" (spec solution 5's own "有边就必须有
- * lane") or, literally, as "a node on an edge NEITHER of whose ends carries
- * one". The second set is a SUBSET of the first — both-ends-laneless requires
- * the node itself to be laneless — so this counts the first and carries the
- * second as `bothEndsLaneless`, which reports both readings without letting
- * either hide the other.
- */
-export function computeLanelessNodes(
-  edges: readonly LaneControlEdge[],
-  laneTagsByTurn: ReadonlyMap<number, readonly string[]>,
-): LaneLanelessNode[] {
-  const incident = new Map<number, LaneControlEdge[]>();
-  const segmentOf = new Map<number, string>();
-  for (const edge of edges) {
-    for (const endpoint of [
-      { id: edge.citingId, segment: edge.citingSegment },
-      { id: edge.citedId, segment: edge.citedSegment },
-    ]) {
-      segmentOf.set(endpoint.id, endpoint.segment);
-      const bucket = incident.get(endpoint.id);
-      if (bucket === undefined) {
-        incident.set(endpoint.id, [edge]);
-      } else {
-        bucket.push(edge);
-      }
-    }
-  }
-  const laneless = (id: number): boolean => (laneTagsByTurn.get(id) ?? []).length === 0;
-  const nodes: LaneLanelessNode[] = [];
-  for (const [id, incidentEdges] of [...incident.entries()].sort((a, b) => a[0] - b[0])) {
-    if (!laneless(id)) continue;
-    const anchorEdge = [...incidentEdges].sort(
-      (a, b) =>
-        a.citingId - b.citingId || a.citedId - b.citedId || a.relation.localeCompare(b.relation),
-    )[0]!;
-    nodes.push({
-      id,
-      segment: segmentOf.get(id)!,
-      anchorEdge,
-      edgeCount: incidentEdges.length,
-      bothEndsLaneless: incidentEdges.every((edge) =>
-        laneless(edge.citingId === id ? edge.citedId : edge.citingId),
-      ),
-    });
-  }
-  return nodes;
-}
-
-export function controlLanelessNodes(
-  edges: readonly LaneControlEdge[],
-  laneTagsByTurn: ReadonlyMap<number, readonly string[]>,
-  capability: LaneControlCapability,
-  findingLimit: number,
-): LaneControl {
-  const title = "nodes that have edges but carry no declared lane";
-  const target = "0";
-  const unit = "node(s)";
-  const reason = missingCapabilityReason(capability, ["edgeSideTagColumns", "laneRegistry"]);
-  if (reason !== null) {
-    return unmeasurable("C3", title, target, unit, reason);
-  }
-  const nodes = computeLanelessNodes(edges, laneTagsByTurn);
-  const addressOf = addressLookupForEdges(edges);
-  const endpointCount = new Set(edges.flatMap((edge) => [edge.citingId, edge.citedId])).size;
-  const bothEnds = nodes.filter((node) => node.bothEndsLaneless).length;
-  const findings = nodes.map((node) => ({
-    address:
-      addressOf(node.id) + " (via " + edgeAddress(node.anchorEdge, addressOf) + ")",
-    tailLane: tailLaneOf(node.anchorEdge),
-    headLane: headLaneOf(node.anchorEdge),
-    note:
-      "carries no declared lane of its own across " +
-      node.edgeCount +
-      " edge(s)" +
-      (node.bothEndsLaneless ? "; every one of them has a laneless far end too" : ""),
-  }));
-  return {
-    id: "C3",
-    title,
-    target,
-    measured: nodes.length,
-    unit,
-    unmeasurableReason: null,
-    context: [
-      "out of " + endpointCount + " turn(s) with at least one live edge",
-      bothEnds +
-        ' of them are the ticket\'s literal reading ("both ends of every incident edge are laneless")',
-      "membership is the node's own tags INTERSECTED with its owning segment's declared lanes",
-    ],
-    ...cap(findings, findingLimit),
-  };
-}
-
-// ------------------------------------------------------- control 4 (gold)
-
-/** FNV-1a, 32-bit. A stable spread over the edge identities so a stratum's draw is neither "the oldest N" nor dependent on an RNG seed a re-run would have to be told. */
-function fnv1a(text: string): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash >>> 0;
-}
-
-/** The storage identity (spec D1) as one comparable string — the gold sample's row key AND the staleness probe. */
-export function goldEdgeIdentity(edge: LaneGoldSampleEdgeId): string {
-  return JSON.stringify([edge.citingId, edge.citedId, edge.relation, edge.tailTag, edge.headTag]);
-}
-
-/**
- * The stratified draw (ticket 13: "按关系词与段分层"). One stratum per
- * `(relation, segment)` pair, the segment being the CITING side's — the anchor
- * convention every error class in the checker already uses, and the only one of
- * the two that is defined for a cross-lane edge without picking a side twice.
- *
- * SETTLED edges only: the sample measures whether the tags settlement ASSIGNED
- * are right, and an unsettled edge has no assignment to grade — its absence is
- * control 1's number, not a wrong answer here.
- *
- * The draw is a pure function of the database: within a stratum, rows are
- * ordered by `fnv1a(identity)` and then by the identity itself, so the same
- * database yields the same sample on every run and two runs' accuracies are
- * comparable.
- */
-export function drawGoldSample(
-  edges: readonly LaneControlEdge[],
-  perStratum: number,
-  addressOf: (id: number) => string,
-): LaneGoldSample {
-  const strata = new Map<string, LaneControlEdge[]>();
-  for (const edge of edges) {
-    if (edge.tailTag === UNSETTLED_LANE_TAG || edge.headTag === UNSETTLED_LANE_TAG) continue;
-    const stratum = edge.relation + " @ " + formatLaneSide(edge.citingSegment, edge.tailTag);
-    const bucket = strata.get(stratum);
-    if (bucket === undefined) {
-      strata.set(stratum, [edge]);
-    } else {
-      bucket.push(edge);
-    }
-  }
-  const rows: LaneGoldSampleRow[] = [];
-  for (const stratum of [...strata.keys()].sort()) {
-    const drawn = [...strata.get(stratum)!]
-      .map((edge) => {
-        const id: LaneGoldSampleEdgeId = {
-          citingId: edge.citingId,
-          citedId: edge.citedId,
-          relation: edge.relation,
-          tailTag: edge.tailTag,
-          headTag: edge.headTag,
-        };
-        return { edge, identity: goldEdgeIdentity(id), id };
-      })
-      .sort((a, b) => fnv1a(a.identity) - fnv1a(b.identity) || a.identity.localeCompare(b.identity))
-      .slice(0, Math.max(0, perStratum));
-    for (const entry of drawn) {
-      rows.push({
-        edge: entry.id,
-        stratum,
-        address: edgeAddress(entry.edge, addressOf),
-        tailLane: tailLaneOf(entry.edge),
-        headLane: headLaneOf(entry.edge),
-        citingTurnTags: entry.edge.citingTags ?? null,
-        citedTurnTags: entry.edge.citedTags ?? null,
-        verdict: { tail: "", head: "" },
-      });
-    }
-  }
-  return {
-    kind: "lane-model-v12 gold sample",
-    stratifiedBy: "relation word x the CITING side's lane (segment + tag)",
-    perStratum,
-    strata: strata.size,
-    rows,
-  };
-}
-
-function isDecided(verdict: LaneGoldVerdict): boolean {
-  return verdict === "correct" || verdict === "wrong";
-}
-
-/**
- * Score a HAND-GRADED sample. Four dispositions, in this precedence, because
- * each excludes a row for a different reason and collapsing them would let a
- * denominator lie:
- *
- *   STALE   the graded row's exact stored identity is gone (retracted, or
- *           re-tagged since the draw — the live database is under a background
- *           worker, so an inherited figure is a measurement with an expiry
- *           date). Excluded whatever it says.
- *   UNGRADED at least one side still `""`. Excluded — an ungraded row is not a
- *           wrong one, and counting it as one would manufacture the accuracy
- *           this control refuses to invent.
- *   UNSURE  the grader declined. Excluded and NAMED, so a low denominator is
- *           visible rather than silently flattering.
- *   GRADED  both sides decided. The denominator.
- *
- * `accuracy` is `null` when nothing is gradable — never 0.
- */
-export function scoreGoldSample(
-  rows: readonly LaneGoldSampleRow[],
-  liveIdentities: ReadonlySet<string> | null,
-): LaneGoldScore {
-  let graded = 0;
-  let bothSidesCorrect = 0;
-  let ungraded = 0;
-  let unsure = 0;
-  let stale = 0;
-  let tailCorrect = 0;
-  let headCorrect = 0;
-  const perStratum = new Map<string, LaneGoldStratumScore>();
-  for (const row of rows) {
-    if (liveIdentities !== null && !liveIdentities.has(goldEdgeIdentity(row.edge))) {
-      stale += 1;
-      continue;
-    }
-    if (row.verdict.tail === "" || row.verdict.head === "") {
-      ungraded += 1;
-      continue;
-    }
-    if (!isDecided(row.verdict.tail) || !isDecided(row.verdict.head)) {
-      unsure += 1;
-      continue;
-    }
-    graded += 1;
-    if (row.verdict.tail === "correct") tailCorrect += 1;
-    if (row.verdict.head === "correct") headCorrect += 1;
-    const correct = row.verdict.tail === "correct" && row.verdict.head === "correct";
-    if (correct) bothSidesCorrect += 1;
-    const bucket = perStratum.get(row.stratum);
-    if (bucket === undefined) {
-      perStratum.set(row.stratum, {
-        stratum: row.stratum,
-        graded: 1,
-        bothSidesCorrect: correct ? 1 : 0,
-      });
-    } else {
-      bucket.graded += 1;
-      bucket.bothSidesCorrect += correct ? 1 : 0;
-    }
-  }
-  return {
-    graded,
-    bothSidesCorrect,
-    accuracy: graded === 0 ? null : (bothSidesCorrect / graded) * 100,
-    ungraded,
-    unsure,
-    stale,
-    tailCorrect,
-    headCorrect,
-    perStratum: [...perStratum.values()].sort((a, b) => a.stratum.localeCompare(b.stratum)),
-  };
-}
-
-export function controlGoldSample(
-  sample: LaneGoldSample | null,
-  gradedRows: readonly LaneGoldSampleRow[] | null,
-  liveIdentities: ReadonlySet<string> | null,
-  capability: LaneControlCapability,
-  findingLimit: number,
-): LaneControl {
-  const title = "two-sided-tag accuracy on a hand-graded, stratified sample";
-  const target = "REPORTED, NO THRESHOLD -- the spec forbids inventing a bar with no denominator";
-  const unit = "% of graded rows with BOTH sides correct";
-  const reason = missingCapabilityReason(capability, ["edgeSideTagColumns"]);
-  if (reason !== null) {
-    return unmeasurable("C4", title, target, unit, reason);
-  }
-  if (gradedRows === null) {
-    return unmeasurable(
-      "C4",
-      title,
-      target,
-      unit,
-      "no graded sample was supplied (--graded). A sample can be DRAWN and exported without a human, but its accuracy cannot be computed without one" +
-        (sample === null
-          ? ""
-          : " -- " + sample.rows.length + " row(s) across " + sample.strata + " stratum/strata are ready to grade"),
-    );
-  }
-  const score = scoreGoldSample(gradedRows, liveIdentities);
-  if (score.accuracy === null) {
-    return unmeasurable(
-      "C4",
-      title,
-      target,
-      unit,
-      "the graded file has no gradable row: " +
-        score.ungraded +
-        " ungraded, " +
-        score.unsure +
-        " unsure, " +
-        score.stale +
-        " stale (the edge was retracted or re-tagged since the draw)",
-    );
-  }
-  const findings = gradedRows
-    .filter((row) => row.verdict.tail === "wrong" || row.verdict.head === "wrong")
-    .map((row) => ({
-      address: row.address,
-      tailLane: row.tailLane,
-      headLane: row.headLane,
-      note:
-        "graded WRONG on " +
-        [
-          row.verdict.tail === "wrong" ? "the tail" : null,
-          row.verdict.head === "wrong" ? "the head" : null,
-        ]
-          .filter((side) => side !== null)
-          .join(" and ") +
-        " (" +
-        row.stratum +
-        ")",
-    }));
-  return {
-    id: "C4",
-    title,
-    target,
-    measured: Math.round(score.accuracy * 10) / 10,
-    unit,
-    unmeasurableReason: null,
-    context: [
-      score.bothSidesCorrect + " of " + score.graded + " graded row(s) correct on BOTH sides",
-      "per side: tail " + score.tailCorrect + "/" + score.graded + ", head " + score.headCorrect + "/" + score.graded,
-      "excluded: " + score.ungraded + " ungraded, " + score.unsure + " unsure, " + score.stale + " stale",
-      ...score.perStratum.map(
-        (stratum) =>
-          "  " + stratum.stratum + ": " + stratum.bothSidesCorrect + "/" + stratum.graded,
-      ),
-      "NO THRESHOLD is applied to this number, here or anywhere downstream",
-    ],
-    ...cap(findings, findingLimit),
-  };
-}
-
 // ------------------------------------------------------------------ render
-
-/**
- * THE CAUSAL MATRIX (ticket 13's third checkbox) — in the tool's OWN output,
- * not only in the ticket, because the ticket is not what a reader has open when
- * a report reads as noise six months from now.
- */
-const CAUSAL_MATRIX: readonly string[] = [
-  "## Read this first -- the judging order these controls exist to enforce",
-  "",
-  "A checker report that reads as noise has TWO possible causes and, without the",
-  "controls below, no way to tell them apart: the DEFINITION is wrong, or the",
-  "ATTRIBUTION is simply not done yet. Judge in this order:",
-  "",
-  "  1. C1-C3 are not all 0",
-  "       -> the attribution is UNFINISHED, and no checker report is yet evidence",
-  "          about anything. An unsettled edge takes part in NO lane computation,",
-  "          so \"the model is wrong\" and \"nobody has settled these rows\" print the",
-  "          same page. Settle, then re-run.",
-  "  2. C1-C3 are 0, and a finding's ATTRIBUTION is wrong",
-  "       -> fix the labels -- the turn's own tags, the edge's two side tags -- and",
-  "          re-run. The definition was never in question. (Each finding below",
-  "          carries the source address and BOTH side LaneKeys precisely so this",
-  "          judgement can be made without opening the database.)",
-  "  3. C1-C3 are 0, the attribution is RIGHT, and coupling/connectivity still",
-  "     misreport it",
-  "       -> the DEFINITION is wrong. This is the ONLY branch that is evidence",
-  "          against the model, and it is what this batch is looking for.",
-  "",
-  "C4 sets no threshold, deliberately: an accuracy is a description of how far the",
-  "attribution has got, never a bar it must clear.",
-];
 
 function renderControl(control: LaneControl): string[] {
   const lines: string[] = [];
@@ -918,72 +386,34 @@ export function renderLaneControlsReport(report: LaneControlsReport): string {
         (provenance === "" ? "" : " (" + provenance + ")"),
     );
   }
-  lines.push("");
-  lines.push(...CAUSAL_MATRIX);
   for (const control of report.controls) {
     lines.push("");
     lines.push(...renderControl(control));
-  }
-  lines.push("");
-  lines.push("## Sample artifacts");
-  if (report.sample === null) {
-    lines.push("gold sample: NOT DRAWN -- see C4's reason above");
-  } else {
-    lines.push(
-      "gold sample: " +
-        report.sample.rows.length +
-        " row(s) across " +
-        report.sample.strata +
-        " stratum/strata, stratified by " +
-        report.sample.stratifiedBy +
-        ", " +
-        report.sample.perStratum +
-        " per stratum",
-    );
-  }
-  lines.push(
-    report.exportPath === null
-      ? "export: none (pass --export <file> to write the gold sample)"
-      : "export: " + report.exportPath,
-  );
-  if (report.gradedPath !== null) {
-    lines.push("graded input: " + report.gradedPath);
   }
   return lines.join("\n");
 }
 
 // --------------------------------------------------------------------- CLI
 
-const USAGE = `lane-controls -- read-only attribution controls (lane-model-v12 ticket 13)
+const USAGE = `lane-controls -- read-only attribution control (lane-model-v12 ticket 13)
 
-Answers "is the attribution finished?" BEFORE anyone judges the checker's
-reports. Opens the database READ-ONLY; it never writes to the database, and the
-only file it writes at all is the one --export names.
+Answers "is the per-side attribution right?" Opens the database READ-ONLY; it
+never writes to the database, and it writes no file at all.
 
 Usage:
-  bun scripts/lane-controls.ts [--db <path>] [--segment <id>]...
-                               [--sample <n>] [--export <file>] [--graded <file>]
-                               [--findings <n>]
+  bun scripts/lane-controls.ts [--db <path>] [--segment <id>]... [--findings <n>]
 
 Options:
   --db <path>       database file (default: the configured production DB)
-  --segment <id>    restrict every control to this segment (repeatable;
+  --segment <id>    restrict the control to this segment (repeatable;
                     default: the whole database)
-  --sample <n>      gold-sample rows drawn per (relation x lane) stratum (default 2)
-  --export <file>   write the drawn gold sample to this JSON file
-  --graded <file>   an exported sample with its verdicts filled in
-                    ("correct"/"wrong"/"unsure"). WITHOUT it, control 4 reports
-                    "cannot measure" -- never an accuracy of 0
-  --findings <n>    findings printed per control (default 20; the count line
-                    always states the true total)
+  --findings <n>    findings printed (default 20; the count line always
+                    states the true total)
   --help            show this message`;
 
 export interface LaneControlsCliOptions {
   dbPath?: string;
   segmentIds: number[];
-  perStratum: number;
-  exportPath?: string;
-  gradedPath?: string;
   downstreamLimit: number;
   findingLimit: number;
   help: boolean;
@@ -1024,7 +454,6 @@ function positiveInteger(flag: string, raw: string): number {
 export function parseLaneControlsArguments(argv: readonly string[]): LaneControlsCliOptions {
   const options: LaneControlsCliOptions = {
     segmentIds: [],
-    perStratum: 2,
     downstreamLimit: 10,
     findingLimit: 20,
     help: false,
@@ -1052,21 +481,6 @@ export function parseLaneControlsArguments(argv: readonly string[]): LaneControl
         index += 1;
         break;
       }
-      case "--sample":
-        if (next === undefined) throw new Error("--sample requires a value");
-        options.perStratum = positiveInteger("--sample", next);
-        index += 1;
-        break;
-      case "--export":
-        if (next === undefined) throw new Error("--export requires a value");
-        options.exportPath = next;
-        index += 1;
-        break;
-      case "--graded":
-        if (next === undefined) throw new Error("--graded requires a value");
-        options.gradedPath = next;
-        index += 1;
-        break;
       case "--downstream":
         if (next === undefined) throw new Error("--downstream requires a value");
         options.downstreamLimit = positiveInteger("--downstream", next);
@@ -1082,30 +496,6 @@ export function parseLaneControlsArguments(argv: readonly string[]): LaneControl
     }
   }
   return options;
-}
-
-/**
- * Read a `--graded` file. Accepts BOTH shapes this tool can produce — the
- * `--export` bundle (`{ goldSample: { rows } }`) and a bare `LaneGoldSample`
- * (`{ rows }`) — because a grader who splits the bundle by hand has done
- * nothing wrong and should not lose their work to a shape check.
- */
-export function readGradedSample(text: string): LaneGoldSampleRow[] {
-  const parsed = JSON.parse(text) as unknown;
-  const container =
-    parsed !== null && typeof parsed === "object" && "goldSample" in parsed
-      ? (parsed as { goldSample: unknown }).goldSample
-      : parsed;
-  if (
-    container === null ||
-    typeof container !== "object" ||
-    !Array.isArray((container as { rows?: unknown }).rows)
-  ) {
-    throw new Error(
-      "a graded sample must be the exported bundle or a bare gold sample -- neither has a `rows` array here",
-    );
-  }
-  return (container as { rows: LaneGoldSampleRow[] }).rows;
 }
 
 export function runLaneControlsCli(
@@ -1127,39 +517,10 @@ export function runLaneControlsCli(
     return 0;
   }
 
-  let gradedRows: LaneGoldSampleRow[] | null = null;
-  if (options.gradedPath !== undefined) {
-    try {
-      gradedRows = readGradedSample(readFileSync(options.gradedPath, "utf8"));
-    } catch (error) {
-      io.stderr(
-        "could not read --graded " +
-          options.gradedPath +
-          ": " +
-          (error instanceof Error ? error.message : String(error)),
-      );
-      return 1;
-    }
-  }
-
   const databasePath = resolveDatabasePath(options.dbPath);
   const db = openDb(databasePath);
   try {
-    const report = buildLaneControlsReport(db, databasePath, options, gradedRows);
-    if (options.exportPath !== undefined) {
-      writeFileSync(
-        options.exportPath,
-        JSON.stringify(
-          {
-            kind: "lane-model-v12 attribution controls export",
-            database: databasePath,
-            goldSample: report.sample,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
-    }
+    const report = buildLaneControlsReport(db, databasePath, options);
     io.stdout(renderLaneControlsReport(report));
     return 0;
   } finally {
@@ -1176,7 +537,6 @@ export function buildLaneControlsReport(
   db: Database,
   databasePath: string,
   options: LaneControlsCliOptions,
-  gradedRows: readonly LaneGoldSampleRow[] | null,
 ): LaneControlsReport {
   const capability = loadLaneControlCapability(db);
   const segmentFilter = new Set(options.segmentIds.map((id) => String(id)));
@@ -1194,24 +554,9 @@ export function buildLaneControlsReport(
     provenanceCounts[edge.provenance] = (provenanceCounts[edge.provenance] ?? 0) + 1;
   }
   const registry = capability.laneRegistry ? loadDeclaredLaneRegistry(db) : new Map<string, Set<string>>();
-  const endpointIds = [...new Set(edges.flatMap((edge) => [edge.citingId, edge.citedId]))];
-  const laneTagsByTurn = capability.edgeSideTagColumns
-    ? loadLaneTagsForTurns(db, endpointIds)
-    : new Map<number, string[]>();
-  const addressOf = addressLookupForEdges(edges);
-
-  const sample = capability.edgeSideTagColumns
-    ? drawGoldSample(edges, options.perStratum, addressOf)
-    : null;
-  const liveIdentities = capability.edgeSideTagColumns
-    ? new Set(edges.map((edge) => goldEdgeIdentity(edge)))
-    : null;
 
   const controls: LaneControl[] = [
-    controlUnsettledSides(edges, capability, options.findingLimit),
     controlSideAttribution(edges, registry, capability, options.findingLimit),
-    controlLanelessNodes(edges, laneTagsByTurn, capability, options.findingLimit),
-    controlGoldSample(sample, gradedRows, liveIdentities, capability, options.findingLimit),
   ];
 
   return {
@@ -1220,8 +565,5 @@ export function buildLaneControlsReport(
     edgeCount: capability.edgeSideTagColumns ? edges.length : null,
     provenanceCounts,
     controls,
-    sample,
-    exportPath: options.exportPath ?? null,
-    gradedPath: options.gradedPath ?? null,
   };
 }
