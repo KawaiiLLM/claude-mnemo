@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkc1tyk" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkca3cg" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {

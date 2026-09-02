@@ -51,3 +51,24 @@ md5 before/after every restore: `note-settlement-turn-facade.ts` = `78e6c9f0bbfd
 **Shared-file note**: `src/db/citations.ts` gets ONE hunk from this ticket — a doc comment added above `endpointLaneTags` (no code change). Ticket 02 (`tests/db/citations.test.ts` etc.) edits this same file elsewhere; this hunk is additive-only and named so it should not conflict.
 
 **UNVERIFIED / left as found**: the 365 pre-existing `typecheck:tests` errors outside files this ticket touches (full list in the implementing agent's final report to the caller) — left exactly as instructed, not investigated for runtime impact.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged as a no-ff merge of `fb18549d`; bundles rebuilt after. `npx tsc --noEmit` 0 errors; full
+`bun test` **4737 pass / 0 fail / 268 files** against the pre-merge baseline 4729/0/267 — the delta is
+exactly the eight new tests and one new file. Guards: `anthropic-ai` in worker.cjs = 0, `git diff
+--check` clean. `npm run typecheck:tests` on main: **358** pre-existing errors (the worker counted 365 in
+its worktree; the difference is not investigated), **0** in the four touched test files.
+
+My own probes, distinct from the worker's four, both aimed at the CHECK SITE rather than the reader:
+
+| # | mutation in `src/db/citations.ts` | result |
+|---|---|---|
+| I1 | stale-class CAS condition replaced by `false` (any class accepted) | RED ×2: the unit CAS test and the 03b F2 whole-call-rollback route test |
+| I2 | `if (!lanes.has(next))` replaced by `if (false)` | RED ×2: the unit `invalid-declaration` test and the 03b F5 other-task's-word test |
+
+Both restored by `cp` with md5 verified. Accepted: F2/F4/F5/F6 each carry a route-level pin, F3's
+dead test now sends the tagged entry. The 358 test-side type errors stay as found — they are a
+standing debt, not this ticket's.
