@@ -4,7 +4,7 @@
 
 **Blocked by:** 02.
 
-**Status:** LANDED (branch `worktree-agent-a943632d96407d296`) — tsc 0; 4787/0/263 (+7 tests, +0 files); 6 mutation probes RED, md5-restored. Report below.
+**Status:** LANDED (branch `worktree-agent-a943632d96407d296`) — tsc 0; 4787/0/263 (+7 tests, +0 files); 6 mutation probes RED, md5-restored. Report below. **VERIFIED S15069/T2413 at 1b20dd8a (ff-merged)**: tsc 0, 4787/0/263 (+7 accounted), guards clean; my probes RED: the retired per-turn instruction smuggled into duty 8 (1); the "EDITS ARE THE EXCEPTION" framing dropped (1). Deviations accepted: the settlement facade's `remember` takes `id="E<n>"` + `tag` and refuses lane addresses, so the spec's public `create(id="E<n>/#tag", members)` form is not taught to settlement; `note-settlement-prompt.ts`'s stage-2 "batches of ten" is left to ticket 05. Dead exports in `note-settlement-stage1.ts` noted as a follow-up.
 
 - [x] The stage-1 teaching in the unified prompt says the order: topics → `remember(create, id="E<n>/#tag")` for a missing lane (optionally with `members`) → the batch tag write per topic → per-turn `note` only for corrections → `finalize`. The audit (title, type, tags) is stated as a duty of the read; edits as the exception.
 - [x] Multi-lane membership stated: a turn serving two topics is hit by both batch writes (additive union); each membership is judged on the turn's PRINCIPAL result, not a mention.
