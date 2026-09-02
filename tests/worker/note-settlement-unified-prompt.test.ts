@@ -333,6 +333,31 @@ describe("first-settlement-feedback ticket 01 — the edge pass places the edge 
 });
 
 /**
+ * MAIN-AGENT-EDGES TICKET 05 (spec D3/D6). The unified run's own task frame
+ * carried the same "write the EDGES between the turns in your writable set"
+ * sentence the staged stage-2 prompt did — the sole-writer era's framing. The
+ * main agent now records what it used, corrected or verified as it goes, so
+ * the edge pass DECLARES the ambiguous side, FILLS the misses and REVIEWS.
+ * Pinned on the rendered text on both halves: the new sentence present, the
+ * originating one absent, because a frame that still says "write the edges"
+ * sends a run looking for work another writer already did.
+ */
+describe("main-agent-edges ticket 05 — the edge pass declares, fills and reviews", () => {
+  test("the unified task frame no longer says this pass originates the window's edges", () => {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const text = renderPromptFor(context);
+
+    expect(text).toContain("Each turn's writer already recorded the edges it knew");
+    expect(text).toContain("you DECLARE the lane side of an edge whose endpoint sits in several");
+    expect(text).toContain("FILL the edges that were missed, and REVIEW what stands");
+    expect(text).not.toContain("write the EDGES between the turns in your writable set");
+  });
+});
+
+/**
  * SETTLEMENT-READ-ONCE TICKET 04 (spec D3, "Stage 1 is topic-first"). The
  * topic pass is no longer a per-turn write loop: after the one read it lists
  * the window's topics, declares the lane a topic has none for, tags that

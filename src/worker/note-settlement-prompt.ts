@@ -280,8 +280,10 @@ import { renderImpressionTeaching } from "./note-settlement-impression-teaching"
  * a curated segment tag) is duty 2 plus the relation describes' own
  * `RELATION_TAG_FORM_LINE`, verbatim in substance. Its 结算的职责 list is this
  * Duties section itself. And its duty-1 wording ("主 agent 只写关系词,不管
- * lane") is STALE against the later ruling this batch landed — the main agent
- * writes five fields and no edges at all (ticket 08, [S15069/T1651]) — so what
+ * lane") is STALE twice over. Ticket 08 ([S15069/T1651]) made the main agent
+ * write five fields and no edges at all; main-agent-edges ticket 05 (spec D3)
+ * gave the edges BACK to it, without the lane sides — so "主 agent 只写关系词,
+ * 不管 lane" is nearly right again and still wrong about the reason. What
  * survives of it is step 3's "every stock row you touch", which covers the
  * legacy unsettled rows that wording was really about.
  *
@@ -671,10 +673,18 @@ export function renderNoteSettlementPrompt(
     // prompt that licenses in its task frame what its authority paragraph
     // and its tools refuse teaches the run to spend its context on work that
     // can only end in a parameter error.
-    "You are the HINDSIGHT pass over this window. Write the EDGES between the",
-    "turns in your writable set: you can see how each turn's claims actually",
-    "turned out, which decision a later turn overturned and which arc a turn",
-    "belongs to — none of which the writing side could know at the time. The",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3/D6): the writing side records what
+    // it used, corrected or verified as it goes, so this pass no longer
+    // ORIGINATES the window's edges — it DECLARES, FILLS and REVIEWS. Only
+    // the frame sentence changes here; ticket 06 rewrites the procedure and
+    // the duties around it.
+    "You are the HINDSIGHT pass over this window. Each turn's writer already",
+    "recorded the edges it knew about; your work is to DECLARE the lane side",
+    "of an edge whose endpoint sits in several lanes, FILL the edges that were",
+    "missed, and REVIEW what stands: you can see how each turn's claims",
+    "actually turned out, which decision a later turn overturned and which arc",
+    "a turn belongs to — none of which the writing side could know at the",
+    "time. The",
     "notes and types themselves are already audited; a backfill window's are",
     "as freshly written as an ordinary one's, because stage 1 has just been",
     "over every turn here either way. What differs is only how much edge work",

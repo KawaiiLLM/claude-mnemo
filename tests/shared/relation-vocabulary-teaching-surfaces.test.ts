@@ -275,12 +275,14 @@ describe("no teaching surface still names a retired relation vocabulary or the p
     // The seven STORAGE words are untouched — they are what a stored row's
     // `relation` column says, and ticket 03 migrates them additively.
     expect(EDGE_RELATIONS).toHaveLength(7);
-    // The main agent's own description enumerates the three only to say they
-    // are NOT its ordinary business — a run that reads it must not go looking.
+    // main-agent-edges ticket 05 (spec D3): the main agent's own description
+    // enumerates the three as ITS OWN routine parameters. The sentence that
+    // disowned them is asserted gone here too — this file is the sweep that
+    // catches a surface still teaching a retired division.
     expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
-      "correct/verify/use and their retract… mirrors",
+      "correct/verify/use (with their retract… mirrors) are ROUTINE here",
     );
-    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain("are settlement's whole business");
+    expect(MNEMO_TOOL_DESCRIPTIONS.note).not.toContain("are settlement's whole business");
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("correct/verify/use:");
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("ALL THREE classes accept either");
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain("**三个关系类**");

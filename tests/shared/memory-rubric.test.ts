@@ -12,6 +12,7 @@ import {
   settlementNoteInputShape,
   rememberInputShape,
 } from "../../src/mcp/definitions";
+import { MAX_TURN_RELATION_DEGREE } from "../../src/db/citations";
 import { NOTE_TOKEN_BUDGET } from "../../src/shared/note-budget";
 import {
   LEGACY_RELATION_CLASS,
@@ -179,6 +180,20 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
     half: "actions",
     marker: "**tags 从当前任务的 tag 与任务内已声明的泳道里选,没有合适的就留空。**",
   },
+  // main-agent-edges ticket 05 (spec D3): the EDGE DUTY, two sentences, in the
+  // ACTIONS half alone. The main agent is a writer of edges again — settlement
+  // fills and reviews rather than originating — so the duty is an imperative
+  // and belongs here, while the CLASSES it names stay defined in concepts.
+  {
+    section: "RECORD: write this turn's edges — used, corrected, verified",
+    half: "actions",
+    marker: "**写下这一轮用到、修正或验证了哪些更早的 turn。**",
+  },
+  {
+    section: "RECORD: no lane side on an edge, and the 20/20 caps",
+    half: "actions",
+    marker: "**边上不写泳道 —— 归属由结算判定。**",
+  },
   // Ticket 21 (user ruling 2026-08-26): the ask-before-create principle. It is
   // an ACTION, and the main agent's alone — settlement is headless and its own
   // half of the same rule (leave it empty) lives in its prompt's duty 1.
@@ -281,6 +296,68 @@ describe("section checklist — the two halves together cover every section of t
         `settlement-only judgment must not be in the actions half: ${settlementOnly}`,
       ).not.toContain(settlementOnly);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// main-agent-edges ticket 05 (spec D3): the main agent writes edges again.
+// ---------------------------------------------------------------------------
+
+/**
+ * D3's division of labour, pinned on both halves at once because it is stated
+ * in both: CONCEPTS says who writes an edge, ACTIONS says what to write. The
+ * era this replaces put edge-writing wholly in settlement's hands, and the two
+ * retired sentences are asserted ABSENT — a rubric that still carries either
+ * one teaches a writer not to write the very rows the spec now asks it for.
+ */
+describe("the edge duty — the main agent records what it used, corrected or verified", () => {
+  test("CONCEPTS says the citing turn writes the edge and settlement fills and reviews", () => {
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain(
+      "**边由引用方这一轮写下,结算补漏与复核。**",
+    );
+    // The retired sentence, in full. It survived v13 and is what D3 overturns.
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("边由结算书写");
+  });
+
+  test("the ACTIONS preamble lists the edges among what this agent writes", () => {
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
+      "你写的是每一轮的笔记:title、content、insight、type、tags,以及这一轮的边。",
+    );
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).toContain(
+      "**泳道的声明归结算,任务的归属由 tags 自动决定。**",
+    );
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).not.toContain("**边与泳道的声明归结算");
+  });
+
+  // SENTENCE ONE: what to record, at which grain, and the precedence that
+  // picks the class. "Principal result, not a detail" is the reading that
+  // keeps the graph from filling with incidental mentions.
+  test("sentence one records used / corrected / verified at the principal-result grain", () => {
+    const actions = MEMORY_RUBRIC_MAIN_ACTIONS_TEXT;
+    expect(actions).toContain("**写下这一轮用到、修正或验证了哪些更早的 turn。**");
+    expect(actions).toContain("指向被引 turn 的主结果,细节不写");
+    expect(actions).toContain("一对节点只写一条边");
+    expect(actions).toContain("correct > verify > use");
+  });
+
+  // SENTENCE TWO: no lane side ever (an attribution is settlement's), and the
+  // caps — bound to the gate's own constant so the taught number cannot drift
+  // away from the number the write path enforces.
+  test("sentence two forbids a lane side and states the caps as the gate's own number", () => {
+    const actions = MEMORY_RUBRIC_MAIN_ACTIONS_TEXT;
+    expect(actions).toContain("**边上不写泳道 —— 归属由结算判定。**");
+    expect(actions).toContain(
+      `一个 turn 至多 ${MAX_TURN_RELATION_DEGREE} 条出边、${MAX_TURN_RELATION_DEGREE} 条入边。`,
+    );
+  });
+
+  // The duty is an IMPERATIVE and the classes stay DEFINED in concepts: the
+  // two halves must not both carry the same sentence (the "两个来源" drift
+  // staged-settlement ticket 06 had to repair).
+  test("the duty is in the actions half only, and the definitions stay in concepts", () => {
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("**写下这一轮用到、修正或验证了哪些更早的 turn。**");
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).not.toContain("**边上不写泳道");
+    expect(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT).not.toContain("**三个关系类**");
   });
 });
 
