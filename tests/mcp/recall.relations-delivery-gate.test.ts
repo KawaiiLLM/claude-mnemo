@@ -147,7 +147,7 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
 
     // Some atoms reached the reader, and some did not: that is `cut`.
     expect(output).toContain("- relations:");
-    expect(output).toContain("extends ->");
+    expect(output).toContain("use ->");
     expect(output).toContain("…");
     const row = relationsRow(reader, citing);
     expect(row?.complete).toBe(0);

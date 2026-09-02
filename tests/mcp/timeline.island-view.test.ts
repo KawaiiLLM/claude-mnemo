@@ -101,15 +101,17 @@ describe("timeline node selector (ticket 13 decision 5)", () => {
     expect(treeBody).toBe(expectedTreeLines.join("\n"));
     // The tree's own two capabilities, both still here: the labelled arrow
     // and the transitive hop past the root's immediate target.
-    expect(treeBody).toContain("-extends-> T2");
-    expect(treeBody).toContain("-narrows-> T1");
+    // main-agent-edges ticket 07: the label is the row's CLASS, on the tree
+    // exactly as in `recall`'s own field.
+    expect(treeBody).toContain("-use-> T2");
+    expect(treeBody).toContain("-correct(partial)-> T1");
 
     // Settlement-read-once spec D8: `recall`'s `relations` field on the SAME
     // turn is now the DIRECT set — one row, the immediate out-edge, in the
     // other grammar. The two surfaces diverged deliberately; a change that
     // re-pointed either one at the other's builder would land here.
     const direct = buildTurnDirectRelationLines(db, { id: turn.id, sessionId, promptNumber: 3 });
-    expect(direct).toEqual(["extends -> T2 [unplaced]"]);
+    expect(direct).toEqual(["use -> T2 (none)"]);
     expect(treeBody).not.toBe(direct.join("\n"));
   });
 

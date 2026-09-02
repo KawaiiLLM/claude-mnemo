@@ -722,6 +722,13 @@ describe("recall(id=\"E<n>\") segment card", () => {
     addSegmentMembers(db, segmentId, [t3], CUTOFF);
     const t1Id = getTurn(db, sessionId, 1)!.id;
     const t3Id = getTurn(db, sessionId, 3)!.id;
+    // main-agent-edges D2: a stored side resolves against the endpoint's own
+    // lanes, so the lane has to be DECLARED in the task and carried by both
+    // endpoints for the declaration to read as anything but `invalid`.
+    insertLane(db, segmentId, "seg-tag", CUTOFF);
+    for (const turnId of [t1Id, t3Id]) {
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run('["seg-tag"]', turnId);
+    }
     writeMemoryEdges(
       db,
       [
@@ -737,7 +744,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
     );
 
     const unrequested = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3` });
-    expect(unrequested).not.toContain("extends ->");
+    expect(unrequested).not.toContain("use ->");
 
     const requested = recallMemory(db, {
       id: `E${segmentId}/S${sessionId}/T3`,
@@ -746,8 +753,11 @@ describe("recall(id=\"E<n>\") segment card", () => {
     // Settlement-read-once spec D8: the card's member block shows the
     // member's OWN direct edge, in the same grammar `recall`'s turn route
     // renders — never the tree's root-address line, which left with the tree.
-    expect(requested).toContain("extends -> T1 (#seg-tag)");
-    expect(requested).not.toContain("-extends->");
+    expect(requested).toContain("use -> T1 (#seg-tag declared)");
+    expect(requested).not.toContain("-use->");
+    // main-agent-edges ticket 07: the class is the only relation word the card
+    // prints either.
+    expect(requested).not.toContain("extends");
   });
 
   // ---- lane-model-v12 ticket 18 (ruling [S15069/T1670]): the card carries no

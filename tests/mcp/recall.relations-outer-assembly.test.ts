@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { RELATIONS_FIELD_LEGEND } from "../../src/mcp/relations-view";
@@ -80,6 +82,19 @@ describe("the relations response is assembled once (spec D8 outer assembly)", ()
       }
     }
 
+    // main-agent-edges D2: a stored side tag resolves against the endpoint's
+    // OWN lanes, so the fixture declares the lane and places both endpoints in
+    // it — otherwise the two declarations would read as `invalid`, which is a
+    // different test's subject.
+    const taskId = createSegment(db, { title: "outer task", nowEpoch: NOW }).id;
+    insertLane(db, taskId, "lane-a", NOW);
+    insertLane(db, taskId, "lane-b", NOW);
+    for (const promptNumber of [1, 3]) {
+      const turnId = getTurn(db, sessionA, promptNumber)!.id;
+      addSegmentMembers(db, taskId, [turnId], NOW);
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run('["lane-a","lane-b"]', turnId);
+    }
+
     writeMemoryEdges(
       db,
       [
@@ -129,7 +144,7 @@ describe("the relations response is assembled once (spec D8 outer assembly)", ()
     const output = recallMemory(db, { id: listId(), filter: { fields: [...FIELDS] } });
 
     expect(output.split(RELATIONS_FIELD_LEGEND)).toHaveLength(2);
-    expect(output).toContain("extends -> T1 (#lane-a)");
+    expect(output).toContain("use -> T1 (#lane-a declared)");
   });
 
   test("a response that did NOT select relations carries no legend", () => {

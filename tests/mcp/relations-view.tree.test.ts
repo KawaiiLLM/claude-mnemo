@@ -13,6 +13,12 @@ import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
  * Fork-tree spec (ticket 12): `buildTurnRelationTreeLines` renders the viewed
  * turn's position in the graph as a tree — root address + main out-chain
  * inline, every other out-edge and every in-edge as its own `└` branch.
+ *
+ * Every arrow label below is a CLASS (main-agent-edges ticket 07): the tree is
+ * one of the three surfaces on which the class word is the only relation word
+ * rendered, so a fixture written under a seven-word storage value reads back
+ * as `use`/`verify`/`correct(full)`/`correct(partial)`, never as the word it
+ * was stored under.
  * `tests/mcp/recall.test.ts`'s own "relations field" describe block still
  * exercises the field end-to-end through `recallMemory`; this file targets
  * the tree shape's own rules directly against `buildTurnRelationTreeLines`.
@@ -107,7 +113,7 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     const out = lines(6);
     expect(out).toHaveLength(1);
     expect(out[0]).toBe(
-      `S${sessionId}/T6 -extends-> T5 -extends-> T4 -extends-> T3 -> ..`,
+      `S${sessionId}/T6 -use-> T5 -use-> T4 -use-> T3 -> ..`,
     );
   });
 
@@ -119,7 +125,7 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     edge(citerOfCiter, citer, "narrows");
 
     const out = lines(1);
-    expect(out).toEqual([`S${sessionId}/T1`, `     └<-narrows- T2`]);
+    expect(out).toEqual([`S${sessionId}/T1`, `     └<-correct(partial)- T2`]);
     // T3 only cites T2, never T1 — it must not appear anywhere in T1's tree.
     expect(out.join("\n")).not.toContain("T3");
   });
@@ -136,8 +142,8 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     edge(root, b, "indexes");
 
     const out = lines(1);
-    expect(out[0]).toBe(`S${sessionId}/T1 -extends-> T2 -extends-> T3`);
-    expect(out[1]).toBe(`     └-indexes-> T3 ^`);
+    expect(out[0]).toBe(`S${sessionId}/T1 -use-> T2 -use-> T3`);
+    expect(out[1]).toBe(`     └-use-> T3 ^`);
     // Not re-expanded: b has no children of its own here to expand into
     // anyway, but the point is the branch line stops right at `^`, one hop.
     expect(out).toHaveLength(2);
@@ -153,10 +159,10 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     edge(root, unplaced, "grounds");
 
     const out = lines(1).join("\n");
-    expect(out).toContain("-override-> T2 {alpha}");
-    expect(out).toContain("=consume=> T3 {alpha→beta}");
-    expect(out).toContain("-grounds-> T4");
-    expect(out).not.toContain("-grounds-> T4 {");
+    expect(out).toContain("-correct(full)-> T2 {alpha}");
+    expect(out).toContain("=use=> T3 {alpha→beta}");
+    expect(out).toContain("-use-> T4");
+    expect(out).not.toContain("-use-> T4 {");
   });
 
   test(`branch count caps at ${RELATION_TREE_BRANCH_CAP}, trailing '… +N more' when cut`, () => {
@@ -191,15 +197,15 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
       [d1, d2, d3],
       [e1, e2, e3],
     ]) {
-      edge(root, s1, "extends");
+      edge(root, s1, "verifies");
       edge(s1, s2, "extends");
       edge(s2, s3, "extends");
     }
-    // One deep, 6-node thread, WORSE relation rank ("consume") — only a
-    // genuinely unbounded coverage (the full 6-node reach) can tell it apart
-    // from the shallow threads above.
+    // One deep, 6-node thread whose first hop has the WORSE class rank (`use`
+    // against the shallow threads' `verify`) — only a genuinely unbounded
+    // coverage (the full 6-node reach) can tell it apart from them.
     const y1 = turn(17), y2 = turn(18), y3 = turn(19), y4 = turn(20), y5 = turn(21), y6 = turn(22);
-    edge(root, y1, "consume");
+    edge(root, y1, "extends");
     edge(y1, y2, "extends");
     edge(y2, y3, "extends");
     edge(y3, y4, "extends");
@@ -209,14 +215,14 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     const out = lines(1);
     // The deep thread wins the main spine and shows the truncation ellipsis
     // — the bounded-coverage counter-case (acceptance criterion 3).
-    expect(out[0]).toBe(`S${sessionId}/T1 -consume-> T17 -extends-> T18 -extends-> T19 -> ..`);
+    expect(out[0]).toBe(`S${sessionId}/T1 -use-> T17 -use-> T18 -use-> T19 -> ..`);
     // Every shallow thread lost the race and renders as its own full,
     // un-truncated branch — none of them ever leaked into the main spine.
     expect(out).toHaveLength(1 + RELATION_TREE_BRANCH_CAP + 1);
-    expect(out[1]).toBe(`     └-extends-> T14 -extends-> T15 -extends-> T16`);
-    expect(out[2]).toBe(`     └-extends-> T11 -extends-> T12 -extends-> T13`);
-    expect(out[3]).toBe(`     └-extends-> T8 -extends-> T9 -extends-> T10`);
-    expect(out[4]).toBe(`     └-extends-> T5 -extends-> T6 -extends-> T7`);
+    expect(out[1]).toBe(`     └-verify-> T14 -use-> T15 -use-> T16`);
+    expect(out[2]).toBe(`     └-verify-> T11 -use-> T12 -use-> T13`);
+    expect(out[3]).toBe(`     └-verify-> T8 -use-> T9 -use-> T10`);
+    expect(out[4]).toBe(`     └-verify-> T5 -use-> T6 -use-> T7`);
     expect(out[5]).toContain("… +1 more");
     expect(out.slice(1).join("\n")).not.toContain("-> ..");
   });
@@ -233,8 +239,8 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     edge(citer2, root, "indexes");
 
     const out = lines(1);
-    expect(out[0]).toBe(`S${sessionId}/T1 -extends-> T2 -extends-> T3`);
-    expect(out).toContain(`     └<-narrows- T4`);
-    expect(out).toContain(`     └<-indexes- T5`);
+    expect(out[0]).toBe(`S${sessionId}/T1 -use-> T2 -use-> T3`);
+    expect(out).toContain(`     └<-correct(partial)- T4`);
+    expect(out).toContain(`     └<-use- T5`);
   });
 });

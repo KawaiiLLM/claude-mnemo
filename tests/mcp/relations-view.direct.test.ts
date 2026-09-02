@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
@@ -14,20 +15,22 @@ import type {
 import {
   buildTurnDirectRelationLines,
   buildTurnRelationTreeLines,
+  RELATIONS_FIELD_LEGEND,
 } from "../../src/mcp/relations-view";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 /**
  * Settlement-read-once spec D8 (user rulings T2388 "render like timeline, no
  * invented notation" and T2404 "direct out/in edges only, outgoing first, no
- * downstream hops"): `recall`'s `relations` field renders THIS NODE'S OWN
- * EDGES — every outgoing row then every incoming one, both raw lane sides on
- * each, nothing elided.
+ * downstream hops"), with MAIN-AGENT-EDGES ticket 07's marks on top:
+ * `recall`'s `relations` field renders THIS NODE'S OWN EDGES — every outgoing
+ * row then every incoming one — and each side shows the lane attribution it
+ * RESOLVES to (spec D2's five outcomes), not the raw tag the row stores.
  *
  * `tests/mcp/relations-view.tree.test.ts` keeps pinning the TREE, which
  * survives on exactly one surface (`timeline(id="S<n>/T<m>")`). This file
- * pins the direct set: its data source, its grammar, and the count it is
- * required to carry whole.
+ * pins the direct set: its data source, its grammar, its five marks, and the
+ * count it is required to carry whole.
  */
 describe("the relations field renders the node's direct edge set (spec D8)", () => {
   let db: Database;
@@ -81,6 +84,21 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
       observations: [],
     });
     return getTurn(db, inSession, promptNumber)!.id;
+  }
+
+  /** A task with its lanes DECLARED — an attribution resolves through the registry, never off a turn's raw tag alone. */
+  function task(title: string, laneTags: readonly string[]): number {
+    const segmentId = createSegment(db, { title, nowEpoch: NOW }).id;
+    for (const tag of laneTags) {
+      insertLane(db, segmentId, tag, NOW);
+    }
+    return segmentId;
+  }
+
+  /** Put a turn in a task and give it lane memberships — what `loadEndpointLaneFacts` reads to resolve either side. */
+  function place(turnId: number, segmentId: number, laneTags: readonly string[]): void {
+    addSegmentMembers(db, segmentId, [turnId], NOW);
+    db.query("UPDATE turns SET tags = ? WHERE id = ?").run(JSON.stringify([...laneTags]), turnId);
   }
 
   function edge(
@@ -166,8 +184,8 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
     edge(citer, subject, "verifies");
 
     expect(lines(5)).toEqual([
-      "extends -> T1 [unplaced]",
-      "<- T9 verifies [unplaced]",
+      "use -> T1 (none)",
+      "<- T9 verify (none)",
     ]);
   });
 
@@ -186,81 +204,171 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
   test("a stored bare row beside a relation row on the SAME pair contributes no line of its own", () => {
     const subject = turn(2);
     const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a"]);
+    place(subject, alpha, ["lane-a"]);
+    place(cited, alpha, ["lane-a"]);
     // Both rows seeded past the write path: the relation write would DROP the
     // wordless row it displaces, so a pre-cutover database is the only place
     // the two coexist, and the reader is what has to be right about it.
     legacyBareRow(subject, cited);
     legacyEdgeRow(subject, cited, "extends", "lane-a", "lane-a");
 
-    expect(lines(2)).toEqual(["extends -> T1 (#lane-a)"]);
+    expect(lines(2)).toEqual(["use -> T1 (#lane-a declared)"]);
   });
 
-  test("rows render whatever their sides are — placed, half-settled and unplaced alike", () => {
-    const subject = turn(4);
-    const placed = turn(1);
-    const halfTail = turn(2);
-    const unplaced = turn(3);
-    edge(subject, placed, "extends", "lane-a", "lane-a");
-    edge(subject, halfTail, "consume", "lane-a", "");
-    edge(subject, unplaced, "grounds");
+  // ---- the five outcomes (spec D2) ----
 
-    expect(lines(4)).toEqual([
-      "extends -> T1 (#lane-a)",
-      "consume -> T2 (#lane-a → ·)",
-      "grounds -> T3 [unplaced]",
+  test("DERIVED: an endpoint in exactly one lane needs no declaration, and the blank side still names the lane", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a"]);
+    place(subject, alpha, ["lane-a"]);
+    place(cited, alpha, ["lane-a"]);
+    edge(subject, cited, "extends");
+
+    // The retired renderer printed `[unplaced]` here — over the majority of
+    // production's corpus, whose attribution is in fact fully determined.
+    expect(lines(2)).toEqual(["use -> T1 (#lane-a derived)"]);
+  });
+
+  test("DECLARED: an endpoint in several lanes, and the stored tag is one of them", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a", "lane-b"]);
+    place(subject, alpha, ["lane-a", "lane-b"]);
+    place(cited, alpha, ["lane-a", "lane-b"]);
+    edge(subject, cited, "extends", "lane-a", "lane-b");
+
+    expect(lines(2)).toEqual(["use -> T1 (#lane-a declared → #lane-b declared)"]);
+  });
+
+  test("AMBIGUOUS: several lanes and nothing declared — the finding settlement's edge pass owes a declaration for", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a", "lane-b"]);
+    place(subject, alpha, ["lane-a", "lane-b"]);
+    place(cited, alpha, ["lane-a"]);
+    edge(subject, cited, "extends");
+
+    expect(lines(2)).toEqual(["use -> T1 (ambiguous → #lane-a derived)"]);
+  });
+
+  test("NONE: an endpoint in no lane at all is legal, and says so", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a"]);
+    place(subject, alpha, ["lane-a"]);
+    // The cited turn is homeless: no task, therefore no qualified lane.
+    edge(subject, cited, "extends");
+
+    expect(lines(2)).toEqual(["use -> T1 (#lane-a derived → none)"]);
+  });
+
+  test("INVALID names the stored tag, and never falls back to the derivation however unambiguous the endpoint looks", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", ["lane-a", "lane-b"]);
+    place(subject, alpha, ["lane-a"]);
+    place(cited, alpha, ["lane-a"]);
+    // The writer said `lane-b`; the turn is only in `lane-a`. E4.
+    edge(subject, cited, "extends", "lane-b", "");
+
+    expect(lines(2)).toEqual(["use -> T1 (invalid (stored #lane-b) → #lane-a derived)"]);
+  });
+
+  test("a lane the registry never declared is not a lane: the membership tag resolves to nothing", () => {
+    const subject = turn(2);
+    const cited = turn(1);
+    const alpha = task("alpha task", []);
+    place(subject, alpha, ["lane-a"]);
+    place(cited, alpha, ["lane-a"]);
+    edge(subject, cited, "extends", "lane-a", "lane-a");
+
+    // The stored tag is not among the endpoint's RESOLVED lanes (the turn
+    // carries a word no lane of its task declares), so it is invalid, not
+    // declared — the same answer `resolveEdgeSide` gives every other reader.
+    expect(lines(2)).toEqual([
+      "use -> T1 (invalid (stored #lane-a))",
     ]);
-  });
-
-  test("a half-settled INCOMING row names the side that is missing on the tail, not the head", () => {
-    const subject = turn(1);
-    const citer = turn(2);
-    edge(citer, subject, "narrows", "", "lane-b");
-
-    expect(lines(1)).toEqual(["<- T2 narrows (· → #lane-b)"]);
   });
 
   // ---- grammar ----
 
-  test("the same lane on both sides prints once", () => {
-    const subject = turn(2);
-    edge(subject, turn(1), "extends", "lane-a", "lane-a");
+  test("both sides reading alike print once; a crossing prints both, tail first, on the ordinary arrow", () => {
+    const subject = turn(3);
+    const same = turn(1);
+    const crossing = turn(2);
+    const alpha = task("alpha task", ["lane-a", "lane-b"]);
+    place(subject, alpha, ["lane-a"]);
+    place(same, alpha, ["lane-a"]);
+    place(crossing, alpha, ["lane-b"]);
+    edge(subject, same, "extends");
+    edge(subject, crossing, "consume");
 
-    expect(lines(2)).toEqual(["extends -> T1 (#lane-a)"]);
-  });
-
-  test("a crossing prints both lanes, tail first, on the ordinary arrow", () => {
-    const subject = turn(2);
-    edge(subject, turn(1), "consume", "lane-a", "lane-b");
-
-    expect(lines(2)).toEqual(["consume -> T1 (#lane-a → #lane-b)"]);
+    expect(lines(3)).toEqual([
+      "use -> T1 (#lane-a derived)",
+      "use -> T2 (#lane-a derived → #lane-b derived)",
+    ]);
     // T2388: no second glyph invented for a crossing — the two sides say it.
-    expect(lines(2)[0]).not.toContain("=>");
+    expect(lines(3)[1]).not.toContain("=>");
   });
 
-  test("several relations on ONE legacy pair merge only when their two sides are identical", () => {
+  test("the retired vocabulary is gone: no `[unplaced]`, no `·` half-settled stand-in", () => {
+    const subject = turn(3);
+    const nowhere = turn(1);
+    const half = turn(2);
+    const alpha = task("alpha task", ["lane-a"]);
+    // The subject is IN the task but in none of its lanes; `nowhere` is
+    // homeless. Both are the `none` outcome, reached from the two different
+    // directions it can arise.
+    place(subject, alpha, []);
+    place(half, alpha, ["lane-a"]);
+    edge(subject, nowhere, "extends");
+    edge(subject, half, "consume");
+
+    const rendered = lines(3).join("\n");
+    expect(rendered).not.toContain("[unplaced]");
+    expect(rendered).not.toContain("·");
+    expect(lines(3)).toEqual([
+      "use -> T1 (none)",
+      "use -> T2 (none → #lane-a derived)",
+    ]);
+  });
+
+  test("several relations on ONE legacy pair merge when their sides RESOLVE alike", () => {
     const subject = turn(2);
     const target = turn(1);
+    const alpha = task("alpha task", ["lane-a"]);
+    place(subject, alpha, ["lane-a"]);
+    place(target, alpha, ["lane-a"]);
     // Legacy stock: main-agent-edges D5 stops the write path from producing
-    // this, and the reader's fold is what still has to render it.
-    legacyEdgeRow(subject, target, "extends", "lane-a", "lane-a");
-    legacyEdgeRow(subject, target, "indexes", "lane-a", "lane-a");
+    // this, and the reader's fold is what still has to render it. Two classes,
+    // both sides blank on each row, so both rows resolve to the SAME
+    // attribution — one line carrying both classes, which is the only case a
+    // single suffix describes truthfully.
+    legacyEdgeRow(subject, target, "extends", "", "");
+    legacyEdgeRow(subject, target, "verifies", "", "");
 
-    expect(lines(2)).toEqual(["extends,indexes -> T1 (#lane-a)"]);
+    expect(lines(2)).toEqual(["use,verify -> T1 (#lane-a derived)"]);
   });
 
-  test("a legacy pair with TWO placements renders two rows — one suffix cannot carry both attributions", () => {
+  test("a legacy pair whose rows RESOLVE differently renders one line per physical row", () => {
     const subject = turn(2);
     const target = turn(1);
+    const alpha = task("alpha task", ["lane-a", "lane-b"]);
+    place(subject, alpha, ["lane-a", "lane-b"]);
+    place(target, alpha, ["lane-a", "lane-b"]);
     legacyEdgeRow(subject, target, "extends", "lane-a", "lane-a");
-    legacyEdgeRow(subject, target, "indexes", "lane-b", "lane-b");
+    legacyEdgeRow(subject, target, "verifies", "lane-b", "lane-b");
 
-    // Grouping is by (other endpoint, tailTag, headTag), never by the pair
-    // alone: production holds 109 turn pairs carrying more than one placement.
-    // main-agent-edges D5 retires the WRITE that makes them; the reader keeps
-    // the grouping until ticket 01's rebuild folds the stored stock down.
+    // Grouping is by (other endpoint, RESOLVED tail, RESOLVED head), never by
+    // the pair alone: production holds 109 turn pairs carrying more than one
+    // physical row. Until ticket 01's rebuild folds them, such a pair renders
+    // one line per row with its own raw declaration — and no machinery beyond
+    // the grouping key does it.
     expect(lines(2)).toEqual([
-      "extends -> T1 (#lane-a)",
-      "indexes -> T1 (#lane-b)",
+      "use -> T1 (#lane-a declared)",
+      "verify -> T1 (#lane-b declared)",
     ]);
   });
 
@@ -274,62 +382,92 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
     // Rows are ordered by ADDRESS, so one session's rows stay contiguous
     // instead of being scattered by the DB's relation-first row order.
     expect(lines(2)).toEqual([
-      "extends -> T1 [unplaced]",
-      `grounds -> S${otherSessionId}/T21 [unplaced]`,
+      "use -> T1 (none)",
+      `use -> S${otherSessionId}/T21 (none)`,
     ]);
   });
 
-  test("a classified row prints its CLASS word, an unclassified legacy row the word it was written under", () => {
-    const subject = turn(3);
-    edge(subject, turn(1), "override", "lane-a", "lane-a", {
+  test("the CLASS is the only relation word rendered — an unclassified legacy row prints its class, never its stored word", () => {
+    const subject = turn(4);
+    edge(subject, turn(1), "override", "", "", {
       relationClass: "correct",
       relationCoverage: "full",
     });
-    edge(subject, turn(2), "narrows", "lane-a", "lane-a");
+    edge(subject, turn(2), "narrows");
+    edge(subject, turn(3), "indexes");
 
-    expect(lines(3)).toEqual([
-      "correct(full) -> T1 (#lane-a)",
-      "narrows -> T2 (#lane-a)",
+    expect(lines(4)).toEqual([
+      "correct(full) -> T1 (none)",
+      "correct(partial) -> T2 (none)",
+      "use -> T3 (none)",
     ]);
+    for (const word of ["override", "narrows", "extends", "consume", "grounds", "indexes", "verifies"]) {
+      expect(lines(4).join("\n")).not.toContain(word);
+    }
   });
 
   test("a side owned by ANOTHER task is qualified `E<n>/#lane`; the viewer's own side is not", () => {
     const subject = turn(2);
     const foreign = turn(1);
-    const mine = createSegment(db, { title: "mine", nowEpoch: NOW }).id;
-    const theirs = createSegment(db, { title: "theirs", nowEpoch: NOW }).id;
-    addSegmentMembers(db, mine, [subject], NOW);
-    addSegmentMembers(db, theirs, [foreign], NOW);
-    edge(subject, foreign, "consume", "lane-a", "lane-a");
+    const mine = task("mine", ["lane-a"]);
+    const theirs = task("theirs", ["lane-a"]);
+    place(subject, mine, ["lane-a"]);
+    place(foreign, theirs, ["lane-a"]);
+    edge(subject, foreign, "consume");
 
     // Same TAG on both sides, but the head sits in another task, so the two
     // sides are not the same lane and must not fold onto one.
-    expect(lines(2)).toEqual([`consume -> T1 (#lane-a → E${theirs}/#lane-a)`]);
+    expect(lines(2)).toEqual([`use -> T1 (#lane-a derived → E${theirs}/#lane-a derived)`]);
   });
 
   test("a homeless endpoint names no task — there is none to name", () => {
     const subject = turn(2);
     const foreign = turn(1);
-    const mine = createSegment(db, { title: "mine", nowEpoch: NOW }).id;
-    addSegmentMembers(db, mine, [subject], NOW);
-    edge(subject, foreign, "consume", "lane-a", "lane-a");
+    const mine = task("mine", ["lane-a"]);
+    place(subject, mine, ["lane-a"]);
+    edge(subject, foreign, "consume");
 
-    expect(lines(2)).toEqual(["consume -> T1 (#lane-a)"]);
+    expect(lines(2)).toEqual(["use -> T1 (#lane-a derived → none)"]);
+  });
+
+  // ---- the legend ----
+
+  test("the legend names all five outcomes and calls the attribution advisory", () => {
+    for (const clause of [
+      "derived",
+      "declared",
+      "ambiguous",
+      "none",
+      "invalid (stored #tag)",
+      "CURRENT task",
+      "ADVISORY",
+    ]) {
+      expect(RELATIONS_FIELD_LEGEND).toContain(clause);
+    }
+    expect(RELATIONS_FIELD_LEGEND).not.toContain("[unplaced]");
   });
 
   // ---- size ----
 
   test("a 20-out / 20-in node renders all 40 atoms — no branch cap, no elision marker", () => {
     const subject = turn(100);
+    const alpha = task("alpha task", ["lane-a"]);
+    place(subject, alpha, ["lane-a"]);
     for (let i = 0; i < 20; i += 1) {
-      edge(subject, turn(200 + i), "extends", "lane-a", "lane-a");
-      edge(turn(300 + i), subject, "verifies", "lane-a", "lane-a");
+      const cited = turn(200 + i);
+      const citer = turn(300 + i);
+      place(cited, alpha, ["lane-a"]);
+      place(citer, alpha, ["lane-a"]);
+      edge(subject, cited, "extends");
+      edge(citer, subject, "verifies");
     }
 
     const rendered = lines(100);
     expect(rendered).toHaveLength(40);
-    expect(rendered.filter((line) => line.startsWith("extends -> "))).toHaveLength(20);
+    expect(rendered.filter((line) => line.startsWith("use -> "))).toHaveLength(20);
     expect(rendered.filter((line) => line.startsWith("<- "))).toHaveLength(20);
+    // Every atom carries its resolved attribution, not a raw tag.
+    expect(rendered.filter((line) => line.endsWith("(#lane-a derived)"))).toHaveLength(40);
     // The tree's elision vocabulary is absent, because the tree is.
     expect(rendered.some((line) => line.includes("more"))).toBe(false);
     expect(rendered.some((line) => line.includes("^"))).toBe(false);
@@ -339,10 +477,10 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
   test("no downstream hop reaches the field — a target's OWN edges are its own business", () => {
     // 3 -> 2 -> 1: the tree would extend the chain, the direct set stops.
     const ids = [1, 2, 3].map((n) => turn(n));
-    edge(ids[2]!, ids[1]!, "extends", "lane-a", "lane-a");
-    edge(ids[1]!, ids[0]!, "extends", "lane-a", "lane-a");
+    edge(ids[2]!, ids[1]!, "extends");
+    edge(ids[1]!, ids[0]!, "extends");
 
-    expect(lines(3)).toEqual(["extends -> T2 (#lane-a)"]);
+    expect(lines(3)).toEqual(["use -> T2 (none)"]);
     // The TREE, on the same fixture, still walks through T2 into T1 — the
     // capability moved rather than vanished.
     const treeLines = buildTurnRelationTreeLines(db, {
