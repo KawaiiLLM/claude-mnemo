@@ -37790,6 +37790,11 @@ function enumerateDerivedSideCiters(db, jobId) {
 }
 
 // src/db/note-settlement-snapshots.ts
+var ORDINARY_PROVENANCES = [
+  "window",
+  "lookback",
+  "closure"
+];
 var RELATIONS_ONLY_PROVENANCES = /* @__PURE__ */ new Set([
   "removed-side-citer",
   "derived-side-citer"
@@ -37850,6 +37855,13 @@ var LANE_MEMBERS_DDL = `
     PRIMARY KEY (job_id, segment_id, lane_tag, turn_id)
   );
 `;
+var DECLARATION_ENDPOINTS_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_declaration_endpoints (
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL,
+    PRIMARY KEY (job_id, turn_id)
+  );
+`;
 var INDEX_DDL = [
   `CREATE INDEX IF NOT EXISTS idx_note_settlement_writable_turns_job
      ON note_settlement_writable_turns(job_id);`,
@@ -37873,6 +37885,7 @@ function ensureNoteSettlementSnapshotTables(db) {
   db.exec(WORKLIST_DDL);
   db.exec(REMOVED_SIDE_DEBTS_DDL);
   db.exec(LANE_MEMBERS_DDL);
+  db.exec(DECLARATION_ENDPOINTS_DDL);
   for (const ddl of INDEX_DDL) {
     db.exec(ddl);
   }
@@ -37902,6 +37915,40 @@ function widenWritableProvenanceCheck(db) {
     ALTER TABLE note_settlement_writable_turns_new
       RENAME TO note_settlement_writable_turns;
   `);
+}
+function computeSettlementReadDeltas(input) {
+  const initial = /* @__PURE__ */ new Set();
+  const writableDelta = /* @__PURE__ */ new Set();
+  for (const [turnId, provenances] of input.writable) {
+    if (ORDINARY_PROVENANCES.some((provenance) => provenances.has(provenance))) {
+      initial.add(turnId);
+    } else {
+      writableDelta.add(turnId);
+    }
+  }
+  const context = /* @__PURE__ */ new Set();
+  const admit = (turnId) => {
+    if (!initial.has(turnId) && !writableDelta.has(turnId)) {
+      context.add(turnId);
+    }
+  };
+  for (const members of input.laneMembers.values()) {
+    for (const turnId of members) {
+      admit(turnId);
+    }
+  }
+  for (const turnId of input.declarationEndpointIds) {
+    admit(turnId);
+  }
+  const ascending = (ids) => [...ids].sort((a, b) => a - b);
+  return {
+    initialWritableIds: ascending(initial),
+    writableDelta: ascending(writableDelta),
+    contextDelta: ascending(context)
+  };
+}
+function emptySettlementReadDeltas() {
+  return { initialWritableIds: [], writableDelta: [], contextDelta: [] };
 }
 function laneSnapshotKey(segmentId, laneTag) {
   return `E${segmentId}/#${laneTag}`;
@@ -37947,6 +37994,12 @@ function writeNoteSettlementTransitionSnapshots(db, input) {
     ordinary,
     eraCutoffEpoch
   );
+  const declarationEndpointIds = enumerateDeclarationEndpoints(db, [...writable.keys()]);
+  const readDeltas = computeSettlementReadDeltas({
+    writable,
+    laneMembers,
+    declarationEndpointIds
+  });
   const insertWritable = db.query(
     `INSERT INTO note_settlement_writable_turns (job_id, turn_id, provenance)
      VALUES (?, ?, ?)`
@@ -37981,7 +38034,44 @@ function writeNoteSettlementTransitionSnapshots(db, input) {
       insertMember.run(input.jobId, lane.segmentId, lane.laneTag, turnId);
     }
   }
-  return { writable, worklist: input.worklist, debts, derivedSideDebts, laneMembers };
+  const insertEndpoint = db.query(
+    `INSERT INTO note_settlement_declaration_endpoints (job_id, turn_id)
+     VALUES (?, ?)`
+  );
+  for (const turnId of declarationEndpointIds) {
+    insertEndpoint.run(input.jobId, turnId);
+  }
+  return {
+    writable,
+    worklist: input.worklist,
+    debts,
+    derivedSideDebts,
+    laneMembers,
+    declarationEndpointIds,
+    readDeltas
+  };
+}
+var DECLARATION_ENDPOINT_ID_CHUNK = 400;
+function enumerateDeclarationEndpoints(db, citerTurnIds) {
+  const endpoints = /* @__PURE__ */ new Set();
+  for (let offset = 0; offset < citerTurnIds.length; offset += DECLARATION_ENDPOINT_ID_CHUNK) {
+    const chunk = citerTurnIds.slice(offset, offset + DECLARATION_ENDPOINT_ID_CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = db.query(
+      `SELECT DISTINCT me.cited_id AS citedId
+           FROM memory_edges me
+           JOIN turns tc ON tc.id = me.citing_id
+           JOIN turns td ON td.id = me.cited_id
+          WHERE me.citing_id IN (${placeholders})
+            AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+            AND ${relationClassBearingSql("me")}
+            AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+    ).all(...chunk);
+    for (const row of rows) {
+      endpoints.add(row.citedId);
+    }
+  }
+  return [...endpoints].sort((a, b) => a - b);
 }
 function enumerateRemovedSideCiters(db, removedLanes) {
   if (removedLanes.length === 0) {
@@ -38129,6 +38219,15 @@ function readNoteSettlementWorklistSnapshot(db, jobId) {
         ORDER BY edge_id ASC, removed_lane_tag ASC`
   ).all(jobId);
   return { lanes, debts };
+}
+function readNoteSettlementDeclarationEndpointSnapshot(db, jobId) {
+  ensureNoteSettlementSnapshotTables(db);
+  return db.query(
+    `SELECT turn_id AS turnId
+         FROM note_settlement_declaration_endpoints
+        WHERE job_id = ?
+        ORDER BY turn_id ASC`
+  ).all(jobId).map((row) => row.turnId);
 }
 function readNoteSettlementLaneMemberSnapshot(db, jobId) {
   ensureNoteSettlementSnapshotTables(db);
@@ -39163,6 +39262,7 @@ function clearSettlementJobTransitionScratch(db, jobId) {
     "note_settlement_worklist",
     "note_settlement_removed_side_debts",
     "note_settlement_lane_members",
+    "note_settlement_declaration_endpoints",
     "note_settlement_pre_side_resolutions",
     "homeless_retraction_audits",
     "homeless_groups"
@@ -53878,13 +53978,21 @@ function readSettlementFrozenScope(db, jobId) {
     }
   }
   const { lanes, debts } = readNoteSettlementWorklistSnapshot(db, jobId);
+  const laneMembers = readNoteSettlementLaneMemberSnapshot(db, jobId);
+  const declarationEndpointIds = readNoteSettlementDeclarationEndpointSnapshot(db, jobId);
   return {
     writableTurnIds: new Set(writableProvenance.keys()),
     writableProvenance,
     scopeProvenance: { window, baseLookback, closureOnly },
     worklist: lanes,
     debts,
-    laneMembers: readNoteSettlementLaneMemberSnapshot(db, jobId)
+    laneMembers,
+    declarationEndpointIds,
+    readDeltas: computeSettlementReadDeltas({
+      writable: writableProvenance,
+      laneMembers,
+      declarationEndpointIds
+    })
   };
 }
 var SHAPE_VERTEX_CHUNK = 400;
@@ -54099,7 +54207,7 @@ function turnAddress3(db, turnId) {
 function buildSettlementWorklistRendering(db, jobId) {
   const scope = readSettlementFrozenScope(db, jobId);
   if (!scope) {
-    return { lanes: [], debts: [], homeless: [] };
+    return { lanes: [], debts: [], homeless: [], writableDelta: [], contextDelta: [] };
   }
   const homelessByGroup = /* @__PURE__ */ new Map();
   for (const turnId of [...scope.writableTurnIds].sort((a, b) => a - b)) {
@@ -54128,7 +54236,9 @@ function buildSettlementWorklistRendering(db, jobId) {
       removedLaneTag: debt.removedLaneTag,
       citingAddress: turnAddress3(db, debt.citingTurnId)
     })),
-    homeless: [...homelessByGroup.values()]
+    homeless: [...homelessByGroup.values()],
+    writableDelta: scope.readDeltas.writableDelta.map((turnId) => turnAddress3(db, turnId)),
+    contextDelta: scope.readDeltas.contextDelta.map((turnId) => turnAddress3(db, turnId))
   };
 }
 
@@ -54141,7 +54251,8 @@ function installSettlementEdgesScope(db, jobId, fallback, holder) {
     scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
     worklist: frozen?.worklist ?? [],
     debts: frozen?.debts ?? [],
-    laneMembers: frozen?.laneMembers ?? /* @__PURE__ */ new Map()
+    laneMembers: frozen?.laneMembers ?? /* @__PURE__ */ new Map(),
+    readDeltas: frozen?.readDeltas ?? emptySettlementReadDeltas()
   };
   if (holder) {
     holder.current = scope;
@@ -56353,7 +56464,12 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     if (refusedFields.length > 0) {
       return {
         ok: false,
-        message: `${ref} is writable to this dispatch for its RELATIONS ONLY \u2014 it is here because this job's own lane removal invalidated an edge it cites, and discharging that debt is the whole of the authority that grants. ${refusedFields.join(", ")} ${refusedFields.length === 1 ? "belongs" : "belong"} to whichever window owns this turn's fields, not to this one. Retract the edge, or re-place its sides with a {turn, tailTag, headTag} entry.`
+        message: (
+          // MAIN-AGENT-EDGES TICKET 06: the two repairs named are the two the
+          // tools actually offer — a stored side moves through `declare` (D4),
+          // never through a re-attach, and the cause names both closures.
+          `${ref} is writable to this dispatch for its RELATIONS ONLY \u2014 it is here because this job's own stage-1 tag writes left an edge it cites owing a lane side (a removed lane, or an endpoint now in several lanes), and discharging that debt is the whole of the authority that grants. ${refusedFields.join(", ")} ${refusedFields.length === 1 ? "belongs" : "belong"} to whichever window owns this turn's fields, not to this one. Retract the edge, or declare its side with a \`declare\` entry.`
+        )
       };
     }
   }
@@ -58509,7 +58625,14 @@ var SETTLEMENT_ALLOWED_TOOLS = [
 var STAGE_TWO_TURN_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "turn",
   ...RELATION_FIELD_ENTRIES.map(([key]) => key),
-  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key)
+  ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
+  // MAIN-AGENT-EDGES TICKET 06: `declare` (ticket 03, spec D4) is the edge
+  // pass's own act — it patches a lane side on a row the citing turn already
+  // carries — and it was MISSING here: ticket 03b's route test drove the
+  // facade directly, below this allowlist, so the live tool refused every
+  // `declare` a run sent as "refused on the edge pass". Admitted by name;
+  // pinned in `tests/worker/note-settlement-sdk-query.test.ts`.
+  "declare"
 ]);
 var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "session",
@@ -58517,7 +58640,7 @@ var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "title",
   "content"
 ]);
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s EDGES, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn` the only parameters this pass may carry are THE SIX EDGE FIELDS \u2014 the three relation classes and their three retract\u2026 mirrors, enumerated below \u2014 for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn\'s prose and type are the first pass\'s judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent\'s own later note, or a prior settlement attempt) moved this turn\'s relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn\'s `relations` and send it again. No field yields on its own. correct/verify/use: address lists, and normally yours \u2014 the main agent\'s `note` carries the same three fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL THREE classes accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A `correct` entry ALSO carries `"coverage": "full"` or `"partial"` \u2014 FULL when no substantial part of the cited principal result may still serve as a PREMISE (it survives only as history), PARTIAL when a definite non-empty part still stands as one. A `correct` with no coverage is refused naming the missing bit, and a `verify` or `use` carrying one is refused too \u2014 only `correct` has a coverage bit. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractCorrect \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.';
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "WRITE a turn's EDGES, OR this session's narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set this prompt declares) or `session` (\"S<session>\", this session). On `turn` the only parameters this pass may carry are THE SIX EDGE FIELDS \u2014 the three relation classes and their three retract\u2026 mirrors, enumerated below \u2014 plus `declare`, for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn's prose and type are the first pass's judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent's own later note, or a prior settlement attempt) moved this turn's relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn's `relations` and send it again. No field yields on its own. correct/verify/use: address lists. The main agent's `note` carries the same three fields and writes them ROUTINELY on its own turn, so most edges here are already written \u2014 yours are the ones it missed. ASSERTION is a bare address and ALL THREE classes accept it: an entry carries the edge and nothing else, because a lane side is an attribution the endpoint's own lane set resolves and a stored side is written only through `declare`. A `correct` entry ALSO carries `\"coverage\": \"full\"` or `\"partial\"` \u2014 FULL when no substantial part of the cited principal result may still serve as a PREMISE (it survives only as history), PARTIAL when a definite non-empty part still stands as one. A `correct` with no coverage is refused naming the missing bit, and a `verify` or `use` carrying one is refused too \u2014 only `correct` has a coverage bit. A BLANK SIDE IS LEGAL wherever the endpoint sits in ONE lane or in none \u2014 the side derives, and nothing is owed. It is error E6 only where the endpoint sits in SEVERAL lanes and no side is declared, and commit refuses while one remains in your writable set: `declare` it, or retract the row. `declare` entries \u2014 `{turn, class?, tailTag?, headTag?}`, `turn` the CITED end's address \u2014 patch the pair's ONE row in place. Each side named is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and \"-\" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; the tag must already be on that endpoint turn's own tags; and an endpoint in exactly one lane is refused as derivable. A side omitted is left alone; `null` clears it. A lane's identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair carries ONE row at its most specific class; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run's own current read of the citing turn's relations \u2014 a relation write states how that turn's edges stand. Your one read's field list already delivered it; a call refused naming that read is repaired by `filter={fields:[\"relations\"]}` on that turn alone, never the batch again, and your own edge writes keep the set current afterwards. RETRACTION is the other half: each class has a retract\u2026 mirror (retractCorrect \u2026) taking bare addresses. A retraction addresses the PAIR, and the mirror's own class is the precondition \u2014 a pair now carrying a different class refuses naming it; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric's own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: \"write\" replaces it whole (supply the finished text), or the edit form `{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field's own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.";
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
@@ -59313,9 +59436,9 @@ var NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
-var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the three relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. LANES ARE ASSIGNED IN BATCHES: `note(turns:[\u2026], task:"E<n>", addTags:[\u2026])` tags one topic\'s turns in ONE call \u2014 additive, all-or-nothing \u2014 and a turn serving two topics is simply named in both calls. A per-turn `tags` write is the CORRECTION and REMOVAL path instead, and it is the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the six edge fields only (the three relation classes and their retract\u2026 mirrors) on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
+var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the three relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. LANES ARE ASSIGNED IN BATCHES: `note(turns:[\u2026], task:"E<n>", addTags:[\u2026])` tags one topic\'s turns in ONE call \u2014 additive, all-or-nothing \u2014 and a turn serving two topics is simply named in both calls. A per-turn `tags` write is the CORRECTION and REMOVAL path instead, and it is the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the six edge fields (the three relation classes and their retract\u2026 mirrors) plus `declare` on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
 var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. This tool belongs to the TOPIC PASS only: BEFORE your own `finalize`, action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. AFTER `finalize` THE LANE REGISTRY IS CLOSED \u2014 create, delete and merge are all refused there: the registry is the topic pass\'s own settled judgment, frozen by your transition. A severed lane owes you nothing there \u2014 it is a WARNING on `lane_check` and on your commit receipt naming a stitch target, it blocks no commit, and there is no disposition to file for it. What this tool DOES hold after `finalize` is one action: "impression". ' + SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
-var UNIFIED_FINALIZE_TOOL_DESCRIPTION = "END the topic pass and open the edge pass, IN THIS SAME RUN \u2014 lands immediately, in this same call, and runs at most once. Call it once the whole writable set is audited, every window turn carries a `topic:` word, and the final projection is written. It freezes what the edge pass may read \u2014 the writable set, the (task, lane) worklist your projection touched, each of those lanes' members, and the lane words your projection REMOVED \u2014 and records any homeless group per member. Its own result is DATA ONLY: the frozen writable set, worklist, removed-side debts and homeless groups, printed as facts \u2014 every instruction for what to do with them already lives in your prompt. It marks nothing done and grants nothing; only your own later `commit` publishes. Takes `summary` (string, REQUIRED, max 1000 characters): the lines you found, which were existing lanes and which are new, and where this window forced a guess. Takes `homeless` (optional): one entry per group of turns whose subject has no legal task to live in \u2014 `label`, `reason` and `turns` (member addresses). Never open a task or mint a lane to avoid this list. REFUSES while a turn in your writable set has an empty or out-of-vocabulary `type`, or a window turn carries no `topic:` word. A refusal costs nothing and is not a failed attempt: repair and call it again in this same run. Refused outright once you are already in the edge pass \u2014 it runs once.";
+var UNIFIED_FINALIZE_TOOL_DESCRIPTION = "END the topic pass and open the edge pass, IN THIS SAME RUN \u2014 lands immediately, in this same call, and runs at most once. Call it once the whole writable set is audited, every window turn carries a `topic:` word, and the final projection is written. It freezes what the edge pass may read \u2014 the writable set, the (task, lane) worklist your projection touched, each of those lanes' members, and the lane words your projection REMOVED \u2014 and records any homeless group per member. Its own result is DATA ONLY: the frozen writable set, the two read deltas (the writable delta, relations only; the context delta, read-only), worklist, removed-side debts and homeless groups, printed as facts \u2014 every instruction for what to do with them already lives in your prompt. It marks nothing done and grants nothing; only your own later `commit` publishes. Takes `summary` (string, REQUIRED, max 1000 characters): the lines you found, which were existing lanes and which are new, and where this window forced a guess. Takes `homeless` (optional): one entry per group of turns whose subject has no legal task to live in \u2014 `label`, `reason` and `turns` (member addresses). Never open a task or mint a lane to avoid this list. REFUSES while a turn in your writable set has an empty or out-of-vocabulary `type`, or a window turn carries no `topic:` word. A refusal costs nothing and is not a failed attempt: repair and call it again in this same run. Refused outright once you are already in the edge pass \u2014 it runs once.";
 var UNIFIED_COMMIT_TOOL_DESCRIPTION = "Finish this window's edge pass \u2014 reachable ONLY after your own `finalize` has succeeded; calling it before that refuses, naming `finalize` as what you still owe. " + SETTLEMENT_COMMIT_TOOL_DESCRIPTION;
 function createUnifiedNoteSettlementSdkQuery(options) {
   const queryImpl = options.queryImpl ?? query;
@@ -59970,9 +60093,12 @@ ${extraSections.join("\n\n")}` : paged.text;
 function renderUnifiedFinalizeDataResult(db, jobId, transitionSeq, scope) {
   const frozenAddresses = [...scope.writableTurnIds].sort((a, b) => a - b).map((id) => turnAddressFor2(db, id));
   const worklist = buildSettlementWorklistRendering(db, jobId);
+  const addressList = (ids) => ids.length > 0 ? ids.map((id) => turnAddressFor2(db, id)).join(", ") : "(none)";
   const lines = [
     `job ${jobId}, transition ${transitionSeq}.`,
     `frozen writable set (${frozenAddresses.length}): ${frozenAddresses.length > 0 ? frozenAddresses.join(", ") : "(none)"}`,
+    `writable delta \u2014 relations only, not in the initial set (${scope.readDeltas.writableDelta.length}): ${addressList(scope.readDeltas.writableDelta)}`,
+    `context delta \u2014 read-only, one hop, not in the initial set (${scope.readDeltas.contextDelta.length}): ${addressList(scope.readDeltas.contextDelta)}`,
     `worklist lanes (${worklist.lanes.length}):`
   ];
   if (worklist.lanes.length === 0) {

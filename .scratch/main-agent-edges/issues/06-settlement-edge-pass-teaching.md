@@ -108,3 +108,31 @@ Worktree branch `worktree-agent-afa81dcee7c7d3e69`, fast-forwarded to main `b8c5
 
 - No production measurement (D8 is ticket 09's); the delta sizes on a real window are not known.
 - `renderStageTwoWorklist`'s two delta lines and the resume prompt's read sentence are exercised by the resume dispatch's own render path in tests, not by a live resume run.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `c9cfeeff` no-ff, clean against main after 02b; bundles rebuilt. `npx tsc --noEmit` 0; guards
+green; control-byte sweep over the new teaching module and the snapshots module: none. Full `bun test`
+**4793 / 0 / 271** against 4775/0/269. The worker measured +17 on its base and 02b measured +5 on
+the same base; 4770 + 5 + 17 = 4792, so **one test is unaccounted (+1)** — the same shape as the +1 at
+ticket 07's integration; not located, recorded. The two remaining "batches of ten" hits in
+`note-settlement-prompt.ts` are code comments, not rendered text.
+
+My probes, on sites the worker's ten mutation probes and five revert probes did not use:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `computeSettlementReadDeltas`: the `− initialWritableIds` term dropped from contextDelta | RED — "an initial-set address never appears in a delta" |
+| I2 | `enumerateDeclarationEndpoints`: the writable-citer filter replaced by `WHERE 1=1` | **GREEN** — no fixture had a non-writable citer with an endpoint nothing else names |
+| I3 | teaching: "at the most specific class" removed from the FILL sentence | RED — the FILL pin |
+
+I2 fixed here: a pin in `tests/db/settlement-read-deltas.test.ts` seeds an unreachable citer with an
+edge to a turn nothing else names and asserts neither appears in any delta (positive control: the
+writable-delta citer's endpoint does); the same mutation now drives it RED, verified, restored by `cp`
+with md5. Accepted with that addition. Carried forward as the worker stated: `removed-side-citer` is
+unreachable through stage 1's real write path (P2 clears the declaration in the same transaction, so
+every writable-delta member arrives as `derived-side-citer`) — a candidate for deletion in a later
+subtraction pass, not this batch; and the live `declare` allowlist gap it found and fixed was a real
+D6 breakage on the production route.

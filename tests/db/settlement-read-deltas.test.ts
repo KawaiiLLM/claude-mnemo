@@ -273,6 +273,25 @@ describe("the finalize read deltas — set differences against what stage 1 read
     expect(rendering.writableDelta).toEqual(scope.readDeltas.writableDelta.map(address));
   });
 
+  test("integrator pin (06): a NON-writable citer's endpoints are not declaration endpoints — the enumeration is over the final writable set only", () => {
+    const fixture = seedGraph();
+    // A citer nobody's authority reaches (no lane, not in the window, not
+    // cited), pointing at a turn nothing else names. If the enumeration
+    // walked every citer, `stranger` would appear in contextDelta.
+    const outsider = addTurn(10, [TASK]);
+    const stranger = addTurn(11, [TASK]);
+    addSegmentMembers(db, segmentId, [outsider, stranger], 10);
+    addEdge(outsider, stranger);
+    stageOneThenTransition(fixture);
+    const scope = readSettlementFrozenScope(db, job.id)!;
+    expect(scope.readDeltas.contextDelta).not.toContain(stranger);
+    expect(scope.readDeltas.contextDelta).not.toContain(outsider);
+    expect(scope.readDeltas.writableDelta).not.toContain(outsider);
+    // The positive control from the same fixture: the writable-delta citer's
+    // endpoint IS there.
+    expect(scope.readDeltas.contextDelta).toContain(fixture.far);
+  });
+
   test("a contextDelta member refuses a relation write — it is judgment material, not authority", () => {
     const fixture = seedGraph();
     stageOneThenTransition(fixture);

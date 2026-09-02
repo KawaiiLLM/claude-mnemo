@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkf8puh" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkfjtx0" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1648,6 +1648,7 @@ function clearSettlementJobTransitionScratch(db, jobId) {
     "note_settlement_worklist",
     "note_settlement_removed_side_debts",
     "note_settlement_lane_members",
+    "note_settlement_declaration_endpoints",
     "note_settlement_pre_side_resolutions",
     "homeless_retraction_audits",
     "homeless_groups"
