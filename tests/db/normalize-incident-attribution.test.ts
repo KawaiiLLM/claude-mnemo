@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase, runWriteTransaction } from "../../src/db/database";
-import { loadEndpointLaneFacts } from "../../src/db/edge-side-resolution";
+import {
+  loadEndpointLaneFacts,
+  resolveEdgeSide,
+} from "../../src/db/edge-side-resolution";
 import { clearLane, insertLane, mergeLaneTag } from "../../src/db/lanes";
 import { normalizeIncidentAttribution } from "../../src/db/normalize-incident-attribution";
 import { initializeSchema } from "../../src/db/schema";
@@ -109,6 +112,18 @@ describe("normalizeIncidentAttribution", () => {
     expect(receipts()).toEqual([
       { action: "clear-declaration", side: "tail", edgeRowId: edgeId, writer: "lane:clear" },
     ]);
+    // …and the side now READS `derived`, which is the half that matters: the
+    // edge keeps its lane, it just stops storing a word for it (main-agent-edges
+    // ticket 04's box, "alpha+beta declaring alpha becomes derived when beta
+    // goes"). A stale `declared` would be indistinguishable from a real
+    // disambiguation to every later reader.
+    const resolved = resolveEdgeSide(
+      { citingId: citing, citedId: cited, tailTag: "", headTag: "" },
+      "tail",
+      loadEndpointLaneFacts(db, [citing, cited]),
+    );
+    expect(resolved.outcome).toBe("derived");
+    expect(resolved.lane).toEqual({ segmentId, tag: "alpha" });
   });
 
   test("a declaration no longer among the endpoint's tags is cleared as INVALID, and reported as its own reason", () => {
@@ -208,7 +223,15 @@ describe("normalizeIncidentAttribution", () => {
     expect(getFieldStamp(db, "turn", citing, "relations")?.writer).toBe("lane:clear");
   });
 
-  test("OLD and NEW qualified lanes are both recorded as touched when the caller captured a pre-state", () => {
+  /**
+   * THE TOUCH LEDGER IS GONE (main-agent-edges ticket 04, peer finding F3).
+   * Ticket 02 shipped an old/new qualified lane touch pair here; no structural
+   * verb ever had a job id to give it, so the whole path ran under its own unit
+   * test and nothing else. This test replaces the one that exercised it, and it
+   * pins the SUBTRACTION rather than the deletion: a task move through the
+   * primitive writes nothing at all into `lane_run_touches`.
+   */
+  test("a task move records NO lane touch — the ledger the seam used to write is unreachable and gone", () => {
     const other = createSegment(db, { title: "Other", nowEpoch: 10 });
     insertLane(db, other.id, "alpha", 10);
     const citing = addTurn(1, ["the-task", "alpha"]);
@@ -216,20 +239,15 @@ describe("normalizeIncidentAttribution", () => {
     addSegmentMembers(db, segmentId, [citing, cited], 10);
     addEdge(citing, cited, "", "");
 
-    const previousLaneFacts = loadEndpointLaneFacts(db, [citing]);
-    // The turn moves task: `E1/#alpha` -> `E2/#alpha`, two different lanes.
+    // The turn moves task: `E1/#alpha` -> `E2/#alpha`, two different lanes —
+    // exactly the case the deleted touch pair existed for.
     db.query("DELETE FROM segment_members WHERE turn_id = ?").run(citing);
     addSegmentMembers(db, other.id, [citing], 10);
+    normalizeIncidentAttribution(db, [citing], { writer: "task:move", nowEpoch: NOW });
 
-    const result = normalizeIncidentAttribution(db, [citing], {
-      writer: "task:move",
-      nowEpoch: NOW,
-      previousLaneFacts,
-    });
-    expect(result.touchedLanes).toEqual([
-      { segmentId, tag: "alpha" },
-      { segmentId: other.id, tag: "alpha" },
-    ]);
+    expect(
+      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM lane_run_touches").get()?.n,
+    ).toBe(0);
   });
 
   test("an empty id list, and an id set no edge touches, both do nothing at all", () => {

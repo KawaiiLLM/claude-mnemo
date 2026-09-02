@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite";
 
 import { resolveEraCutoff } from "./era";
+import {
+  enumerateDerivedSideCiters,
+  type DerivedSideDebt,
+} from "./note-settlement-pre-resolutions";
 import { relationClassBearingSql } from "../shared/relation-class";
 import { liveTurnSql } from "./turn-liveness";
 import { eraVisibleMemberSqlClause } from "../segment-era";
@@ -64,12 +68,22 @@ import { eraVisibleMemberSqlClause } from "../segment-era";
  * gives it any claim on the citer's note fields. A turn that is both an
  * ordinary member and a removed-side citer takes the UNION of the two
  * authorities — see `settlementWritePermissions`.
+ *
+ * `derived-side-citer` is the FIFTH (main-agent-edges spec D6, R9-9), and it is
+ * the same KIND of permission for a different cause. Under resolution a side
+ * usually stores nothing: it DERIVES its lane from an endpoint that is in
+ * exactly one. When this job's own projection puts a second lane on that
+ * endpoint, every blank side resting on it stops deriving and reads
+ * `ambiguous` — nobody removed anything and nobody declared anything, yet the
+ * attribution is gone. The citer is the only turn that can declare it, so it
+ * joins the writable set on exactly the removed-side terms: RELATIONS ONLY.
  */
 export type SettlementWritableProvenance =
   | "window"
   | "lookback"
   | "closure"
-  | "removed-side-citer";
+  | "removed-side-citer"
+  | "derived-side-citer";
 
 const ORDINARY_PROVENANCES: readonly SettlementWritableProvenance[] = [
   "window",
@@ -89,9 +103,15 @@ const ORDINARY_PROVENANCES: readonly SettlementWritableProvenance[] = [
 export interface SettlementWritePermissions {
   /** Note fields (`title`/`content`/`type`/`tags`/…). Ordinary provenance only. */
   fields: boolean;
-  /** Relation writes. Every provenance class carries this, `removed-side-citer` included. */
+  /** Relation writes. Every provenance class carries this, the two side-citer classes included. */
   relations: boolean;
 }
+
+/** The classes whose whole authority is the edge they owe a repair — never a note field. See `SettlementWritableProvenance`. */
+const RELATIONS_ONLY_PROVENANCES: ReadonlySet<string> = new Set([
+  "removed-side-citer",
+  "derived-side-citer",
+]);
 
 export function settlementWritePermissions(
   provenances: Iterable<SettlementWritableProvenance>,
@@ -100,7 +120,7 @@ export function settlementWritePermissions(
   let relations = false;
   for (const provenance of provenances) {
     relations = true;
-    if (provenance !== "removed-side-citer") {
+    if (!RELATIONS_ONLY_PROVENANCES.has(provenance)) {
       fields = true;
     }
   }
@@ -136,7 +156,8 @@ const WRITABLE_TURNS_DDL = `
     job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
     turn_id INTEGER NOT NULL,
     provenance TEXT NOT NULL CHECK (
-      provenance IN ('window', 'lookback', 'closure', 'removed-side-citer')
+      provenance IN ('window', 'lookback', 'closure', 'removed-side-citer',
+                     'derived-side-citer')
     ),
     -- (job, turn, provenance), not (job, turn): the classes are a SET per turn,
     -- because 'removed-side-citer' stacks on top of an ordinary class rather
@@ -216,6 +237,7 @@ export function ensureNoteSettlementSnapshotTables(db: Database): void {
     return;
   }
   db.exec(WRITABLE_TURNS_DDL);
+  widenWritableProvenanceCheck(db);
   db.exec(WORKLIST_DDL);
   db.exec(REMOVED_SIDE_DEBTS_DDL);
   db.exec(LANE_MEMBERS_DDL);
@@ -223,6 +245,47 @@ export function ensureNoteSettlementSnapshotTables(db: Database): void {
     db.exec(ddl);
   }
   SNAPSHOT_SCHEMA_READY.add(db);
+}
+
+/**
+ * `CREATE TABLE IF NOT EXISTS` does nothing for a database that already has the
+ * table, so a snapshot table created before `derived-side-citer` existed still
+ * carries the four-value CHECK and would REFUSE the fifth — a constraint
+ * failure in the middle of a stage-1 transition, which is the worst possible
+ * place for one.
+ *
+ * Rebuilt rather than dropped: the rows are a live job's frozen authority, and
+ * a job whose writable snapshot vanished under it would silently lose every
+ * turn it may write. Copy, drop, rename, recreate the index — all of it inside
+ * whatever transaction the caller holds (`ensureNoteSettlementSnapshotTables`
+ * is called before the transition opens one, and from `initializeSchema`).
+ */
+function widenWritableProvenanceCheck(db: Database): void {
+  const ddl = db
+    .query<{ sql: string | null }, []>(
+      `SELECT sql FROM sqlite_master
+        WHERE type = 'table' AND name = 'note_settlement_writable_turns'`,
+    )
+    .get();
+  if (!ddl?.sql || ddl.sql.includes("derived-side-citer")) {
+    return;
+  }
+  db.exec(`
+    CREATE TABLE note_settlement_writable_turns_new (
+      job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+      turn_id INTEGER NOT NULL,
+      provenance TEXT NOT NULL CHECK (
+        provenance IN ('window', 'lookback', 'closure', 'removed-side-citer',
+                       'derived-side-citer')
+      ),
+      PRIMARY KEY (job_id, turn_id, provenance)
+    );
+    INSERT INTO note_settlement_writable_turns_new (job_id, turn_id, provenance)
+      SELECT job_id, turn_id, provenance FROM note_settlement_writable_turns;
+    DROP TABLE note_settlement_writable_turns;
+    ALTER TABLE note_settlement_writable_turns_new
+      RENAME TO note_settlement_writable_turns;
+  `);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +319,15 @@ export interface NoteSettlementSnapshot {
   writable: Map<number, Set<SettlementWritableProvenance>>;
   worklist: readonly NoteSettlementWorklistLane[];
   debts: readonly NoteSettlementRemovedSideDebt[];
+  /**
+   * The derived-side closure's own findings — the `(edge, side)` pairs this
+   * run turned from decidable into E6/E4, each with the citer that alone can
+   * declare it. Not persisted as a debt table of its own: the AUTHORITY is
+   * persisted (a `derived-side-citer` row in the writable snapshot), and the
+   * finding itself is re-derivable by the lane checker at any moment, unlike a
+   * removed lane word which exists nowhere once the projection has written.
+   */
+  derivedSideDebts: readonly DerivedSideDebt[];
   /** Keyed by `laneSnapshotKey`; ids ascending. */
   laneMembers: Map<string, number[]>;
 }
@@ -317,6 +389,17 @@ export function writeNoteSettlementTransitionSnapshots(
     addProvenance(debt.citingTurnId, "removed-side-citer");
   }
 
+  // THE DERIVED-SIDE CLOSURE (main-agent-edges D6), run HERE for the same
+  // reason the removed-side one is: this transaction is the last moment stage
+  // 1's judgment exists, and the closure's own "after" is the graph as it
+  // stands right now. It reads the PRE resolutions stage 1's own tag writes
+  // recorded and grants only a PRE-good -> POST-bad transition; a side that was
+  // already a finding before this run started is somebody else's debt.
+  const derivedSideDebts = enumerateDerivedSideCiters(db, input.jobId);
+  for (const debt of derivedSideDebts) {
+    addProvenance(debt.citingTurnId, "derived-side-citer");
+  }
+
   const eraCutoffEpoch =
     input.eraCutoffEpoch !== undefined ? input.eraCutoffEpoch : resolveEraCutoff(db);
   const laneMembers = snapshotLaneMembers(
@@ -364,7 +447,7 @@ export function writeNoteSettlementTransitionSnapshots(
     }
   }
 
-  return { writable, worklist: input.worklist, debts, laneMembers };
+  return { writable, worklist: input.worklist, debts, derivedSideDebts, laneMembers };
 }
 
 /**

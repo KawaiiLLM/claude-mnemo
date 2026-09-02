@@ -1155,6 +1155,16 @@ function evaluateSettlementBatchTagWrite(
     writes: members.map((member) => ({ turnId: member.turn.id, tags: member.nextTags })),
     writer,
     nowEpoch,
+    // THE PRE STATE, RECORDED WHERE IT IS STILL TRUE (main-agent-edges ticket
+    // 04, spec D6). This is stage 1's batch tag write — the projection that
+    // most often puts a SECOND lane on an endpoint and turns every blank side
+    // resting on it from `derived` into `ambiguous`. Naming the job here does
+    // two things at once: the seam records each incident side's PRE resolution
+    // to this job's transition scratch (first-write-wins, so a repeated batch
+    // never overwrites the state the run inherited), and it exempts this job
+    // from its own structural invalidation — the ambiguity a run creates is
+    // answered by its own stage 2, never by restarting it.
+    settlementJobId: context.jobId,
   });
   if (!written.ok) {
     return { ok: false, message: written.message };

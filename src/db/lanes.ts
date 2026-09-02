@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { loadEndpointLaneFacts } from "./edge-side-resolution";
 import { foldLaneImpressionIntoSurvivor } from "./impressions";
 import { normalizeIncidentAttribution } from "./normalize-incident-attribution";
 import {
@@ -640,13 +639,6 @@ export function mergeLaneTag(
     }
     memberWrites.push({ turnId: turn.id, tags: next });
   }
-  // THE PRE-STATE, before the first tag moves — the OLD half of the old/new
-  // qualified lane touch pair (main-agent-edges D2: `E1/#alpha` -> `E2/#alpha`
-  // leaves work owed in BOTH).
-  const previousLaneFacts = loadEndpointLaneFacts(
-    db,
-    memberWrites.map((write) => write.turnId),
-  );
   // THE MEMBERSHIP PRIMITIVE (settlement-read-once spec D4), `normal`: it
   // writes the tags, STAMPS the `tags` field, and derives — where this loop
   // used to raw-`UPDATE turns SET tags` and stamp nothing, so a lane merge
@@ -859,12 +851,12 @@ export function mergeLaneTag(
   // --- 2c. POST-NORMALISATION (main-agent-edges P2), once, over the finished
   //         state: a declaration the fold made redundant (the endpoint is down
   //         to one lane) is cleared, one it made untrue is cleared, and a side
-  //         nobody can attribute any more takes the seam's own subtraction.
-  //         Both the OLD and the NEW qualified lanes are recorded as touched.
+  //         nobody can attribute any more either invalidates a live settlement
+  //         run over its citer or takes the seam's own subtraction.
   normalizeIncidentAttribution(
     db,
     memberWrites.map((write) => write.turnId),
-    { writer: LANE_MERGE_WRITER, nowEpoch, previousLaneFacts },
+    { writer: LANE_MERGE_WRITER, nowEpoch },
   );
 
   // --- 2b. the impression (lane-impressions ticket 07, ruling T2269) --------

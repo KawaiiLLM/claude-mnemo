@@ -111,6 +111,45 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
   // The ordinary fold
   // -------------------------------------------------------------------------
 
+  /**
+   * PEER FINDING F3b, second half (main-agent-edges ticket 04). A task move
+   * re-parents every moved turn, so `normalizeIncidentAttribution` runs over
+   * their incident sides and can clear declarations or delete edges. The
+   * primitive reported all of that and this receipt threw it away, so a move
+   * that touched no edge and one that cleared several read identically.
+   */
+  test("the receipt says what the move cost the edges — a redundant declaration cleared is counted, not silently swallowed", () => {
+    const from = createSegment(db, { title: "From", tags: ["from-seg"], nowEpoch: NOW }).id;
+    const into = createSegment(db, { title: "Into", tags: ["into-seg"], nowEpoch: NOW }).id;
+    insertLane(db, from, "solo", NOW);
+    const citing = seedTurn(1, ["from-seg", "solo"]);
+    const cited = seedTurn(2, ["from-seg", "solo"]);
+    addSegmentMembers(db, from, [citing, cited], NOW);
+    // Legacy stock: a stored tail declaration on an endpoint that is in ONE
+    // lane, so it says nothing the derivation would not.
+    const edgeId = db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', 'solo', '', 'use', '', ?)
+         RETURNING id`,
+      )
+      .get(citing, cited, NOW)!.id;
+
+    const outcome = mergeSegments(db, from, into, NOW);
+    expect(outcome.kind).toBe("merged");
+    if (outcome.kind !== "merged") throw new Error("unreachable");
+
+    expect(outcome.receipt.declarationsCleared).toBe(1);
+    expect(outcome.receipt.edgesDeleted).toBe(0);
+    expect(outcome.receipt.citersStamped).toBe(1);
+    expect(outcome.receipt.invalidatedJobIds).toEqual([]);
+    // The NODE FACT survives the move; only the attribution was rewritten, and
+    // the tail still reaches `solo` — by derivation now instead of by storage.
+    expect(attributedSides(edgeId)).toEqual({ tail: "solo", head: "solo" });
+  });
+
   test("members move by ownership, a declared lane re-parents, and `from` leaves the roster", () => {
     const from = createSegment(db, { title: "From", tags: ["from-seg"], nowEpoch: NOW }).id;
     const into = createSegment(db, { title: "Into", tags: ["into-seg"], nowEpoch: NOW }).id;
@@ -128,6 +167,15 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
       membersMoved: 1,
       lanesMoved: 1,
       stillCarrying: [],
+      // main-agent-edges ticket 04 (peer finding F3b, second half): the
+      // primitive's post-normalisation result now reaches the receipt. This
+      // move touches no edge, so every count is zero — the point of the fields
+      // is that a move which DID clear a declaration can no longer look
+      // identical to one that did not (pinned below).
+      declarationsCleared: 0,
+      edgesDeleted: 0,
+      citersStamped: 0,
+      invalidatedJobIds: [],
     });
 
     expect(getSegment(db, from)).toBeNull();

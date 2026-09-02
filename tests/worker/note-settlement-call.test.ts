@@ -51,8 +51,10 @@ import {
   SETTLEMENT_DIAGNOSIS_BUDGET_CHARS,
   type NoteSettlementQuery,
   type NoteSettlementQueryRequest,
+  type NoteSettlementQueryResult,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
+import { readNoteSettlementClaimScope } from "../../src/db/settlement-job-invalidation";
 import type {
   NoteSettlementUnifiedQuery,
   NoteSettlementUnifiedQueryResult,
@@ -2518,5 +2520,119 @@ describe("the resume dispatch claims its session's impression debts before rende
     expect(renderedPrompt).toContain(`E${segmentId}/#hand-declared — lane, baseRevision 0,`);
     expect(listOpenImpressionDebts(db, segmentId)[0]!.claimedByJobId).toBe(fixture.job.id);
     expect(debt.claimedByJobId).toBeNull();
+  });
+});
+
+describe("main-agent-edges ticket 04 — the resume dispatch writes its claim scope and arms cancellation", () => {
+  interface FakeTimerEntry {
+    id: number;
+    callback: () => void | Promise<void>;
+    delayMs: number;
+    cleared: boolean;
+    fired: boolean;
+  }
+
+  function createFakeTimers() {
+    let nextId = 1;
+    const entries: FakeTimerEntry[] = [];
+    const setTimeoutImpl = (callback: () => void | Promise<void>, delayMs: number): unknown => {
+      const id = nextId++;
+      entries.push({ id, callback, delayMs, cleared: false, fired: false });
+      return id;
+    };
+    const clearTimeoutImpl = (handle: unknown): void => {
+      const entry = entries.find((e) => e.id === handle);
+      if (entry) {
+        entry.cleared = true;
+      }
+    };
+    async function fireLatest(delayMs: number): Promise<void> {
+      const candidates = entries.filter((e) => e.delayMs === delayMs && !e.cleared && !e.fired);
+      const entry = candidates[candidates.length - 1];
+      if (!entry) {
+        throw new Error(`no live timer scheduled with delayMs=${delayMs}`);
+      }
+      entry.fired = true;
+      await entry.callback();
+    }
+    const countScheduled = (delayMs: number): number =>
+      entries.filter((e) => e.delayMs === delayMs && !e.cleared && !e.fired).length;
+    return { setTimeoutImpl, clearTimeoutImpl, fireLatest, countScheduled };
+  }
+
+  const MONITOR_INTERVAL_MS = 1_000;
+
+  /**
+   * THE CLAIM-TIME SCOPE (spec D9, R10-7). Before this ticket a job's reach over
+   * turns was durable only after its stage-1 transition, so a lane verb running
+   * in another process could not see a topics-stage run at all and would delete
+   * an edge it was about to lane. The dispatch writes the set down at the one
+   * moment it is both known and immutable.
+   */
+  test("the writable set is persisted as this job's claim scope, before the model runs", async () => {
+    const fixture = seedFourTurnWindow();
+    let scopeAtQueryTime: number[] = [];
+    const outcome = await dispatchWith(async (request) => {
+      // Read INSIDE the query: the record has to exist before the model does
+      // anything, not after the run ends.
+      scopeAtQueryTime = readNoteSettlementClaimScope(db, request.jobId);
+      return { text: "no commit", commitMetrics: null };
+    })({ job: fixture.job });
+
+    expect(outcome.ok).toBe(false);
+    expect(scopeAtQueryTime).toEqual(fixture.turnIds.slice().sort((a, b) => a - b));
+    expect(readNoteSettlementClaimScope(db, fixture.job.id)).toEqual(scopeAtQueryTime);
+  });
+
+  /**
+   * CANCELLATION ON BOTH DISPATCH SHAPES (spec D9). The unified dispatch has had
+   * a claim monitor since settlement-execution-repair ticket 07; this one — the
+   * cold stage-2 resume — had none, so `invalidateOverlappingSettlementJobs`'
+   * generation bump left a running resume writing against a claim it no longer
+   * held until it finished on its own.
+   */
+  test("a generation bump under a never-resolving query aborts the run and ends the await", async () => {
+    const fixture = seedFourTurnWindow();
+    const timers = createFakeTimers();
+    let aborted = false;
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: (request) =>
+        new Promise<NoteSettlementQueryResult>((_resolve, reject) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              reject(request.signal!.reason ?? new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+      claimMonitorSetTimeoutImpl: timers.setTimeoutImpl,
+      claimMonitorClearTimeoutImpl: timers.clearTimeoutImpl,
+      claimMonitorIntervalMs: MONITOR_INTERVAL_MS,
+      logger: { warn: () => {}, error: () => {}, info: () => {} },
+    });
+
+    const outcomePromise = dispatch({ job: fixture.job });
+    await Promise.resolve();
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
+    expect(aborted).toBe(false);
+
+    // Exactly what `invalidateOverlappingSettlementJobs` does to a claimed row.
+    db.query<unknown, [number]>(
+      "UPDATE note_settlement_jobs SET status = 'pending', claim_generation = claim_generation + 1 WHERE id = ?",
+    ).run(fixture.job.id);
+
+    await timers.fireLatest(MONITOR_INTERVAL_MS);
+    const outcome = await outcomePromise;
+
+    expect(aborted).toBe(true);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.reason).toContain("lost ownership of claim generation");
+    // No leaked timer: the monitor stops itself and the dispatch clears it.
+    expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
   });
 });

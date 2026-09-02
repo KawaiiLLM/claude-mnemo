@@ -28,12 +28,13 @@
  * 3. What resolves `ambiguous` AFTER 1-2 (endpoint in ≥ 2 lanes, no
  *    declaration survived) cannot be attributed by anyone: no writer said
  *    which lane, and the endpoint no longer answers. `ctx.onAmbiguous`
- *    decides; the DEFAULT — and the whole behaviour this ticket ships — is to
- *    DELETE the edge and receipt it. Ticket 04 adds the live-job branch
- *    (`invalidateOverlappingSettlementJobs`, so a settlement run over the
- *    citer declares it in stage 2) IN FRONT of this default, never instead of
- *    it: for a DONE window, or when no live job exists, there is nobody left
- *    to ask and the spec's own answer (T2421) is subtraction.
+ *    decides, and its DEFAULT is now the two-step rule of ticket 04:
+ *    `invalidateOverlappingSettlementJobs` FIRST — a live settlement run whose
+ *    window, writable set, frozen members or claim-time scope reaches the
+ *    citer is sent back to stage 1 and the edge is KEPT for its stage 2 to
+ *    declare — and the DELETE-and-receipt of ticket 02 only when nobody is
+ *    left to ask. For a DONE or abandoned window, or when no job exists at
+ *    all, that is the spec's own answer (T2421): subtraction.
  *
  * ## What it never does
  *
@@ -45,12 +46,21 @@
  * a side that lost its lane had nowhere to go under the stored-side model, and
  * under resolution it simply reads `none`.
  *
- * ## Old AND new lane touches
+ * ## Why there is no lane-touch recording here (ticket 04, peer finding F3)
  *
- * A verb that moves an endpoint from `E1/#alpha` to `E2/#alpha` leaves work
- * owed in BOTH lanes, so both qualified keys are recorded (spec D2). Touches
- * are job-scoped (`lane_run_touches`), so a verb running outside a settlement
- * job passes no `jobId` and records none — there is no run to owe anything.
+ * Ticket 02 shipped an old/new qualified lane TOUCH pair on this seam, scoped
+ * to a settlement job's `lane_run_touches` ledger. It was reachable from
+ * nothing: no structural verb ever had a job id to give it, so the whole path
+ * ran only under its own unit test. It is DELETED rather than wired up,
+ * because the invalidation rule below subsumes what it was for — a structural
+ * change inside a live run's reach RESETS that run to stage 1, which rebuilds
+ * the worklist from the finished state; a change outside every run's reach is
+ * owed to nobody. Subtraction, per the batch's own standing ruling (T2419).
+ *
+ * What the caller's PRE-STATE is still for: the derived-side closure. It is
+ * captured only on the path that consumes it (a settlement job's own tag
+ * projection), and `resolveEdgeSide` against it is what says whether a side
+ * this run made `ambiguous` used to be decidable.
  */
 
 import type { Database } from "bun:sqlite";
@@ -61,10 +71,10 @@ import {
   resolveEdgeSide,
   type EdgeSide,
   type EndpointLaneFacts,
-  type QualifiedLane,
   UNDECLARED_SIDE_TAG,
 } from "./edge-side-resolution";
-import { recordLaneTouch } from "./lane-disposition";
+import { recordPreSideResolutions } from "./note-settlement-pre-resolutions";
+import { invalidateOverlappingSettlementJobs } from "./settlement-job-invalidation";
 import { stampTurnRelationsRevision } from "./write-gate";
 
 /** One incident edge row, as this seam reads and reports it. */
@@ -95,18 +105,40 @@ export interface NormalizeIncidentAttributionContext {
   nowEpoch: number;
   /**
    * The endpoints' lane facts BEFORE the caller's mutation, captured by the
-   * caller with `loadEndpointLaneFacts` before it wrote. Supplies the OLD
-   * half of the old+new touch pair. Omitted = the caller recorded no
-   * pre-state, and only NEW lanes are touched.
+   * caller with `loadEndpointLaneFacts` before it wrote — the "before" half of
+   * the derived-side closure, which exists nowhere in the database once the
+   * projection has written the new `tags`. Read ONLY when `settlementJobId` is
+   * given; a caller that supplies neither records nothing.
    */
   previousLaneFacts?: ReadonlyMap<number, EndpointLaneFacts>;
-  /** The settlement job whose touch ledger owns the old/new lane touches. Omitted = a verb outside settlement; no touches are recorded. */
-  jobId?: number;
+  /**
+   * THE SETTLEMENT JOB THIS MUTATION BELONGS TO (main-agent-edges ticket 04).
+   * Two effects, both keyed on it:
+   *
+   *   - every incident side's PRE resolution is recorded to that job's
+   *     transition scratch, first-write-wins (spec D6, R10-7);
+   *   - the job is EXEMPT from its own structural invalidation. A run's own
+   *     tag projection is an attribution change like any other, and a run that
+   *     reset itself the moment its projection made a side ambiguous could
+   *     never finish. Its answer to an ambiguous side is stage 2, which the
+   *     closure arranges — so the side is KEPT.
+   *
+   * Omitted for every verb outside settlement, which is why a lane clear run
+   * from `remember` still deletes what it cannot attribute.
+   */
+  settlementJobId?: number;
   /**
    * What to do with a side that resolves `ambiguous` after the two clears.
-   * Default: `"delete"` — the edge is removed and receipted. Ticket 04 passes
-   * a hook that first tries to invalidate an overlapping live settlement job
-   * and answers `"keep"` when it found one.
+   *
+   * DEFAULT (ticket 04, pinned P2's "in front of it"): try
+   * `invalidateOverlappingSettlementJobs` first — if a live job's window,
+   * writable set, frozen members or claim-time scope reaches the citer, that
+   * run is sent back to stage 1 and the edge is KEPT for its stage 2 to
+   * declare. Only when nobody is left to ask does the edge get DELETED and
+   * receipted, which is the same subtraction the cutover performs.
+   *
+   * Supplied, it REPLACES that default entirely — the seam for a caller (or a
+   * test) that wants the bare disposition with no scheduling side effect.
    */
   onAmbiguous?: (edge: IncidentEdgeRow, side: EdgeSide) => AmbiguousDisposition;
 }
@@ -132,8 +164,8 @@ export interface NormalizeIncidentAttributionResult {
   deletedEdges: readonly DeletedIncidentEdge[];
   /** Citing turns whose relations revision this call stamped — ascending, deduped. */
   stampedCiterIds: readonly number[];
-  /** Every qualified lane this call touched, old and new. */
-  touchedLanes: readonly QualifiedLane[];
+  /** Settlement jobs this call sent back to stage 1 because a side it made `ambiguous` falls inside their reach. Ascending, deduped. */
+  invalidatedJobIds: readonly number[];
 }
 
 const SIDES: readonly EdgeSide[] = ["tail", "head"];
@@ -153,7 +185,7 @@ export function normalizeIncidentAttribution(
     clearedDeclarations: [],
     deletedEdges: [],
     stampedCiterIds: [],
-    touchedLanes: [],
+    invalidatedJobIds: [],
   };
   if (ids.length === 0) {
     return empty;
@@ -187,6 +219,39 @@ export function normalizeIncidentAttribution(
   }
   const facts = loadEndpointLaneFacts(db, [...endpointIds]);
   const moved = new Set(ids);
+
+  // THE PRE STATE, RECORDED IN THIS TRANSACTION (spec D6, R10-7). The caller's
+  // captured pre-state covers only the endpoints IT moved; every other endpoint
+  // of an incident row has the same facts before and after, so the post-state
+  // is its own pre-state and overlaying the two is exact — and far cheaper than
+  // asking the caller to snapshot a set it never touched.
+  if (ctx.settlementJobId !== undefined) {
+    const preFacts = new Map<number, EndpointLaneFacts>(facts);
+    if (ctx.previousLaneFacts !== undefined) {
+      for (const [turnId, endpointFacts] of ctx.previousLaneFacts) {
+        preFacts.set(turnId, endpointFacts);
+      }
+    }
+    recordPreSideResolutions(db, ctx.settlementJobId, incident, preFacts, ctx.nowEpoch);
+  }
+
+  const invalidatedJobIds = new Set<number>();
+  /**
+   * THE LIVE-JOB BRANCH, IN FRONT OF THE DELETE (pinned P2). See
+   * `NormalizeIncidentAttributionContext.onAmbiguous` for the rule; the
+   * exemption of `settlementJobId` is what stops a settlement run from
+   * resetting itself over its own projection.
+   */
+  const defaultOnAmbiguous = (edge: IncidentEdgeRow): AmbiguousDisposition => {
+    const invalidated = invalidateOverlappingSettlementJobs(db, [edge.citingId], {
+      nowEpoch: ctx.nowEpoch,
+      ...(ctx.settlementJobId !== undefined ? { excludeJobId: ctx.settlementJobId } : {}),
+    });
+    for (const job of invalidated) {
+      invalidatedJobIds.add(job.jobId);
+    }
+    return invalidated.length > 0 || ctx.settlementJobId !== undefined ? "keep" : "delete";
+  };
 
   const clearSide = {
     tail: db.query<unknown, [number]>(`UPDATE memory_edges SET tail_tag = '' WHERE id = ?`),
@@ -233,13 +298,7 @@ export function normalizeIncidentAttribution(
   const clearedDeclarations: ClearedDeclaration[] = [];
   const deletedEdges: DeletedIncidentEdge[] = [];
   const stampedCiterIds = new Set<number>();
-  const touched = new Map<string, QualifiedLane>();
-  const onAmbiguous = ctx.onAmbiguous ?? (() => "delete" as const);
-
-  const touch = (lane: QualifiedLane | null): void => {
-    if (lane === null) return;
-    touched.set(`${lane.segmentId}:${lane.tag}`, lane);
-  };
+  const onAmbiguous = ctx.onAmbiguous ?? defaultOnAmbiguous;
 
   for (const row of incident) {
     // The row's live view of its own sides, mutated in place as this loop
@@ -256,12 +315,6 @@ export function normalizeIncidentAttribution(
       // perfectly good edge.
       if (!moved.has(endpointId)) continue;
 
-      // OLD attribution — for the touch pair, and only when the caller
-      // captured a pre-state.
-      if (ctx.previousLaneFacts !== undefined) {
-        touch(resolveEdgeSide(row, side, ctx.previousLaneFacts).lane);
-      }
-
       const resolved = resolveEdgeSide(live, side, facts);
       const storedTag = edgeSideStoredTag(live, side);
 
@@ -275,7 +328,6 @@ export function normalizeIncidentAttribution(
         if (reason === null) {
           // A live declaration on a genuinely ambiguous endpoint: exactly what
           // a stored side is FOR. Left alone.
-          touch(resolved.lane);
           continue;
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
@@ -357,7 +409,6 @@ export function normalizeIncidentAttribution(
         }
         continue;
       }
-      touch(after.lane);
     }
   }
 
@@ -367,25 +418,10 @@ export function normalizeIncidentAttribution(
     stampTurnRelationsRevision(db, citerId, ctx.writer, ctx.nowEpoch);
   }
 
-  const touchedLanes = [...touched.values()].sort(
-    (a, b) => a.segmentId - b.segmentId || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0),
-  );
-  if (ctx.jobId !== undefined) {
-    for (const lane of touchedLanes) {
-      recordLaneTouch(db, {
-        jobId: ctx.jobId,
-        kind: "lane",
-        entityId: lane.segmentId,
-        laneTag: lane.tag,
-        createdAtEpoch: ctx.nowEpoch,
-      });
-    }
-  }
-
   return {
     clearedDeclarations,
     deletedEdges,
     stampedCiterIds: [...stampedCiterIds].sort((a, b) => a - b),
-    touchedLanes,
+    invalidatedJobIds: [...invalidatedJobIds].sort((a, b) => a - b),
   };
 }
