@@ -350,17 +350,55 @@ describe("tool surface", () => {
   // rather than the ROOT — an agent following the published contract would
   // mis-resolve a real tree. Both now teach the shipped fork-tree shape and
   // the node selector.
-  it("both descriptions teach the fork tree's root-relative hop rule and no longer teach retired syntax", () => {
+  it("the timeline description teaches the fork tree's root-relative hop rule and neither teaches retired syntax", () => {
     const rootRelativeSentence =
       "a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's";
     for (const description of [MNEMO_TOOL_DESCRIPTIONS.recall, MNEMO_TOOL_DESCRIPTIONS.timeline]) {
-      expect(description).toContain(rootRelativeSentence);
       expect(description).not.toContain("newest-first");
       expect(description).not.toContain("an edge into an indexed node");
       expect(description).not.toMatch(/`→ <word>|`← <word>/);
     }
+    // Settlement-read-once spec D8: the tree kept exactly one surface, and
+    // the root-relative hop rule is a fact about that surface alone.
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain(rootRelativeSentence);
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain('timeline(id=\"S<n>/T<m>\")');
-    expect(MNEMO_TOOL_DESCRIPTIONS.recall).toContain("`^`");
+    expect(MNEMO_TOOL_DESCRIPTIONS.recall).not.toContain(rootRelativeSentence);
+  });
+
+  // Settlement-read-once spec D8 (user rulings T2388/T2404): `recall`'s
+  // `relations` field renders the node's DIRECT edge set, and the tool
+  // description is the only place a caller learns what the field's lines
+  // mean before it reads one. Every clause pinned here is a clause the
+  // renderer actually produces — the pairing the ticket's teaching box asks
+  // for, and the failure this replaces was exactly a description that still
+  // taught a shape the code had stopped emitting.
+  it("the recall description teaches the direct edge set and no longer teaches the tree", () => {
+    const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
+    expect(recall).toContain("THIS turn's own direct edges");
+    expect(recall).toContain("`<words> -> <addr>`");
+    expect(recall).toContain("`<- <addr> <words>`");
+    expect(recall).toContain("No downstream hops, no branch cap, no `+N more`");
+    expect(recall).toContain("`[unplaced]` when neither did");
+    expect(recall).toContain("one pair placed two ways is two lines");
+    expect(recall).toContain("ONE legend line for the whole response");
+    // The tree's own notation, retired from this surface entirely.
+    expect(recall).not.toContain("`^`");
+    expect(recall).not.toContain("-word->");
+    expect(recall).not.toContain("`… +N more`");
+    expect(recall).not.toContain("└");
+    // ...and the reader is told where the tree DID go, so the capability is
+    // not silently lost along with the notation.
+    expect(recall).toContain('timeline(id=\"S<n>/T<m>\")');
+  });
+
+  // Settlement-read-once spec D8's outer assembly: the grouped comma list is
+  // a contract a caller plans around (how many headers, how a repeat reads),
+  // so it is taught rather than merely implemented.
+  it("the recall description teaches that a turn-address list is one grouped page", () => {
+    const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
+    expect(recall).toContain("is assembled as ONE page rather than several stapled together");
+    expect(recall).toContain("under one header per session");
+    expect(recall).toContain("an address named twice is read once");
   });
 
   // ticket 01 (spec "Note contract revision"): the field-level contract used

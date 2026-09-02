@@ -6,16 +6,16 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
-import { buildTurnRelationLines, RELATION_TREE_BRANCH_CAP } from "../../src/mcp/relations-view";
+import { buildTurnRelationTreeLines, RELATION_TREE_BRANCH_CAP } from "../../src/mcp/relations-view";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 /**
- * Fork-tree spec (ticket 12): `buildTurnRelationLines` renders the viewed
+ * Fork-tree spec (ticket 12): `buildTurnRelationTreeLines` renders the viewed
  * turn's position in the graph as a tree — root address + main out-chain
  * inline, every other out-edge and every in-edge as its own `└` branch.
  * `tests/mcp/recall.test.ts`'s own "relations field" describe block still
  * exercises the field end-to-end through `recallMemory`; this file targets
- * the tree shape's own rules directly against `buildTurnRelationLines`.
+ * the tree shape's own rules directly against `buildTurnRelationTreeLines`.
  */
 describe("recall relations tree (fork-tree spec, ticket 12)", () => {
   let db: Database;
@@ -90,7 +90,7 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
 
   function lines(promptNumber: number): string[] {
     const id = getTurn(db, sessionId, promptNumber)!.id;
-    return buildTurnRelationLines(db, { id, sessionId, promptNumber });
+    return buildTurnRelationTreeLines(db, { id, sessionId, promptNumber });
   }
 
   test("no edges renders exactly what it renders today: empty", () => {

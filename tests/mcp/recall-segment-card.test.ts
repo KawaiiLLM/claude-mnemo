@@ -737,15 +737,17 @@ describe("recall(id=\"E<n>\") segment card", () => {
     );
 
     const unrequested = recallMemory(db, { id: `E${segmentId}/S${sessionId}/T3` });
-    expect(unrequested).not.toContain("-extends->");
+    expect(unrequested).not.toContain("extends ->");
 
     const requested = recallMemory(db, {
       id: `E${segmentId}/S${sessionId}/T3`,
       filter: { fields: ["title", "relations"] },
     });
-    // Fork-tree spec (ticket 12): the root's own address opens the field,
-    // its one out-edge continues the same line.
-    expect(requested).toContain(`S${sessionId}/T3 -extends-> T1 {seg-tag}`);
+    // Settlement-read-once spec D8: the card's member block shows the
+    // member's OWN direct edge, in the same grammar `recall`'s turn route
+    // renders — never the tree's root-address line, which left with the tree.
+    expect(requested).toContain("extends -> T1 (#seg-tag)");
+    expect(requested).not.toContain("-extends->");
   });
 
   // ---- lane-model-v12 ticket 18 (ruling [S15069/T1670]): the card carries no

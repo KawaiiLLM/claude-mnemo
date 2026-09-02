@@ -257,10 +257,11 @@ export interface FormattedTurn {
    */
   metadata?: string | null;
   /**
-   * Edge-read-surface spec, ticket 01: the `relations` field's pre-formatted
-   * lines — `→ <word> T<n> {tag+tag}` outbound, `← <word> from T<n>
-   * {tag+tag}` inbound, untagged edges with no brace suffix. Resolved by the
-   * caller (`mcp/relations-view.ts`'s `buildTurnRelationLines`), keeping this
+   * The `relations` field's pre-formatted lines — since settlement-read-once
+   * spec D8, the viewed turn's own DIRECT edge set: `<words> -> <addr>
+   * (#tail → #head)` for every outgoing row, `<- <addr> <words> (…)` for
+   * every incoming one. Resolved by the caller
+   * (`mcp/relations-view.ts`'s `buildTurnDirectRelationLines`), keeping this
    * module DB-free like every other field here. `undefined`/`[]` renders
    * nothing — the caller only populates this when `fields.has("relations")`,
    * so the query behind it costs nothing when the field is not requested.
@@ -1333,9 +1334,10 @@ function formatTurnBody(
   }
 
   // Edge-read-surface spec, ticket 01: `relations` is a plain list field like
-  // `insight`/`files_*` above it, but its own lines already open with a
-  // glyph (`→`/`←`) that IS the ruled format — `pushBullets`' own `- ` prefix
-  // would double up on it, so this pushes the pre-formatted lines directly.
+  // `insight`/`files_*` above it, but its own lines are a ruled grammar whose
+  // shape (a relation word or a `<-` stroke in the leading position, spec D8)
+  // IS the format — `pushBullets`' own `- ` prefix would read as part of it,
+  // so this pushes the pre-formatted lines directly.
   let relations: TurnRelationsPlacement = fields.has("relations")
     ? { kind: "empty" }
     : { kind: "absent" };

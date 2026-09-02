@@ -3,7 +3,10 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
-import { buildTurnRelationLines } from "../../src/mcp/relations-view";
+import {
+  buildTurnDirectRelationLines,
+  buildTurnRelationTreeLines,
+} from "../../src/mcp/relations-view";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
@@ -75,7 +78,7 @@ afterEach(() => {
 });
 
 describe("timeline node selector (ticket 13 decision 5)", () => {
-  test('timeline(id="S<n>/T<m>") renders the header row plus the SAME tree bytes recall\'s relations field produces', () => {
+  test('timeline(id="S<n>/T<m>") keeps the 3-hop tree that left recall\'s relations field (spec D8, user story 17)', () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
@@ -85,18 +88,29 @@ describe("timeline node selector (ticket 13 decision 5)", () => {
     tagEdge(t2, t1, "narrows", []);
 
     const turn = getTurn(db, sessionId, 3)!;
-    const expectedTreeLines = buildTurnRelationLines(db, { id: turn.id, sessionId, promptNumber: 3 });
+    const expectedTreeLines = buildTurnRelationTreeLines(db, { id: turn.id, sessionId, promptNumber: 3 });
 
     const nodeOutput = timelineQuery(db, { id: `S${sessionId}/T3` });
     const bodyLines = nodeOutput.split("\n");
     // Header row: `S<n>/T<m> MM-DD <emoji> <title>` (unbracketed since ticket
     // 11, USER RULING S15069/T2016).
     expect(bodyLines[0]).toMatch(new RegExp(`^S${sessionId}/T3 \\d{2}-\\d{2} .+ root turn$`));
-    // Everything after the header is exactly the tree recall's own relations
-    // field renders for the same turn — modulo the header, byte-identical.
+    // Everything after the header is exactly the TREE — modulo the header,
+    // byte-identical to `buildTurnRelationTreeLines`.
     const treeBody = bodyLines.slice(1).join("\n");
     expect(treeBody).toBe(expectedTreeLines.join("\n"));
+    // The tree's own two capabilities, both still here: the labelled arrow
+    // and the transitive hop past the root's immediate target.
     expect(treeBody).toContain("-extends-> T2");
+    expect(treeBody).toContain("-narrows-> T1");
+
+    // Settlement-read-once spec D8: `recall`'s `relations` field on the SAME
+    // turn is now the DIRECT set — one row, the immediate out-edge, in the
+    // other grammar. The two surfaces diverged deliberately; a change that
+    // re-pointed either one at the other's builder would land here.
+    const direct = buildTurnDirectRelationLines(db, { id: turn.id, sessionId, promptNumber: 3 });
+    expect(direct).toEqual(["extends -> T2 [unplaced]"]);
+    expect(treeBody).not.toBe(direct.join("\n"));
   });
 
   test("an invalid turn address still errors with the existing id-grammar message shape", () => {
