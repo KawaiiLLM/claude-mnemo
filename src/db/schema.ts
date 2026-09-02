@@ -31,7 +31,8 @@ import {
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
 import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex, reindexAllSegments } from "./search";
-import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
+import { recomputeSegmentFacets, repairStaleSegmentFacets, writeMembershipTags } from "./segments";
+import { loadSegmentTagIndex } from "./turn-tag-gate";
 import { LEGACY_RELATION_CLASS } from "../shared/relation-class";
 import { EDGE_RELATIONS } from "../shared/turn-phase";
 import { ERA_GRANT_COLUMN } from "../segment-era";
@@ -4783,6 +4784,13 @@ export function initializeSchema(db: Database): void {
   // that recreation anyway — running here means the FINAL state is the
   // stamping body no matter which of the two paths got there. Idempotent.
   ensureMemoryEdgesPruneStampsRelations(db);
+  // Settlement-read-once ticket 03 (spec D5), strictly LAST: it reads
+  // `segments.tags` and `turns.tags` as the FINAL shape every rebuild above
+  // (`retireTopicRegistry`, `runLaneRegistryMigration`,
+  // `runLaneModelV12EdgeMigration`, `runSegmentOneTagMigration`) produces, and
+  // writes through the ticket-02 primitive, which itself only exists once
+  // `segment_members`/`segments` are in that shape.
+  cutoverNamedTaskMembershipTags(db);
 }
 
 /**
@@ -4815,6 +4823,183 @@ function ensureMemoryEdgesPruneStampsRelations(db: Database): void {
   runWriteTransaction(db, () => {
     db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
     db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
+}
+
+/**
+ * The reserved writer id this migration's `tags`-field stamps carry
+ * (settlement-read-once ticket 03, spec D5: "the writer id a reserved
+ * migration id") — the same discipline `LANE_MERGE_WRITER` /
+ * `COMPACT_REPAIR_WRITER` (write-gate.ts) use for a mutator with no identity
+ * of its own, kept local here because nothing else ever has reason to stamp
+ * under it.
+ */
+export const MEMBERSHIP_CUTOVER_MIGRATION_WRITER = "migration:membership-cutover";
+
+export const MEMBERSHIP_CUTOVER_RECEIPT = "settlement-read-once-membership-cutover";
+
+/** One candidate this sweep found but did NOT write, and why. */
+export interface MembershipCutoverConflict {
+  /** `S<session>/T<prompt>`, the address vocabulary every other refusal here uses. */
+  address: string;
+  /** The named task (`segments.id`) the row is a member of. */
+  segmentId: number;
+  message: string;
+}
+
+export interface MembershipCutoverReceipt {
+  /** Members of a NAMED task whose stored `tags` lacked that task's own tag. Production, read-only 2026-09-02: 98. */
+  candidates: number;
+  /** Of those, the ones this sweep actually tagged through the primitive. */
+  tagged: number;
+  /**
+   * Refused — either this migration's own foreign-task pre-check, or the
+   * primitive itself — and named individually. Production: 0.
+   */
+  conflicts: MembershipCutoverConflict[];
+}
+
+/**
+ * Cutover (settlement-read-once ticket 03, spec D5): every member of a NAMED
+ * task whose turn lacks that task's tag receives it, through the ticket-02
+ * primitive (`writeMembershipTags`, operation `normal`) under the reserved
+ * migration writer id above.
+ *
+ * UNNAMED TASKS ARE UNTOUCHED, structurally rather than by a guard clause:
+ * the query below selects only rows of segments carrying a tag
+ * (`json_array_length(s.tags) >= 1`), so an unnamed task's frozen
+ * `segment_members` rows are never read by this function, let alone written.
+ * The frozen-legacy semantics themselves — what makes that freeze durable
+ * under every OTHER mutator — shipped in ticket 02; this migration only
+ * closes the one gap ticket 02 could not reach on its own: rows written
+ * before the primitive existed.
+ *
+ * ONE PRIMITIVE CALL PER CANDIDATE TURN, not one call for the whole sweep:
+ * `writeMembershipTags` is all-or-nothing over the WHOLE `writes` array it is
+ * given, and this migration's job is "tag every member that safely can be",
+ * not "refuse the entire cutover because one turn out of ninety-eight already
+ * carries a conflicting tag". Every candidate already owns a `segment_members`
+ * row in its OWN task (that is how the query below finds it), so writing that
+ * task's tag onto it can only ever confirm the row `deriveTurnSegmentMembership`
+ * already sees, never move one — candidates do not interact, so batching them
+ * together would buy nothing and only risks one bad row blocking the other
+ * ninety-seven.
+ *
+ * FOREIGN-TASK CONFLICT, checked before the primitive is ever called for a
+ * candidate: its stored `tags` might already carry a DIFFERENT named task's
+ * own tag. Left to the primitive, `derivedTarget` resolves to the FIRST
+ * segment tag the array names — which could be the foreign one — and would
+ * silently re-home `segment_members` to it instead of confirming the row this
+ * sweep found; that is the double truth this ticket exists to close, not
+ * extend. Caught here with `loadSegmentTagIndex`, the same map the settlement
+ * batch tag write (`note-settlement-turn-facade.ts`) uses for the identical
+ * question, refused and counted rather than written.
+ *
+ * Receipt-guarded, the `retireUntenantedSegmentContentFromSearch` idiom:
+ * checked outside AND inside the write transaction, so the loser of two hook
+ * processes racing `initializeSchema` for the same database reports nothing
+ * it did not do. Idempotent beyond the receipt too — a turn already carrying
+ * its task's tag is never a candidate, so a manual re-run with the receipt
+ * cleared would still change nothing for it.
+ */
+function cutoverNamedTaskMembershipTags(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "segment_members") || !hasTable(db, "segments") || !hasTable(db, "turns")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+    return;
+  }
+
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+      return;
+    }
+
+    const rows = db
+      .query<
+        {
+          turnId: number;
+          segmentId: number;
+          taskTag: string | null;
+          turnTags: string | null;
+          sessionId: number;
+          promptNumber: number;
+        },
+        []
+      >(
+        `SELECT sm.turn_id AS turnId, sm.segment_id AS segmentId,
+                json_extract(s.tags, '$[0]') AS taskTag,
+                t.tags AS turnTags,
+                t.session_id AS sessionId, t.prompt_number AS promptNumber
+           FROM segment_members sm
+           JOIN segments s ON s.id = sm.segment_id
+           JOIN turns t ON t.id = sm.turn_id
+          WHERE json_array_length(s.tags) >= 1`,
+      )
+      .all();
+
+    const segmentTags = loadSegmentTagIndex(db);
+    const conflicts: MembershipCutoverConflict[] = [];
+    let candidates = 0;
+    let tagged = 0;
+
+    for (const row of rows) {
+      const taskTag = row.taskTag;
+      // Defensive only: `json_array_length(s.tags) >= 1` already guarantees
+      // `$[0]` is present, and `segments.tags` is schema-checked JSON of
+      // strings — this can only be reached by a row the query above excludes.
+      if (typeof taskTag !== "string" || taskTag === "") {
+        continue;
+      }
+
+      let turnTags: string[];
+      try {
+        const parsed = JSON.parse(row.turnTags ?? "[]") as unknown;
+        turnTags = Array.isArray(parsed)
+          ? parsed.filter((value): value is string => typeof value === "string")
+          : [];
+      } catch {
+        turnTags = [];
+      }
+
+      // Already tagged — untouched by design (spec D5), not counted as a
+      // candidate at all.
+      if (turnTags.includes(taskTag)) {
+        continue;
+      }
+      candidates += 1;
+      const address = `S${row.sessionId}/T${row.promptNumber}`;
+
+      const foreign = turnTags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+      if (foreign !== undefined) {
+        conflicts.push({
+          address,
+          segmentId: row.segmentId,
+          message:
+            `${address} is a member of E${row.segmentId} ("${taskTag}") but its stored tags already ` +
+            `carry "${foreign}", E${segmentTags.get(foreign)}'s own task tag — left untouched.`,
+        });
+        continue;
+      }
+
+      const written = writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId: row.turnId, tags: [...turnTags, taskTag] }],
+        writer: MEMBERSHIP_CUTOVER_MIGRATION_WRITER,
+        nowEpoch,
+      });
+      if (!written.ok) {
+        conflicts.push({ address, segmentId: row.segmentId, message: written.message });
+        continue;
+      }
+      tagged += 1;
+    }
+
+    const receipt: MembershipCutoverReceipt = { candidates, tagged, conflicts };
+    writeMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT, nowEpoch, receipt);
   });
 }
 
