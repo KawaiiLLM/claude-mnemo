@@ -2,9 +2,9 @@
 
 **What to build:** spec D9 exactly. After it, `memory_edges` holds relation facts only (class NOT NULL, coverage, sides, provenance), keyed UNIQUE on `(citing, cited)`, with NO `relation` word column and no wordless rows; every stored side means "several lanes, this one"; tags are a hard invariant; a receipt can restore the old state within the rollback boundary.
 
-**Blocked by:** 02, 03, 04, 07, 08 — the code must stop reading `relation` and stop producing wordless rows BEFORE the column and the rows go. Implemented last, released together with all of them.
+**Blocked by:** None — 02, 03, 03b, 04, 07, 08, 11 and 02b have all landed on main (4e09621e). Ticket 06 (settlement teaching, `note-settlement-prompt.ts` and its tests) runs IN PARALLEL: avoid that file; the P3 raw-word grep gate you add is what catches any raw word 06 lands later. Released together with all of them.
 
-**Status:** ready-for-agent (after blockers)
+**Status:** ready-for-agent
 
 - [ ] One receipt-guarded one-shot in `initializeSchema`, all inside ONE `runWriteTransaction`: durable fence (no `claimed` job after atomically reaping expired claims and bumping generation; pending `stage='edges'` jobs reset first; R10-8) → receipts → transforms 1–6 (D9) → `PRAGMA foreign_key_check` → side-index verification → completion marker LAST. Immutable receipt/archive rows separated from a mutable state marker `complete|rolled_back` (R10-10).
 - [ ] Transforms: tags normalised by raw update (NULL → `[]`; non-array → `[]`; non-string members dropped) + membership/facet reconcile + stamps for changed tags; fold (relation over bare; class most specific; coverage for correct only; lowest id; one DISTINCT valid declaration survives); clear redundant declarations (unique endpoints); clear invalid declarations; DELETE ambiguous-side edges; DELETE all wordless rows; rebuild `memory_edges` without `relation`, pair-UNIQUE, prune trigger and side index recreated; rebuild `turns` with NOT NULL DEFAULT '[]' and the BEFORE trigger with lazy CASE guards; stamp every citer whose row was folded/cleared/deleted (R10-10).
