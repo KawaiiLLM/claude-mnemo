@@ -247,12 +247,12 @@ function write(
   ) {
     readRelationsForWrite(context, input.turn);
   }
-  return evaluateSettlementTurnWrite(db, context, input, nowEpoch, { apply: true });
+  return evaluateSettlementTurnWrite(db, context, input, nowEpoch);
 }
 
 function resultText(evaluation: SettlementTurnWriteEvaluation): string {
   return evaluation.ok
-    ? renderSettlementTurnWriteReceipt(evaluation.outcome, { staged: false })
+    ? renderSettlementTurnWriteReceipt(evaluation.outcome)
     : `Parameter error: ${evaluation.message}`;
 }
 
@@ -375,7 +375,10 @@ describe("tags are replaced whole, under the shared mode (requirement 3; ticket 
 
     const retired = write(
       context,
-      { turn: `S${sessionDbId}/T1`, type: ["design"], mode: { type: "overwrite" } },
+      // A retired mode literal, deliberately off the current union — the
+      // runtime refusal is what this test is about, not the compile-time
+      // shape.
+      { turn: `S${sessionDbId}/T1`, type: ["design"], mode: { type: "overwrite" as never } },
       NOW,
     );
     expect(retired.ok).toBe(false);
@@ -963,7 +966,11 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       {
         turn: `S${sessionDbId}/T2`,
         verify: [`S${sessionDbId}/T1`],
-        use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }],
+        // A bare address: `tailTag`/`headTag` unset either way — an object
+        // carrying a stale `tags` key (an unknown property to the current
+        // shape) was silently equivalent to this, so the fixture states the
+        // real thing rather than a property the schema has never read.
+        use: [`S${sessionDbId}/T1`],
       },
       NOW,
     );
@@ -1000,7 +1007,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const branch = write(
       context,
-      { turn: `S${sessionDbId}/T3`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      // Bare address — see the same note two tests up: a stale `tags` key on
+      // this entry shape was never read, so the second call below (the same
+      // bare form) already proved it equivalent.
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
     expect(resultText(branch)).toContain("1 relation");
@@ -1037,7 +1047,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const branch = write(
       baseContext(job, { reviewableTurnIds: new Set([t3]) }),
-      { turn: `S${sessionDbId}/T3`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      // Bare address — a stale `tags` key on this entry shape was never read.
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
     expect(resultText(branch)).toContain("1 relation");
@@ -1324,19 +1335,29 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, { reviewableTurnIds: new Set([t1, t2]) });
 
+    // F3 (main-agent-edges 03b, peer implementation review): this object
+    // literal used to carry TWO `use:` keys — JS keeps only the last, so the
+    // legal tagged entry below (T1 -> T2) was never actually sent and this
+    // test measured a plain self-edge refusal, not the "whole-call rejection
+    // takes the legal entry beside it down too" shape its own name and
+    // closing assertion claim. One array, both entries, is what the test was
+    // always meant to send.
     const result = write(
       context,
       {
         turn: `S${sessionDbId}/T1`,
-        use: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
-        use: [`S${sessionDbId}/T1`],
+        use: [
+          { turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" },
+          `S${sessionDbId}/T1`,
+        ],
       },
       NOW,
     );
 
     expect(resultText(result)).toStartWith("Parameter error:");
     expect(resultText(result)).toContain("an edge's two ends must be DIFFERENT turns");
-    // Whole-call rejection: not even the legal tagged `indexes` lands.
+    // Whole-call rejection: not even the legal tagged entry to T2 lands
+    // beside the self-referential one that sank the call.
     expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toEqual([]);
   });
 
@@ -2127,7 +2148,8 @@ describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
 
     const chain = write(
       context,
-      { turn: `S${sessionDbId}/T2`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      // Bare address — a stale `tags` key on this entry shape was never read.
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
     expect(resultText(chain)).toContain("1 relation");
@@ -2866,7 +2888,7 @@ describe("staged settlement — the grant principal is (job, generation), not th
 
     // Another writer owns `type`, so the gate genuinely has to consult a grant
     // rather than admitting under rule 2 or rule 3.
-    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    updateTurnById(db, t1, { type: ["fix"] });
     stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
 
     const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
@@ -2932,7 +2954,7 @@ describe("staged settlement — the grant principal is (job, generation), not th
     const job = claimWindow(sessionDbId, 1, 1);
     const ref = `S${sessionDbId}/T1`;
 
-    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    updateTurnById(db, t1, { type: ["fix"] });
     stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
 
     const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
@@ -3005,7 +3027,7 @@ describe("staged settlement — the grant principal is (job, generation), not th
     const job = claimWindow(sessionDbId, 1, 1);
     const ref = `S${sessionDbId}/T1`;
 
-    updateTurnById(db, t1, { type: ["fix"] }, NOW - 10);
+    updateTurnById(db, t1, { type: ["fix"] });
     stampField(db, "turn", t1, "type", sessionWriterId(999), NOW - 10);
 
     const stage1 = baseContext(job, { reviewableTurnIds: new Set([t1]) });
@@ -3085,8 +3107,8 @@ describe("staged settlement — relation-only authority on a removed-side citer"
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    updateTurnById(db, t1, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] }, NOW - 10);
-    updateTurnById(db, t2, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] }, NOW - 10);
+    updateTurnById(db, t1, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] });
+    updateTurnById(db, t2, { tags: [FIXTURE_SEGMENT_TAG, "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 2);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1, t2]),

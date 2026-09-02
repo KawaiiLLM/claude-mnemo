@@ -1314,7 +1314,39 @@ export interface DeclareEdgeSidesResult {
   message?: string;
 }
 
-/** One endpoint's lane facts: the lane tags it carries in its own task. */
+/**
+ * One endpoint's lane facts: the lane tags it carries in its own task.
+ *
+ * 03b F5 (peer implementation review escape): this duplicates the
+ * segment-resolution-then-intersect-with-declared shape `lane-edge-gate.ts`'s
+ * `collectEdgeSideFacts` already does for the attach path — a second reader
+ * doing the same two-step read is exactly the kind of drift risk the ticket
+ * flagged, and the shared shape is worth naming rather than leaving as a
+ * coincidence.
+ *
+ * It stays a second reader anyway, for three reasons none of which is
+ * inertia: (1) `collectEdgeSideFacts` takes BOTH sides' `{address, tags}` at
+ * once and returns `undefined` when neither side is settled — `declareEdgeSides`
+ * asks about ONE endpoint at a time, up to twice per call, and an endpoint
+ * with no patch on its side is never asked at all; (2) the caller-supplied
+ * `tags` array `collectEdgeSideFacts` takes exists so the CITING side can be
+ * judged against a tag correction the SAME call is about to store (an attach
+ * that also retags) — `declareEdgeSides` never rewrites tags, so the live row
+ * is always the current truth and there is nothing to pass in; (3) this
+ * function alone needs the `lanes.size < 2` derivable check (a stored side
+ * means "several lanes, this is the one" — `collectEdgeSideFacts` has no such
+ * concept, because a first-time attach establishes no side at all without a
+ * patch). Folding the two would mean threading a derivable-only branch and an
+ * optional both-sides-at-once calling convention through a module whose other
+ * caller needs neither — the coupling the read-heavy split (`lane-edge-gate.ts`'s
+ * own doc: "caller pre-computes, the shared module judges") exists to avoid.
+ * What DOES have to hold, and is pinned by the two-segment fixture in
+ * `tests/db/logical-edge-writes.test.ts` ("a lane word declared in two
+ * different tasks"), is that both readers resolve the SAME endpoint to the
+ * SAME segment from the SAME `loadSegmentTagIndex`/`loadDeclaredLaneTags`
+ * primitives — the one part where a second implementation actually could
+ * drift from the first.
+ */
 function endpointLaneTags(db: Database, turnId: number): Set<string> {
   const row = db
     .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
