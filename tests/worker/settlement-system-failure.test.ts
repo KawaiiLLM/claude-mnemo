@@ -1,10 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
+import { DATA_DIR } from "../../src/shared/paths";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
@@ -131,11 +131,16 @@ function seedFixture(db: Database): Fixture {
     tags: ["system-failure-task"],
     nowEpoch: NOW,
   }).id;
-  const laneTags = ["system-failure-task", "window-lane"];
+  // TWO lanes (main-agent-edges spec D6): E6 is "a blank side whose endpoint
+  // has ≥2 lanes" now, so a fixture whose members sit in ONE lane raises no
+  // draft finding at all and the surfaces under test would have nothing to
+  // refuse over.
+  const laneTags = ["system-failure-task", "window-lane", "second-lane"];
   const w1 = insertTurn(7, laneTags);
   const w2 = insertTurn(8, laneTags);
   addSegmentMembers(db, segmentId, [w1, w2], NOW);
   insertLane(db, segmentId, "window-lane", NOW);
+  insertLane(db, segmentId, "second-lane", NOW);
 
   writeMemoryEdges(
     db,
@@ -335,7 +340,15 @@ describe("ticket 05 — case 1: missing production provenance", () => {
    */
   test("both surfaces fail closed AND the failure lands in the worker log", async () => {
     let db: Database | undefined;
-    const logPath = join(homedir(), ".claude-mnemo", "claude-mnemo.log");
+    // `shared/logger.ts` caches "the log directory exists" in a module-level
+    // flag, and the test sandbox re-points `homedir()` per preload — so once
+    // this file runs after enough of the suite the logger's own `mkdirSync` is
+    // skipped against a directory that is not there, its append falls back to
+    // stderr, and this assertion fails for a reason that has nothing to do
+    // with whether the failure reached the log. Creating the directory here
+    // makes the cached flag true and correct at the same time.
+    mkdirSync(DATA_DIR, { recursive: true });
+    const logPath = join(DATA_DIR, "claude-mnemo.log");
     const before = (() => {
       try {
         return readFileSync(logPath, "utf8").length;

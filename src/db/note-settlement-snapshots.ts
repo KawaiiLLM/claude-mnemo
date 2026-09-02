@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { resolveEraCutoff } from "./era";
+import { relationClassBearingSql } from "../shared/relation-class";
 import { liveTurnSql } from "./turn-liveness";
 import { eraVisibleMemberSqlClause } from "../segment-era";
 
@@ -387,8 +388,10 @@ export function writeNoteSettlementTransitionSnapshots(
  *   - LIVE endpoints on both sides (`db/turn-liveness.ts`, law 8): a
  *     rolled-back or skipped turn is never a node, so it can neither hold a
  *     debt nor be owed one.
- *   - `relation IS NOT NULL`: a bare citation row carries no side attribution
- *     to be invalidated (its sides are the empty-string sentinel).
+ *   - CLASS-CARRYING rows only (`relationClassBearingSql`, main-agent-edges
+ *     ticket 02 — it read `relation IS NOT NULL` before, the same test spelled
+ *     against a column the cutover drops): a bare citation row carries no side
+ *     attribution to be invalidated.
  */
 function enumerateRemovedSideCiters(
   db: Database,
@@ -408,7 +411,7 @@ function enumerateRemovedSideCiters(
       WHERE me.cited_id = ?
         AND me.head_tag = ?
         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-        AND me.relation IS NOT NULL
+        AND ${relationClassBearingSql("me")}
         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
       ORDER BY me.id ASC`,
   );

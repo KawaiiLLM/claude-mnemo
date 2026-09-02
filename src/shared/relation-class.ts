@@ -46,13 +46,20 @@ import { EDGE_RELATIONS, type TurnEdgeRelation } from "./turn-phase";
  *
  * The alternative — putting the class word into `relation` itself and widening
  * the table's CHECK — was rejected: SQLite cannot alter a CHECK without a full
- * table rebuild (a heavy migration on the production edge table, which is
- * ticket 03's remit, not this ticket's); it would make every new edge INVISIBLE
- * on day one to the readers still keyed on the seven words (milestone election,
- * `db/edge-signals.ts`, the lane checker's coupling groups) unless all of them
- * were re-keyed here, which is ticket 05a's job; and ticket 03 would then have
- * to REWRITE `relation` in place on existing rows, so rollback would stop being
- * a read-side switch and become a data restore.
+ * table rebuild (a heavy migration on the production edge table), and the
+ * cutover would then have to REWRITE `relation` in place on existing rows, so
+ * rollback would stop being a read-side switch and become a data restore.
+ *
+ * MAIN-AGENT-EDGES TICKET 02 finished the READ side of that plan: no reader in
+ * the tree keys on a stored word any more. `edgeRelationClass` below (and its
+ * SQL form, `relationClassBearingSql`) is the ONE place the seven words are
+ * still consulted, as the legacy bridge for rows written before the class
+ * columns existed. The WRITE side — `interimLegacyRelation`'s one call site in
+ * `db/citations.ts` — stays until the cutover drops the column, because the
+ * storage identity key is still `(pair, relation, tail, head)` and
+ * `relation IS NULL` is the BARE-ROW discriminator: a class edge written with
+ * no word would be indistinguishable from a prose reference and would collide
+ * with that pair's bare row under `idx_memory_edges_bare_pair`.
  */
 
 /** The three classes a NEW edge write may carry. Ordered most specific first — the precedence's own order. */
@@ -143,15 +150,11 @@ export const LEGACY_RELATIONS_BY_CLASS: Record<RelationClass, readonly TurnEdgeR
   });
 
 /**
- * INTERIM (relation-vocabulary-v13 ticket 05a REPLACES THIS TABLE AND NOTHING
- * ELSE).
+ * INTERIM — the WRITE-SIDE fill, retired by the CUTOVER (main-agent-edges D1),
+ * not by any reader.
  *
  * class + coverage -> the seven-word value a NEW row's `relation` column
- * carries. It is the equivalence that keeps a three-class edge VISIBLE to every
- * reader still keyed on the old words — milestone election's frozen weight
- * tables (`shared/milestone-election.ts`), `db/edge-signals.ts`'s
- * `RELATION_IS_SCORED`, the lane checker's coupling groups, the SQL `IN`-lists
- * that filter on `EDGE_RELATIONS`.
+ * carries.
  *
  *   correct/full    ~= override
  *   correct/partial ~= narrows
@@ -159,13 +162,18 @@ export const LEGACY_RELATIONS_BY_CLASS: Record<RelationClass, readonly TurnEdgeR
  *   use             ~= extends
  *
  * `~=` and not `=`: `use` also absorbs `consume`, `grounds` and `indexes`, so
- * the mapping is onto a REPRESENTATIVE, not a bijection. Reading a new `use`
- * row back as `extends` is a deliberate interim reading, correct only because
- * the three absorbed words scored identically or not at all.
+ * the mapping is onto a REPRESENTATIVE, not a bijection.
  *
- * Ticket 05a re-keys the election weights onto (class, coverage) directly and
- * deletes this table together with its one call site (`db/citations.ts`'s
- * `attachTurnRelations`). Nothing else reads it.
+ * WHY IT IS STILL WRITTEN, now that no reader keys on it (ticket 02). The
+ * column is not decoration until the cutover rebuilds the table: storage
+ * identity is `(pair, relation, tail, head)`, and `relation IS NULL` is the
+ * BARE-ROW discriminator (`idx_memory_edges_bare_pair`, the DDL's own CHECK,
+ * and the prune/restore paths). A class edge written with no word would read as
+ * a prose reference to every one of them and would collide with the pair's
+ * existing bare row. So the fill stays, and the READS are what ticket 02
+ * removed: the word is written by exactly one call site
+ * (`db/citations.ts`'s `attachTurnRelations`) and read by exactly one accessor
+ * (`edgeRelationClass` below, plus its SQL form) as the legacy bridge.
  */
 export const INTERIM_LEGACY_RELATION: ReadonlyArray<{
   relationClass: RelationClass;
@@ -179,10 +187,10 @@ export const INTERIM_LEGACY_RELATION: ReadonlyArray<{
 ]);
 
 /**
- * INTERIM (ticket 05a): the storage word a new (class, coverage) write lands
- * under. Throws rather than guessing — every caller has already validated the
- * pairing through `checkRelationCoverage` below, so an unmapped combination is
- * a programming error, not user input.
+ * The storage word a new (class, coverage) write lands under. Throws rather
+ * than guessing — every caller has already validated the pairing through
+ * `checkRelationCoverage` below, so an unmapped combination is a programming
+ * error, not user input.
  */
 export function interimLegacyRelation(
   relationClass: RelationClass,
@@ -230,6 +238,34 @@ export function edgeRelationClass(
     return null;
   }
   return LEGACY_RELATION_CLASS[row.relation as TurnEdgeRelation] ?? null;
+}
+
+/**
+ * `edgeRelationClass`, EXPRESSED AS SQL — "this row resolves to a relation
+ * class", for a loader that has to narrow in the database rather than in JS
+ * (main-agent-edges ticket 02).
+ *
+ * It exists so that no OTHER file has to spell a retired word. Every loader
+ * that used to write `relation IN ('override', 'narrows', …)` — the election
+ * feed, the frontier, the lane checker's passes — calls this instead, and the
+ * word list is generated from the SAME table the accessor above reads, so the
+ * SQL and the JS cannot disagree about which rows carry a class.
+ *
+ * Two arms, mirroring the accessor exactly: a row with a stored CLASS
+ * qualifies on the class alone; a row without one qualifies iff its stored
+ * word maps to a class. The second arm is the migration bridge and disappears
+ * with the column (spec D1) — at which point this collapses to the first arm
+ * and every caller keeps compiling.
+ */
+export function relationClassBearingSql(alias: string): string {
+  const classes = RELATION_CLASSES.map((value) => `'${value}'`).join(", ");
+  const words = (Object.keys(LEGACY_RELATION_CLASS) as TurnEdgeRelation[])
+    .map((word) => `'${word}'`)
+    .join(", ");
+  return (
+    `(${alias}.relation_class IN (${classes}) OR ` +
+    `(COALESCE(${alias}.relation_class, '') = '' AND ${alias}.relation IN (${words})))`
+  );
 }
 
 /**

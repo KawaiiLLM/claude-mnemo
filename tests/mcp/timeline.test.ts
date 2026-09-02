@@ -1403,9 +1403,11 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
   });
 
   it("no admission cut left (page-budget-is-the-seat-count spec, decision 1): `kept` is every candidate, re-sorted to TIME order for display (spec step 5) — `ranked` alone still carries election-rank order, never score order for DISPLAY", () => {
-    // Two untagged-indexes releases (tier 1): T5 has the higher in-degree via
-    // a third turn's `grounds`, so it OUTRANKS T2 despite being earlier — but
-    // `kept` (the display set) is unbounded now and always chronological.
+    // Three citers under the heuristic score (main-agent-edges D2). Rank is
+    // out-degree + class weight + recency, so the three turns that WROTE an
+    // edge lead the two that only received one, ordered among themselves by
+    // recency — and `kept` (the display set) is unbounded and chronological
+    // whatever the ranking says.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(5, "design"), w(6, "design")];
     const laneEdges = [
       laneEdge(2, "indexes", 1),
@@ -1415,37 +1417,29 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
     // Membership: every non-excluded window turn, no cut.
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 5, 6]);
-    // Election rank (best first): T5 (tier ①, in-degree 1 via T3's `grounds`)
-    // outranks T2 (tier ①, in-degree 0); T6/T1 are tier ③ (indexed by an
-    // elected tier-①/② node), T6 later so it outranks T1; T3 (tier ⑤, cites
-    // but is cited by nobody) ranks last.
-    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([5, 2, 6, 1, 3]);
+    // Election rank (best first): the three citers T5, T3 and T2 each score
+    // one out-edge plus one `use` weight, so recency separates them (T5 > T3 >
+    // T2); T6 and T1 wrote nothing and hold the recency term alone.
+    expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([5, 3, 2, 6, 1]);
     // `kept`'s own `score` field still recovers this exact rank order
     // (`compareMilestoneRank`) — the render-time budget fitter's own
     // degradation order reads it, never `kept`'s chronological position.
     const byRank = [...result.kept].sort((a, b) => b.score - a.score);
-    expect(byRank.map((row) => row.turn.promptNumber)).toEqual([5, 2, 6, 1, 3]);
+    expect(byRank.map((row) => row.turn.promptNumber)).toEqual([5, 3, 2, 6, 1]);
   });
 
-  it("edgeless window: every candidate is tier ③ (type-decision — every fixture row is typed \"design\"), so election RANK is pure recency (the LATER-turn tiebreak alone) — the module's own emergent recency, no special case. Admission is unbounded (decision 1): `kept` is all four, chronological", () => {
-    // phase-connectivity ticket 03 (arm C): a design/correction-typed turn
-    // qualifies for tier ③ regardless of edges, so this fixture's zero-degree
-    // "everything ties, recency alone decides" property now surfaces at tier
-    // ③ rather than the pre-ticket ⑤ — the RANKING is unchanged (every row
-    // still ties on tier and degree, so recency alone still orders them),
-    // only the tier NUMBER moved.
+  it("edgeless window: every score is the recency term plus the same `design` type weight, so RANK is pure recency — the formula's own emergent behaviour, no special case. Admission is unbounded: `kept` is all four, chronological", () => {
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges: [] });
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 4]);
-    expect(result.kept.every((row) => row.tier === 3)).toBe(true);
     // Rank order (best first) is the LATER turn winning every tie: recency.
     expect(result.ranked.map((row) => row.turn.promptNumber)).toEqual([4, 3, 2, 1]);
   });
 
   it("↳ addresses list every cited turn that is a SELECTION candidate (page-budget-is-the-seat-count spec, decision 1: every window turn is a candidate now — only a rolled-back/skipped/compact turn is never cited)", () => {
-    // T4 used to win its seat as a lane TERMINUS (tier 2). Tier ② seats nobody
-    // since lane-state-retirement ticket 01, so the fixture gives T4 the seat
-    // its own way: one extra UNSETTLED `indexes` makes it a tier-① release.
+    // T4 is the only turn that writes anything here, so the score puts it on
+    // top on its own out-degree — the tier machinery this fixture used to
+    // navigate (terminus, then release) is gone.
     const rows = [w(1, "design"), w(2, "design"), w(3, "design"), w(4, "design")];
     const laneEdges = [
       laneEdge(4, "extends", 1, ["x"]),
@@ -1470,7 +1464,7 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     // No admission cut left: every window turn is kept.
     expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([1, 2, 3, 4]);
     const row4 = result.kept.find((row) => row.turn.promptNumber === 4)!;
-    expect(row4.tier).toBe(1);
+    expect(result.ranked[0]!.turn.promptNumber).toBe(4);
     // T4's own `extends`+`indexes` edges onto T1 (edge-read-surface spec,
     // ticket 01) both name T1, so the pair renders one address with both
     // words, alphabetical. T2 and T3 each carry their own single `grounds`
@@ -1540,18 +1534,15 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
  * itself.
  */
 describe("S-view and E-view integration — golden nine (milestone-election spec, ticket 03)", () => {
-  // RE-BASELINED AGAIN BY lane-state-retirement TICKET 02, which gives tier ②
-  // its replacement rule ("this node declares an `index`", any tag state,
-  // decision 1) after ticket 01 left it seating nobody. Measured, not chosen:
-  // it lands back on the SAME nine ids the fixture carried before ticket 01
-  // ever ran (two tier-① releases plus seven tier-② seats) — every node that
-  // used to win "closed lane terminus" on this fixture also writes an
-  // `indexes` edge itself, so the node-level rule recovers the same set for a
-  // different reason (`declares-index`, never `closed-terminus`). Ticket 01's
-  // interim baseline, `[945, 946, 970, 972, 982, 989, 992, 998, 1001]`, is
-  // superseded — `tests/shared/milestone-election.test.ts` carries the same
-  // re-baseline, with the per-node accounting, at the pure-core seam.
-  const GOLDEN_NINE = [922, 929, 939, 946, 981, 984, 990, 998, 1001];
+  // RE-BASELINED BY main-agent-edges TICKET 02, which replaces the tier ladder
+  // with a heuristic score. Measured, not chosen: SEVEN of the ladder's nine
+  // survive; `922` leaves (it seated on a tier predicate, and its two
+  // out-edges do not reach the cut under a magnitude) and `913` enters (five
+  // out-edges, 3.5 of class weight and a `design` type — the shape the ladder
+  // structurally could not seat). `tests/shared/milestone-election.test.ts`
+  // carries the same set with the per-term accounting at the pure-core seam,
+  // and names the delta as an EXPECTED change rather than an equivalence.
+  const GOLDEN_NINE = [913, 929, 939, 946, 981, 984, 990, 998, 1001];
   const FIXTURE_BASE = 1_800_000_000;
 
   interface GoldenFixture {
@@ -4356,15 +4347,19 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
     expect(view.pagedMilestones).toHaveLength(6);
 
     // A tight `pageBudget` is what narrows the RENDERED set now — measured
-    // against this fixture: budget 222 (honest-token-pricing ticket 04
-    // re-measured; was 620 under the old diary weights) seats exactly the
-    // top two by election rank (T2, then T5, which cites T2).
+    // against this fixture: budget 222 seats exactly the top two by election
+    // rank. Under main-agent-edges D2's heuristic score those are T3 and T5
+    // (the two turns with the most outgoing weight); the tier ladder used to
+    // put T2 there.
     const out = renderTimeline(view, { pageBudget: 222 });
     expect(spinePromptNumbers(out)).toHaveLength(2);
-    expect(spinePromptNumbers(out)).toEqual([2, 5]);
-    // T5's `↳ T2` antecedent renders too — decision 5: it may only cite a row
-    // that ALSO survives this same render, and T2 (rank 1) does.
-    expect(pulledRowLines(out).length).toBeGreaterThan(0);
+    expect(spinePromptNumbers(out)).toEqual([3, 5]);
+    // Decision 5 still holds: a `↳` line may only name a row that ALSO
+    // survives this same render, so every antecedent address printed here
+    // belongs to one of the two seated rows.
+    for (const line of pulledRowLines(out)) {
+      expect(line).toMatch(/T[35]\b/);
+    }
   });
 
   it("renders +N more as a sparse min..max, not a contiguous range", () => {

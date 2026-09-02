@@ -117,12 +117,20 @@ describe("selectLandingTurnIds — the obligation anchor is exactly the ids hand
 });
 
 describe("loadBasisReachabilityClosure — commit-valid, cross-lane/task, out-of-window basis endpoints", () => {
-  test("DRAFT edges (either side unsettled) do not carry the walk", () => {
+  // INVERTED (main-agent-edges spec D2, "node readers made side-blind"). This
+  // pinned the OLD `tail_tag <> '' AND head_tag <> ''` filter: an edge nobody
+  // had fully attributed did not carry the walk. Phase connectivity is a
+  // question about NODES — did this basis reach that landing — and an edge is a
+  // fact about two nodes; whether a writer got round to naming a lane on it has
+  // nothing to do with whether the reasoning travelled. Under resolution most
+  // edges carry no declaration at all, so the old filter would have reported
+  // most bases unreachable for a reason that is not about reachability.
+  test("a half-declared edge CARRIES the walk — attribution is not a node fact", () => {
     const conn = db();
     const sessionId = seedSession(conn, "draft-exclusion");
     const landing = insertTurn(conn, sessionId, 1, ["fix"]);
     const basis = insertTurn(conn, sessionId, 2, ["design"]);
-    // A draft: only the tail side placed.
+    // Only the tail side placed — what used to be excluded as a "draft".
     writeMemoryEdges(
       conn,
       [
@@ -140,7 +148,7 @@ describe("loadBasisReachabilityClosure — commit-valid, cross-lane/task, out-of
     const closure = loadBasisReachabilityClosure(conn, [landing]);
     const { types, graph } = closureAsPhaseConnectivityInput(closure);
     const [finding] = evaluatePhaseConnectivity([landing], types, graph);
-    expect(finding!.outcome).toBe("unreached");
+    expect(finding!.outcome).not.toBe("unreached");
     conn.close();
   });
 

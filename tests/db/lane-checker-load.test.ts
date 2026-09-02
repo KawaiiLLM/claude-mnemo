@@ -582,10 +582,13 @@ describe("named-lanes scope", () => {
       laneKeys: [{ segment: DEFAULT_SEGMENT, tag: "homeless-lane" }],
     });
 
-    expect(projection.edges).toHaveLength(1);
-    expect(projection.turns.map((turn) => turn.id).sort((a, b) => a - b)).toEqual(
-      [t1, t2].sort((a, b) => a - b),
-    );
+    // main-agent-edges spec D2: a HOMELESS endpoint has no owning task, so it
+    // is qualified in no lane and its side resolves to none — the sentinel
+    // lane can hold nothing. The old loader reached this row by its STORED
+    // side word alone, which was the last residue of the edge-derived
+    // membership reading ticket 10 had already retired everywhere else.
+    expect(projection.edges).toHaveLength(0);
+    expect(projection.turns).toEqual([]);
   });
 
   test("an unmatched lane (no edge carries that exact tag set) resolves empty, not an error", () => {
@@ -718,7 +721,7 @@ describe("law 8 -- rolled-back excluded, skipped dormant", () => {
 });
 
 describe("supplementary widening: cross-phase citedness, override, and the component neighbourhood", () => {
-  test("an external grounds citation into a lane member is loaded (report 1 citedness)", () => {
+  test("an external grounds citation into a lane member is loaded (the supplementary widening)", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { type: ["design"] });
     const t2 = insertTurn(sessionId, 2, { type: ["design"] });
@@ -733,10 +736,15 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
       promptEnd: 2,
     });
 
-    const result = checkLanes(projection.turns, projection.edges);
-    expect(result.lanes[0]!.citedness.groundsFromNonMembers).toEqual([
-      { citingId: outside, citedId: t1 },
-    ]);
+    // main-agent-edges spec D2 deleted `citedness.groundsFromNonMembers` with
+    // the three-bucket split it belonged to. What this test was ACTUALLY about
+    // — that the supplementary pass widens far enough to carry an external
+    // citation into a lane member — is asserted on the projection itself,
+    // where it is a fact about the loader rather than about a retired report.
+    expect(
+      projection.edges.some((edge) => edge.citingId === outside && edge.citedId === t1),
+    ).toBe(true);
+    expect(projection.turns.map((turn) => turn.id)).toContain(outside);
     assertNoDanglingEdges(projection);
   });
 
@@ -749,7 +757,7 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
   // proves the existing widening already carries it end to end into
   // `citedness.usedFromNonMembers`, the same way the grounds test above
   // proves it for `citedness.groundsFromNonMembers`.
-  test("an external consume citation into a lane member is loaded (report 1 used[])", () => {
+  test("an external consume citation into a lane member is loaded (the supplementary widening)", () => {
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { type: ["design"] });
     const t2 = insertTurn(sessionId, 2, { type: ["design"] });
@@ -768,10 +776,12 @@ describe("supplementary widening: cross-phase citedness, override, and the compo
       promptEnd: 2,
     });
 
-    const result = checkLanes(projection.turns, projection.edges);
-    expect(result.lanes[0]!.citedness.usedFromNonMembers).toEqual([
-      { citingId: outside, citedId: t1 },
-    ]);
+    // Same disposition as the `grounds` sibling above: the bucket is gone, the
+    // widening it proved is asserted directly.
+    expect(
+      projection.edges.some((edge) => edge.citingId === outside && edge.citedId === t1),
+    ).toBe(true);
+    expect(projection.turns.map((turn) => turn.id)).toContain(outside);
     assertNoDanglingEdges(projection);
   });
 
@@ -1023,13 +1033,22 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
       promptStart: 1,
       promptEnd: 2,
     });
-    // None of the OTHER passes ever surface `supersedes` on their own (they
-    // filter to specific IN-vocabulary relation lists, or require tags,
-    // which a frozen-legacy relation never carries), and it is deliberately
-    // kept off `projection.edges` itself (that field's own doc comment) —
-    // this projection carries it ONLY on its own separate field.
+    // None of the OTHER passes ever surface `supersedes` on their own (every
+    // one of them filters to rows that carry a relation CLASS, which a
+    // frozen-legacy word does not), and it is deliberately kept off
+    // `projection.edges` itself (that field's own doc comment) — this
+    // projection carries it ONLY on its own separate field. Its SIDES are
+    // resolved like any other row's (main-agent-edges D2), so a row whose
+    // endpoints are uniquely laned reports the lane it derives even while its
+    // WORD keeps it out of every graph.
     expect(projection.outOfVocabularyEdges).toEqual([
-      { citingId: t2, citedId: t1, relation: "supersedes", tailTag: "", headTag: "" },
+      expect.objectContaining({
+        citingId: t2,
+        citedId: t1,
+        relation: "supersedes",
+        tailTag: "ownership",
+        headTag: "ownership",
+      }),
     ]);
     expect(
       projection.edges.some((edge) => edge.citingId === t2 && edge.citedId === t1 && edge.relation === "supersedes"),
@@ -1041,9 +1060,10 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
       count: 1,
       entries: [{ citingId: t2, citedId: t1, relation: "supersedes" }],
     });
-    // Never admitted: the lane's own tagged-edge tally is exactly the
-    // extends+indexes pair, no `supersedes` key at all.
-    expect(result.lanes[0]!.edgeCountsByRelation).toEqual({ extends: 1, indexes: 1 });
+    // Never admitted: the lane's own attributed-edge tally is exactly the
+    // extends+indexes pair — two `use` rows since main-agent-edges ticket 02
+    // counts by CLASS — and no `supersedes` key at all.
+    expect(result.lanes[0]!.edgeCountsByRelation).toEqual({ use: 2 });
   });
 
   // T1466 (finding P1-1) narrowed this claim rather than dropping it: a
@@ -1217,11 +1237,13 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
       ),
     ).toBe(true);
     const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
-    // E1 fired on the WORD; ticket 20's E6 fires on the SHAPE (an empty side),
-    // so the untagged row is an error again — but as a DRAFT anchored at its
-    // citing turn, identically for all seven words, and the two TAGGED rows
-    // beside it stay clean.
-    expect(errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([`E6:${t3}`]);
+    // E1 fired on the WORD; ticket 20's E6 fired on the SHAPE (an empty side).
+    // main-agent-edges spec D6 narrows E6 once more, to the AMBIGUOUS side —
+    // "a blank side whose endpoint has ≥2 lanes". These endpoints are in one
+    // lane or none, so the blank side derives (or names nothing) and there is
+    // nothing for a writer to declare: no finding. The row is still LOADED,
+    // which is the loader property this test exists for.
+    expect(errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([]);
   });
 });
 
@@ -1270,13 +1292,15 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
       laneKeys: [{ segment: String(segmentId), tag: "a" }],
     });
     // WIDEN's own answer is the {a} row, with both sides settled to `a`.
-    expect(laneA.edges).toContainEqual({
-      citingId: a2,
-      citedId: a1,
-      relation: "extends",
-      tailTag: "a",
-      headTag: "a",
-    });
+    expect(laneA.edges).toContainEqual(
+      expect.objectContaining({
+        citingId: a2,
+        citedId: a1,
+        relation: "extends",
+        tailTag: "a",
+        headTag: "a",
+      }),
+    );
     // The unrelated {x} lane never leaks in — the precision property this
     // block exists for. (The sibling {b} row on the SAME pair DOES appear,
     // but not through WIDEN: it is a stance edge between two turns already
@@ -1403,13 +1427,15 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
 
     const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
     expect(projection.involvedLaneKeys.map((k) => k.tag)).toEqual(["x"]);
-    expect(projection.edges).toContainEqual({
-      citingId: t2,
-      citedId: t1,
-      relation: "grounds",
-      tailTag: "x",
-      headTag: "x",
-    });
+    expect(projection.edges).toContainEqual(
+      expect.objectContaining({
+        citingId: t2,
+        citedId: t1,
+        relation: "grounds",
+        tailTag: "x",
+        headTag: "x",
+      }),
+    );
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
     const lane = result.lanes.find((l) => l.key.tag === "x")!;
@@ -1525,7 +1551,13 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
 
     expect(projection.outOfVocabularyEdges).toEqual([
-      { citingId: seedTurn, citedId: external, relation: "supersedes", tailTag: "", headTag: "" },
+      expect.objectContaining({
+        citingId: seedTurn,
+        citedId: external,
+        relation: "supersedes",
+        tailTag: "",
+        headTag: "",
+      }),
     ]);
     // The endpoint is JOINED IN rather than left dangling — the same
     // invariant every other pass holds. (It becomes a judgable row in its own
@@ -1632,9 +1664,11 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
   // stance edge is a `LANE_COMPONENT_RELATIONS` bridge and is ticket 09's
   // unattributed-cluster domain, so it must still reach the projection. This
   // test now asserts exactly that, plus WHICH error the row raises: since
-  // ticket 20 it is E6, the draft class, which fires on the empty SIDE rather
-  // than on the word — the loader property is what makes it reachable at all.
-  test("a pure untagged extends among laneless, tagless turns still reaches the projection, and raises E6", () => {
+  // ticket 20 it was E6, the draft class, which fires on the empty SIDE rather
+  // than on the word; main-agent-edges D6 then narrowed E6 to the ambiguous
+  // side, so on lane-less stock the row raises nothing — the loader property
+  // is what makes it reachable at all.
+  test("a pure untagged extends among laneless, tagless turns still reaches the projection, and raises NOTHING", () => {
     const sessionId = seedSession("e1-stock");
     const a = insertTurn(sessionId, 1, { type: ["design"] });
     const b = insertTurn(sessionId, 2, { type: ["design"] });
@@ -1649,9 +1683,11 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
     expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "extends")).toBe(true);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    // Ticket 20: the row raises E6 (a DRAFT edge) and nothing else — no E1
-    // successor, no E4, and the turns themselves stay clean.
-    expect(result.errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([`E6:${b}`]);
+    // Ticket 20 made the row E6 (a DRAFT edge); main-agent-edges D6 narrows E6
+    // to the AMBIGUOUS side, and a LANE-LESS endpoint is not ambiguous — there
+    // is nothing to choose between. The row raises nothing at all, and the
+    // loader property (it reaches the projection) is what this test pins.
+    expect(result.errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual([]);
   });
 
   test("an edge-less laneless window still loads its own seed turns, so a legacy type fires E3", () => {
@@ -1944,11 +1980,19 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
     crossLaneEdge(t2, t1, "extends", "a", "b");
 
     const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [t1, t2] });
-    // `me.tags != '[]'` is FALSE for this row: discovery finds it only
-    // because `tail_tag <> '' OR head_tag <> ''` is TRUE.
+    // Neither column decides this any more (main-agent-edges D2): discovery
+    // loads every class-carrying edge incident to the seed and RESOLVES each
+    // side, so a row the merged `tags` set could not describe reaches both its
+    // lanes through its own declarations.
     expect(projection.involvedLaneKeys.map((k) => k.tag).sort()).toEqual(["a", "b"]);
     expect(projection.edges).toEqual([
-      { citingId: t2, citedId: t1, relation: "extends", tailTag: "a", headTag: "b" },
+      expect.objectContaining({
+        citingId: t2,
+        citedId: t1,
+        relation: "extends",
+        tailTag: "a",
+        headTag: "b",
+      }),
     ]);
     assertNoDanglingEdges(projection);
 
@@ -1976,7 +2020,7 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
         laneKeys: [{ segment: String(segmentId), tag }],
       });
       expect(named.edges).toHaveLength(1);
-      expect(named.edges[0]).toEqual({
+      expect(named.edges[0]).toMatchObject({
         citingId: t2,
         citedId: t1,
         relation: "extends",

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { resolveEraCutoff } from "../db/era";
+import { edgeRelationClass } from "../shared/relation-class";
 import {
   ackClaimedImpressionDebts,
   claimOpenImpressionDebtsForSegments,
@@ -402,9 +403,27 @@ function computeAnchorInvalidations(
   const turnLookup = db.query<{ id: number }, [number, number]>(
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
   );
-  const relationLookup = db.query<{ citingId: number }, [number, string]>(
-    `SELECT citing_id AS citingId FROM memory_edges
-      WHERE cited_kind = 'turn' AND cited_id = ? AND relation = ?
+  // BY CLASS AND COVERAGE (main-agent-edges pinned decision P4), keyed off the
+  // ONE accessor so a row written under either vocabulary answers the same.
+  //
+  // THE TWO LISTS STAY APART, and that is the whole care this rewrite needs:
+  // `overridden` drives a HARD refusal of a `retain` decision, `narrowed` is an
+  // advisory warning. `override` and `narrows` are `correct/full` and
+  // `correct/partial` exactly — one source word each — so collapsing them into
+  // one "class is correct" predicate would silently promote every PARTIAL
+  // correction into the hard refusal. Each list keeps precisely its old
+  // membership.
+  //
+  // One scan per anchor, partitioned in memory, where it used to run the
+  // lookup twice.
+  const relationLookup = db.query<
+    { citingId: number; relation: string | null; relationClass: string | null; relationCoverage: string | null },
+    [number]
+  >(
+    `SELECT citing_id AS citingId, relation AS relation,
+            relation_class AS relationClass, relation_coverage AS relationCoverage
+       FROM memory_edges
+      WHERE cited_kind = 'turn' AND cited_id = ?
         AND citing_kind = 'turn'`,
   );
   const seenOverridden = new Set<string>();
@@ -415,15 +434,31 @@ function computeAnchorInvalidations(
       continue;
     }
     const address = `S${anchor.sessionId}/T${anchor.promptNumber}`;
-    const hitsWindow = (relation: string): boolean =>
-      relationLookup
-        .all(row.id, relation)
-        .some((edge) => writableTurnIds.has(edge.citingId));
-    if (!seenOverridden.has(address) && hitsWindow("override")) {
+    let hitsFull = false;
+    let hitsPartial = false;
+    for (const edge of relationLookup.all(row.id)) {
+      if (!writableTurnIds.has(edge.citingId)) {
+        continue;
+      }
+      const resolved = edgeRelationClass({
+        relation: edge.relation,
+        relationClass: (edge.relationClass ?? "") as never,
+        relationCoverage: (edge.relationCoverage ?? "") as never,
+      });
+      if (resolved === null || resolved.relationClass !== "correct") {
+        continue;
+      }
+      if (resolved.relationCoverage === "full") {
+        hitsFull = true;
+      } else if (resolved.relationCoverage === "partial") {
+        hitsPartial = true;
+      }
+    }
+    if (!seenOverridden.has(address) && hitsFull) {
       seenOverridden.add(address);
       overridden.push(address);
     }
-    if (!seenNarrowed.has(address) && hitsWindow("narrows")) {
+    if (!seenNarrowed.has(address) && hitsPartial) {
       seenNarrowed.add(address);
       narrowed.push(address);
     }

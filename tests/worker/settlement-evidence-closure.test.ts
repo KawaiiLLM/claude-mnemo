@@ -59,11 +59,19 @@ interface EvidenceFixture {
 }
 
 /**
- * One segment, one declared lane, two DRAFT edges of the same shape — one
+ * One segment, TWO declared lanes, two DRAFT edges of the same shape — one
  * written from a lookback turn long ago, one from the window itself. Both are
- * error class E6 ("neither side names a lane"), both anchor at their CITING
- * turn, and both citing turns are in the writable set. The ONLY thing that
- * separates them is where their prompt number falls.
+ * error class E6, both anchor at their CITING turn, and both citing turns are
+ * in the writable set. The ONLY thing that separates them is where their
+ * prompt number falls.
+ *
+ * TWO lanes, not one (main-agent-edges spec D6). E6 is "a blank side whose
+ * endpoint has ≥2 lanes" now — a blank side on a uniquely-laned endpoint
+ * DERIVES its lane and is not a finding, because there is nothing for a writer
+ * to choose between. Every member here therefore carries both `beta` and
+ * `gamma`, which is what makes the two draft edges genuinely unattributable
+ * and keeps this fixture's subject (WHERE an error anchors, not WHICH errors
+ * exist) intact.
  */
 function seedEvidenceFixture(db: Database): EvidenceFixture {
   const sessionDbId = upsertSession(db, {
@@ -96,11 +104,11 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
       )!.id;
   }
 
-  const evidenceRoot = insertTurn(898, ["evidence-task", "beta"]);
-  const lookbackCited = insertTurn(899, ["evidence-task", "beta"]);
-  const lookbackTurn = insertTurn(900, ["evidence-task", "beta"]);
-  const w1 = insertTurn(1000, ["evidence-task", "beta"]);
-  const w2 = insertTurn(1001, ["evidence-task", "beta"]);
+  const evidenceRoot = insertTurn(898, ["evidence-task", "beta", "gamma"]);
+  const lookbackCited = insertTurn(899, ["evidence-task", "beta", "gamma"]);
+  const lookbackTurn = insertTurn(900, ["evidence-task", "beta", "gamma"]);
+  const w1 = insertTurn(1000, ["evidence-task", "beta", "gamma"]);
+  const w2 = insertTurn(1001, ["evidence-task", "beta", "gamma"]);
 
   const segmentId = createSegment(db, {
     title: "evidence closure fixture",
@@ -109,6 +117,7 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
   }).id;
   addSegmentMembers(db, segmentId, [evidenceRoot, lookbackCited, lookbackTurn, w1, w2], NOW);
   insertLane(db, segmentId, "beta", NOW);
+  insertLane(db, segmentId, "gamma", NOW);
 
   const draft = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },

@@ -1,17 +1,16 @@
 import type { Database } from "bun:sqlite";
 
-import { EDGE_RELATIONS } from "../shared/turn-phase";
+import { relationClassBearingSql } from "../shared/relation-class";
 import { liveTurnSql } from "./turn-liveness";
 import type { PhaseConnectivityGraph, PhaseConnectivityOutEdge } from "../shared/phase-connectivity";
 
 /**
  * The basis-reachability DB adapter (phase-connectivity ticket 01,
  * prerequisite 1: "A dedicated basis-reachability loader"). Patching
- * `db/lane-checker-load.ts`'s `loadTaggedEdgesTouching` would emit false
- * ERRORs: that loader excludes edges with BOTH sides `''` and loads only
- * lanes discovered from a fixed seed, while the walk needs every live,
- * IN-VOCABULARY, BOTH-SIDES-SETTLED out-edge from whichever node the BFS
- * frontier reaches next — a domain this loader owns and nothing else does.
+ * `db/lane-checker-load.ts`'s own loaders would emit false ERRORs: they load
+ * only lanes discovered from a fixed seed, while the walk needs every live,
+ * class-carrying out-edge from whichever node the BFS frontier reaches next —
+ * a domain this loader owns and nothing else does.
  *
  * DESIGN CHOICE (ticket 01 leaves the loader shape to the implementer): a
  * FIXPOINT SET LOAD, not a per-node lazy fetch with its own cycle guard. The
@@ -106,12 +105,19 @@ interface OutEdgeRow {
 }
 
 /**
- * Every live, IN-VOCABULARY, BOTH-SIDES-SETTLED out-edge from any of
- * `turnIds` — "commit-valid edges" in the ticket's own words. A draft
- * (either lane-tag side `''`, error class E6 in `shared/lane-checker.ts`)
- * does not carry the walk: `me.tail_tag <> '' AND me.head_tag <> ''` is that
- * exclusion, applied here rather than trusted to a caller, so this loader's
- * output needs no second filter before the pure module ever sees it.
+ * Every live, CLASS-CARRYING out-edge from any of `turnIds`.
+ *
+ * THE BOTH-SIDES-SETTLED FILTER IS GONE (main-agent-edges spec D2, "node
+ * readers made side-blind"). Phase connectivity is a question about NODES —
+ * did this basis reach that landing — and an edge is a fact about two nodes;
+ * whether some writer got round to naming a lane on it has nothing to do with
+ * whether the reasoning travelled. The old `tail_tag <> '' AND head_tag <> ''`
+ * predicate silently dropped every undeclared edge from the walk, which under
+ * resolution is most of them, so a basis could be reported unreachable purely
+ * because its edges were never attributed.
+ *
+ * The relation filter moves off the seven-word `IN` list onto the class
+ * accessor's SQL form, which keeps bare prose rows out exactly as before.
  */
 function loadOutEdgesFrom(db: Database, turnIds: readonly number[]): Map<number, PhaseConnectivityOutEdge[]> {
   const result = new Map<number, PhaseConnectivityOutEdge[]>();
@@ -119,20 +125,18 @@ function loadOutEdgesFrom(db: Database, turnIds: readonly number[]): Map<number,
     return result;
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   const rows = db
-    .query<OutEdgeRow, (number | string)[]>(
+    .query<OutEdgeRow, number[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND me.tail_tag <> '' AND me.head_tag <> ''
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...turnIds, ...EDGE_RELATIONS);
+    .all(...turnIds);
   for (const id of turnIds) {
     result.set(id, []);
   }

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
+import { relationClassBearingSql } from "../shared/relation-class";
 import {
   ensureHomelessRecordTables,
   resolveActiveHomelessDisposition,
@@ -843,7 +844,7 @@ export function computeSettlementWritableTurnIds(
            JOIN turns td ON td.id = me.cited_id
           WHERE me.citing_id IN (${placeholders})
             AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-            AND me.relation IS NOT NULL
+            AND ${relationClassBearingSql("me")}
             AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
       )
       .all(...chunk);

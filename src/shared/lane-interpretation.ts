@@ -291,12 +291,43 @@ export const UNSETTLED_LANE_TAG = "";
  * attributed at all" questions, and why membership goes through
  * `laneMembershipClaims` instead.
  */
+/**
+ * How ONE side of an edge attributes to a lane (main-agent-edges spec D2).
+ * Mirrors `db/edge-side-resolution.ts`'s `EdgeSideOutcome` verbatim,
+ * redeclared here so this module stays free of any DB-layer dependency — the
+ * same convention `UNSETTLED_LANE_TAG` already follows for
+ * `db/memory-edges.ts`'s `UNSETTLED_SIDE_TAG`.
+ */
+export type LaneSideOutcome = "declared" | "derived" | "ambiguous" | "none" | "invalid";
+
 export interface LaneEdgeInput {
   citingId: number;
   citedId: number;
   relation: string;
+  /**
+   * The lane this side ATTRIBUTES to (main-agent-edges D2), `''` for a side
+   * that attributes to none.
+   *
+   * It used to be the row's STORED word and nothing else. Since resolution it
+   * is what a DB loader resolved — the declaration when the row declares one,
+   * the endpoint's single lane when it does not — so 69% of edges reach their
+   * lane with no writer having said so. A pure fixture that states a tag here
+   * and supplies no outcome is stating a declared side, which is exactly what
+   * it always meant.
+   */
   tailTag: string;
   headTag: string;
+  /**
+   * The RESOLVED outcome per side, supplied by a DB loader. ABSENT on a pure
+   * fixture, and every reader that keys on it falls back to reading the tag
+   * alone in that case — so a fixture written before resolution keeps its
+   * exact old meaning.
+   */
+  tailOutcome?: LaneSideOutcome;
+  headOutcome?: LaneSideOutcome;
+  /** The side's STORED declaration, verbatim (`''` = undeclared) — what an `invalid` finding has to NAME. Absent on a fixture, where `tailTag`/`headTag` are themselves the stored values. */
+  storedTailTag?: string;
+  storedHeadTag?: string;
   /**
    * relation-vocabulary-v13 ticket 02: the row's stored three-class value, when
    * the loader read it. OPTIONAL and absent-means-unclassified, so every

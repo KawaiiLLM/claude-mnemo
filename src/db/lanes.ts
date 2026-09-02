@@ -1,7 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
+import { loadEndpointLaneFacts } from "./edge-side-resolution";
 import { foldLaneImpressionIntoSurvivor } from "./impressions";
+import { normalizeIncidentAttribution } from "./normalize-incident-attribution";
 import {
   isEdgeProvenance,
   rankEdgeProvenance,
@@ -638,12 +640,31 @@ export function mergeLaneTag(
     }
     memberWrites.push({ turnId: turn.id, tags: next });
   }
+  // THE PRE-STATE, before the first tag moves — the OLD half of the old/new
+  // qualified lane touch pair (main-agent-edges D2: `E1/#alpha` -> `E2/#alpha`
+  // leaves work owed in BOTH).
+  const previousLaneFacts = loadEndpointLaneFacts(
+    db,
+    memberWrites.map((write) => write.turnId),
+  );
   // THE MEMBERSHIP PRIMITIVE (settlement-read-once spec D4), `normal`: it
   // writes the tags, STAMPS the `tags` field, and derives — where this loop
   // used to raw-`UPDATE turns SET tags` and stamp nothing, so a lane merge
   // moved a turn's tags underneath a writer holding a read grant on them and
   // that writer's next whole-set write was admitted as fresh.
-  writeMembershipTags(db, { operation: "normal", writes: memberWrites, nowEpoch });
+  //
+  // `callerNormalizesAttribution`: this verb is a COMPOUND attribution change
+  // — tags now, edge sides in step 2 — and normalising between the two halves
+  // would clear every `from` declaration as invalid (and delete the edge where
+  // its endpoint is in several lanes) a moment before the rewrite that carries
+  // the attribution across. The seam runs once at the end instead, over the
+  // finished state.
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: memberWrites,
+    nowEpoch,
+    callerNormalizesAttribution: true,
+  });
 
   // --- 1b. turns still carrying `from` after the retag (lane-merge-skip-
   //         receipt ticket 01) ---------------------------------------------
@@ -835,6 +856,17 @@ export function mergeLaneTag(
     stampTurnRelationsRevision(db, turnId, LANE_MERGE_WRITER, nowEpoch);
   }
 
+  // --- 2c. POST-NORMALISATION (main-agent-edges P2), once, over the finished
+  //         state: a declaration the fold made redundant (the endpoint is down
+  //         to one lane) is cleared, one it made untrue is cleared, and a side
+  //         nobody can attribute any more takes the seam's own subtraction.
+  //         Both the OLD and the NEW qualified lanes are recorded as touched.
+  normalizeIncidentAttribution(
+    db,
+    memberWrites.map((write) => write.turnId),
+    { writer: LANE_MERGE_WRITER, nowEpoch, previousLaneFacts },
+  );
+
   // --- 2b. the impression (lane-impressions ticket 07, ruling T2269) --------
   // BEFORE step 3, and that adjacency is the whole point: once
   // `undeclareEmptiedLane` has taken `from`'s row away there is no text left to
@@ -961,133 +993,55 @@ export interface LaneClearReceipt {
   tag: string;
   /** Member turns whose own `tags` lost this lane's word. */
   turnsCleared: number;
-  /** Edge ROWS deleted — never reverted to the unsettled sentinel (spec D5: a reverted side is residue dumped back into settlement's queue for work that just voided itself, not a clean removal). */
+  /** Stored declarations of this lane that the clear made untrue and the post-normalisation removed. */
+  declarationsCleared: number;
+  /** Edge ROWS deleted — only those the clear left UNATTRIBUTABLE (a side whose endpoint is still in several lanes with no declaration surviving). Nothing else is deleted: an edge is a fact about two nodes, and un-homing a turn does not unmake it. */
   edgesDeleted: number;
 }
 
 export type LaneClearOutcome =
   | { kind: "not-declared" }
-  | { kind: "blocked"; blockers: readonly LaneClearBlocker[] }
   | { kind: "cleared"; receipt: LaneClearReceipt };
 
-interface LaneClearEdgeRow {
-  id: number;
-  citingKind: string;
-  citingId: number;
-  citedKind: string;
-  citedId: number;
-  relation: string | null;
-  tailTag: string;
-  headTag: string;
-}
-
-interface LaneClearClassifiedEdge {
-  row: LaneClearEdgeRow;
-  status: "internal" | "cross-lane" | "half-settled";
-  otherLane: string | null;
-}
-
 /**
- * `clear`'s lane-tier primitive (spec D5/D5b): un-home every member turn
- * from this lane, then DELETE every edge row that resolves to it — never
- * revert a side to the unsettled sentinel, which spec D5 rejects as residue
- * dumped back into settlement's own queue for a decision that just voided
- * itself. `force=false` (the default) refuses outright the moment a
- * candidate row would strand a CROSS-LANE or HALF-SETTLED side, printing the
- * full list before anything is touched — the caller (`mcp/remember.ts`)
- * renders that list; this function only ever returns it.
+ * `clear`'s lane-tier primitive: un-home every member turn from this lane,
+ * then RE-RESOLVE every attribution the change touched.
  *
- * SIDE RESOLUTION REUSES `makeSideOwnershipResolver`, the same judgment
- * `mergeLaneTag` uses (spec D5, peer #4): a lane is `(segment, tag)`, so a
- * side whose STRING happens to equal `tag` but whose endpoint is owned by a
- * DIFFERENT segment is not this lane at all — it is that other segment's own
- * same-named lane, a stranger seen from here. A candidate row matching
- * NEITHER side by ownership is skipped outright: pure string coincidence
- * with someone else's lane, untouched by this call.
+ * ## What it stopped doing, and why
  *
- * BLOCKERS ARE COMPUTED BEFORE ANY WRITE, over a read-only classification
- * pass. This is what the ticket's own required fixture proves: running only
- * `force=true` cannot tell a correct cross-lane classification from a wrong
- * "internal" one, because both end with the row gone — the DIFFERENCE only
- * shows in the unforced call refusing, naming the other lane, and leaving
- * the row untouched.
+ * It used to DELETE every edge row that resolved to the lane, restore a bare
+ * prose row for any pair the deletion emptied, and refuse without `force` the
+ * moment a candidate row would strand a CROSS-LANE or HALF-SETTLED side. All
+ * three followed from the stored-side model: a side carried a lane word, so a
+ * lane going away left that word naming nothing and the row had nowhere to
+ * sit.
  *
- * BARE-ROW RESTORATION IS GONE (main-agent-edges D1). This verb used to put a
- * wordless `text-ref` row back for every pair its bulk delete emptied whose
- * citing turn's prose still named the target, so the `↳` pull-through survived
- * the clear. The wordless population is retired as a write path and deleted at
- * cutover; the prose that named the target still names it, and
- * `getEffectiveCitations` reads the prose. The relations revision stamp above
- * stays — a run holding a pre-clear grant must still be sent back to re-read.
+ * Under resolution (main-agent-edges spec D2) a lane side is an ATTRIBUTION,
+ * not a property of the row. Clearing a lane changes which lane an edge is
+ * attributed to — usually to none — and changes nothing about whether one turn
+ * corrected another. So the verb mutates attribution only
+ * (`normalizeIncidentAttribution`), and the blockers go with the deletion they
+ * were guarding: there is no longer a destructive outcome for `force` to gate.
+ * The ONE case that still subtracts is an edge the change leaves genuinely
+ * unattributable — a side whose endpoint is in two or more lanes with no
+ * declaration left — and that is the seam's own rule (T2421), receipted in
+ * `edge_attribution_receipts`.
+ *
+ * The member tags move through `writeMembershipTags` exactly as `mergeLaneTag`
+ * moves them, so the tag write is stamped and derived in one place — and it is
+ * that primitive that runs the normalisation, in this function's own
+ * transaction.
  */
 export function clearLane(
   db: Database,
   segmentId: number,
   tag: string,
   nowEpoch: number,
-  force: boolean,
 ): LaneClearOutcome {
   if (!getLane(db, segmentId, tag)) {
     return { kind: "not-declared" };
   }
 
-  const ownsSide = makeSideOwnershipResolver(db, segmentId);
-
-  const candidates = db
-    .query<LaneClearEdgeRow, [string, string]>(
-      `SELECT id,
-              citing_kind AS citingKind, citing_id AS citingId,
-              cited_kind AS citedKind, cited_id AS citedId,
-              relation, tail_tag AS tailTag, head_tag AS headTag
-         FROM memory_edges
-        WHERE tail_tag = ? OR head_tag = ?
-        ORDER BY id ASC`,
-    )
-    .all(tag, tag);
-
-  const relevant: LaneClearClassifiedEdge[] = [];
-  for (const row of candidates) {
-    const tailIsOurs = row.tailTag === tag && ownsSide(row.citingKind, row.citingId);
-    const headIsOurs = row.headTag === tag && ownsSide(row.citedKind, row.citedId);
-    if (!tailIsOurs && !headIsOurs) {
-      // Neither side is actually THIS lane — the string matched a different
-      // segment's own same-named lane (D5's headline case, seen from the
-      // segment that does not own this edge). Not ours to touch.
-      continue;
-    }
-    if (tailIsOurs && headIsOurs) {
-      relevant.push({ row, status: "internal", otherLane: null });
-      continue;
-    }
-    const otherTag = tailIsOurs ? row.headTag : row.tailTag;
-    if (otherTag === UNSETTLED_SIDE_TAG) {
-      relevant.push({ row, status: "half-settled", otherLane: null });
-      continue;
-    }
-    const otherKind = tailIsOurs ? row.citedKind : row.citingKind;
-    const otherId = tailIsOurs ? row.citedId : row.citingId;
-    const otherSegmentId = otherKind === "turn" ? getOwningSegmentId(db, otherId) : null;
-    const otherLane =
-      otherSegmentId !== null ? `E${otherSegmentId}/#${otherTag}` : `(unowned)/#${otherTag}`;
-    relevant.push({ row, status: "cross-lane", otherLane });
-  }
-
-  const blockers: LaneClearBlocker[] = relevant
-    .filter((entry) => entry.status !== "internal")
-    .map((entry) => ({
-      edgeId: entry.row.id,
-      citingAddress: resolveEdgeNodeAddress(db, entry.row.citingKind, entry.row.citingId),
-      citedAddress: resolveEdgeNodeAddress(db, entry.row.citedKind, entry.row.citedId),
-      relation: entry.row.relation,
-      kind: entry.status as "cross-lane" | "half-settled",
-      otherLane: entry.otherLane,
-    }));
-
-  if (blockers.length > 0 && !force) {
-    return { kind: "blocked", blockers };
-  }
-
-  // --- 1. member turns: strip the word --------------------------------
   const memberTurns = db
     .query<{ id: number; tags: string }, [number, string]>(
       `SELECT t.id AS id, t.tags AS tags FROM turns t
@@ -1101,9 +1055,7 @@ export function clearLane(
     )
     .all(segmentId, tag);
 
-  // Same primitive, same `normal` operation, same reason as `mergeLaneTag`'s
-  // own member loop: the tag write is stamped and derived in one place.
-  writeMembershipTags(db, {
+  const written = writeMembershipTags(db, {
     operation: "normal",
     writes: memberTurns.map((turn) => ({
       turnId: turn.id,
@@ -1112,60 +1064,18 @@ export function clearLane(
         .filter((value) => value !== tag),
     })),
     nowEpoch,
+    normalizationWriter: LANE_CLEAR_WRITER,
   });
 
-  // --- 2. edges: bulk delete, grouped by citing node for the D5b restore --
-  const dropSideTagRows = db.query<unknown, [number]>(
-    "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?",
-  );
-  const deleteEdge = db.query<unknown, [number]>("DELETE FROM memory_edges WHERE id = ?");
-
-  const emptiedByCiting = new Map<string, { citing: CitingNode; targets: EdgeNode[] }>();
-  for (const entry of relevant) {
-    const row = entry.row;
-    dropSideTagRows.run(row.id);
-    deleteEdge.run(row.id);
-    const citingKey = `${row.citingKind}:${row.citingId}`;
-    let bucket = emptiedByCiting.get(citingKey);
-    if (!bucket) {
-      bucket = {
-        citing: { kind: row.citingKind as CitingNodeKind, id: row.citingId },
-        targets: [],
-      };
-      emptiedByCiting.set(citingKey, bucket);
-    }
-    bucket.targets.push({ kind: row.citedKind as EdgeNodeKind, id: row.citedId });
-  }
-
-  // --- 2a. the relations revision (settlement-read-once ticket 00, D0) -----
-  // Same promise `mergeLaneTag` above now keeps, and the stronger case for
-  // it: this path DELETES a citing turn's relation rows outright, so a run
-  // still holding a pre-clear grant would write an edge on a set it believes
-  // still has a terminus. Stamped BEFORE step 3's bare-row restoration, which
-  // acts on the same citing turns and needs no second stamp — one revision
-  // per event, not per row.
-  for (const bucket of emptiedByCiting.values()) {
-    if (bucket.citing.kind === "turn") {
-      stampTurnRelationsRevision(db, bucket.citing.id, LANE_CLEAR_WRITER, nowEpoch);
-    }
-  }
-
-  // --- 3. D5b's bare-row restoration is DELETED (main-agent-edges D1) ------
-  // It put a wordless `text-ref` row back for every pair this clear emptied
-  // whose citing turn's prose still named the target, so that the `↳`
-  // pull-through survived. The wordless population is retired: the prose that
-  // named the target still names it, and `getEffectiveCitations` reads the
-  // prose directly. D2 additionally retires the DELETION half of this verb —
-  // a lane clear stops touching relation rows at all — which is ticket 02's
-  // rewrite of the lane lifecycle, not this ticket's.
-
+  const attribution = written.ok ? written.attribution : undefined;
   return {
     kind: "cleared",
     receipt: {
       segmentId,
       tag,
       turnsCleared: memberTurns.length,
-      edgesDeleted: relevant.length,
+      declarationsCleared: attribution?.clearedDeclarations.length ?? 0,
+      edgesDeleted: attribution?.deletedEdges.length ?? 0,
     },
   };
 }

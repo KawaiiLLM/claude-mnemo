@@ -10,7 +10,15 @@ import {
   type LaneKey,
   type LaneOrderKey,
 } from "../shared/lane-interpretation";
-import { EDGE_RELATIONS, STANCE_RELATIONS } from "../shared/turn-phase";
+import { EDGE_RELATIONS } from "../shared/turn-phase";
+import { relationClassBearingSql } from "../shared/relation-class";
+import {
+  type EdgeSide,
+  type EdgeSideResolution,
+  type EndpointLaneFacts,
+  loadEndpointLaneFacts,
+  resolveEdgeSide,
+} from "./edge-side-resolution";
 import { loadDeclaredLaneTags } from "./turn-tag-gate";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -416,15 +424,52 @@ interface EdgeLiteRow {
   citingId: number;
   citedId: number;
   relation: string;
-  /** `memory_edges.tail_tag` verbatim — the CITING side's lane, `''` when unsettled (lane-model-v12 spec D1). Since ticket 06 this is what the DISCOVERY and WIDEN passes select BY, not `tags`; it is also what the projection's consumers (the console payload, the timeline's lane chain) read. */
+  /** `memory_edges.tail_tag` verbatim — the CITING side's STORED DECLARATION, `''` when the row declares nothing. Which lane the side actually attributes to is `resolveEdgeSide`'s answer, not this (main-agent-edges spec D2). */
   tailTag: string;
-  /** `memory_edges.head_tag` verbatim — the CITED side's lane. See `tailTag`. */
+  /** `memory_edges.head_tag` verbatim — the CITED side's stored declaration. See `tailTag`. */
   headTag: string;
+  /** The stored three-class value (`''` on a pre-v13 row) — what the checker's own vocabulary gate and every by-class tally read. */
+  relationClass: string;
+  /** `full`/`partial` on a `correct` row, `''` otherwise. */
+  relationCoverage: string;
 }
 
-const CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"] as const;
-/** Same word set `lane-checker.ts`'s `SEGMENT_GRAPH_RELATIONS` reads — stance (narrows/extends) + consume + grounds. Redeclared as a plain SQL `IN` list rather than importing that constant, so this file never depends on `lane-checker.ts` (only on the pure-data types `lane-interpretation.ts` exports) — the adapter is a peer of the checker, not a wrapper around one of its internals. */
-const SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"] as const;
+/**
+ * THE SIDE RESOLVER for this loader (main-agent-edges spec D2), memoised over
+ * one projection.
+ *
+ * The three passes below (DISCOVERY, WIDEN, SUPPLEMENTARY) each need the same
+ * question answered about the same endpoints — "which lane does this side
+ * attribute to" — and each used to answer a DIFFERENT, weaker question by
+ * selecting on the stored word. One resolver, primed in batches, is what makes
+ * them agree by construction rather than by three matching SQL predicates.
+ */
+interface ProjectionSideResolver {
+  prime: (turnIds: readonly number[]) => void;
+  facts: () => ReadonlyMap<number, EndpointLaneFacts>;
+  resolve: (row: EdgeLiteRow, side: EdgeSide) => EdgeSideResolution;
+}
+
+function createProjectionSideResolver(db: Database): ProjectionSideResolver {
+  const known = new Map<number, EndpointLaneFacts>();
+  const prime = (turnIds: readonly number[]): void => {
+    const missing = [...new Set(turnIds)].filter((id) => !known.has(id));
+    if (missing.length === 0) {
+      return;
+    }
+    for (const [id, entry] of loadEndpointLaneFacts(db, missing)) {
+      known.set(id, entry);
+    }
+  };
+  return {
+    prime,
+    facts: () => known,
+    resolve: (row, side) => {
+      prime([row.citingId, row.citedId]);
+      return resolveEdgeSide(row, side, known);
+    },
+  };
+}
 
 /**
  * The cross-pass dedupe key. Since ticket 09 it mirrors the STORAGE identity
@@ -519,17 +564,18 @@ function resolveSeedTurnIds(
 }
 
 /**
- * Every live, ATTRIBUTED, relation-carrying turn-turn edge touching any of
- * `turnIds` (either endpoint) — the DISCOVERY pass's raw material.
+ * Every live, CLASS-CARRYING turn-turn edge touching any of `turnIds` (either
+ * endpoint) — the one candidate loader all three passes share.
  *
- * "Attributed" is now a SIDE fact (lane-model-v12 D1, ticket 06): at least
- * one of `tail_tag`/`head_tag` settled, i.e. not the `''` sentinel. This
- * replaces `me.tags != '[]'`, which since v12 answers a different question —
- * a cross-lane edge stores `tags = '[]'` (the merged set cannot express two
- * different ends at all, spec problem 2) and would be invisible to a
- * `tags`-keyed discovery pass while genuinely naming two lanes.
+ * THE `(tail_tag <> '' OR head_tag <> '')` PREDICATE IS GONE (main-agent-edges
+ * spec D2). It selected edges by whether a WRITER had declared a side, which
+ * on production excluded 69% of edges from their own lanes; attribution is
+ * resolved from the endpoints' own membership now, so the candidate set is
+ * "incident to these turns" and the resolver decides the rest. The relation
+ * filter likewise moved off the seven words onto the class accessor's own SQL
+ * form, so a bare prose row is still excluded and no word is named here.
  */
-function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
+function loadClassEdgesTouching(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
   if (turnIds.length === 0) {
     return [];
   }
@@ -537,77 +583,18 @@ function loadTaggedEdgesTouching(db: Database, turnIds: readonly number[]): Edge
   return db
     .query<EdgeLiteRow, number[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND (me.tail_tag <> '' OR me.head_tag <> '')
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
     .all(...turnIds, ...turnIds);
-}
-
-/**
- * Every live, relation-carrying turn-turn edge anywhere in the database with
- * `tag` on EITHER SIDE — the WIDEN pass (lane-model-v12 D1, ticket 06). The
- * index is `memory_edge_side_tags` (`(side, tag, edge_row_id)`), not
- * `memory_edge_tags`: the two agree row-for-row on today's stock, where a
- * single-tag write puts the same tag on both sides, and disagree on exactly
- * the two shapes v12 introduced — a CROSS-LANE row (`tags = '[]'`, so the
- * old index holds nothing for it, yet both sides are settled and it names
- * two lanes) and a legacy MULTI-TAG row (the old index holds every tag,
- * while `deriveSideTags` leaves both sides unsettled because the two-sided
- * model has no single-valued form for it — spec M-A splits those into one
- * row per tag).
- *
- * Both sides are loaded here and the SIDE is discriminated by the caller's
- * own segment filter (`loadLaneCheckScope`'s WIDEN block), which needs the
- * row anyway to decide whether the tail's segment or the head's is the lane
- * being asked about.
- */
-function loadEdgesForTag(db: Database, tag: string): EdgeLiteRow[] {
-  return db
-    .query<EdgeLiteRow, [string]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_side_tags WHERE tag = ?)
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
-    )
-    .all(tag);
-}
-
-/** Every live turn-turn edge touching any of `turnIds` (either endpoint) whose relation is one of `relations` — the SUPPLEMENTARY pass (cross-phase citedness, untagged override, the component neighbourhood). */
-function loadEdgesByRelationTouching(
-  db: Database,
-  turnIds: readonly number[],
-  relations: readonly string[],
-): EdgeLiteRow[] {
-  if (turnIds.length === 0 || relations.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = relations.map(() => "?").join(",");
-  return db
-    .query<EdgeLiteRow, (number | string)[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
-    )
-    .all(...turnIds, ...turnIds, ...relations);
 }
 
 /**
@@ -718,6 +705,7 @@ function componentsOfLane(
   laneEdges: readonly EdgeLiteRow[],
   owningSegments: ReadonlyMap<number, number>,
   judgmentIds: ReadonlySet<number>,
+  resolver: ProjectionSideResolver,
 ): LaneComponentSlice[] {
   const parent = new Map<number, number>();
   const find = (id: number): number => {
@@ -739,7 +727,7 @@ function componentsOfLane(
   for (const row of laneEdges) {
     if (!memberIds.has(row.citingId) || !memberIds.has(row.citedId)) continue;
     const claims = laneMembershipClaims(
-      toEdgeInput(row),
+      toEdgeInput(row, resolver),
       segmentKeyFor(owningSegments, row.citingId),
       segmentKeyFor(owningSegments, row.citedId),
     );
@@ -810,26 +798,38 @@ function nearestUntouchedComponent(
   return best;
 }
 
-/** Every live `SEGMENT_GRAPH_RELATIONS_SQL` edge with BOTH endpoints inside `turnIds` — "all stance/consume/grounds edges among" a segment's own turns (round-4 review #4a), as opposed to `loadEdgesByRelationTouching`'s one-hop-from-a-member "touching" scope. */
+/**
+ * Every live CLASS-CARRYING edge with BOTH endpoints inside `turnIds` — "all
+ * structural edges among" a segment's own turns (round-4 review #4a), as
+ * opposed to `loadClassEdgesTouching`'s one-hop-from-a-member "touching"
+ * scope.
+ *
+ * The word list it used to filter by (stance + `consume` + `grounds`, five of
+ * seven) is gone with the segment-graph word subset itself: under three
+ * classes every relation states that this output stands on that one, which is
+ * the whole of what a structural bypass is about (`shared/lane-checker.ts`'s
+ * `isSegmentGraphEdge`).
+ */
 function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
   if (turnIds.length === 0) {
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = SEGMENT_GRAPH_RELATIONS_SQL.map(() => "?").join(",");
   return db
-    .query<EdgeLiteRow, (number | string)[]>(
+    .query<EdgeLiteRow, number[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...turnIds, ...turnIds, ...SEGMENT_GRAPH_RELATIONS_SQL);
+    .all(...turnIds, ...turnIds);
 }
 
 /**
@@ -854,20 +854,21 @@ function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[])
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
-    .query<EdgeLiteRow, (number | string)[]>(
+    .query<EdgeLiteRow, number[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
+    .all(...turnIds, ...turnIds);
 }
 
 /**
@@ -889,20 +890,21 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
-    .query<EdgeLiteRow, (number | string)[]>(
+    .query<EdgeLiteRow, number[]>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...turnIds, ...EDGE_RELATIONS);
+    .all(...turnIds);
 }
 
 /**
@@ -927,17 +929,19 @@ function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly numb
  * EMPTY LANES (ticket 14). `declaredLaneCount` stays `COUNT(*)` — every
  * declared lane counts against the budget, used or not (the rule and its
  * reasoning live on `LaneSegmentFacts.emptyLaneTags`). What this pass adds is
- * the NAMES of the declared lanes with no live member, so a tripped ratio can
- * never be silently padded by lanes no reader can see. "No member" is the
- * checker's own membership rule read straight off the registry: no live
- * turn↔turn relation-carrying edge (LAW 8 on BOTH endpoints, same as every
- * query above) names the tag ON A SIDE whose own endpoint's OWNING segment —
- * `MIN(segment_id)`, `getOwningSegmentId`'s own tie-break, not mere
- * membership — is this one. Ticket 06 moved this third `memory_edge_tags`
- * reader onto `memory_edge_side_tags`, with each side matched against ITS
- * OWN endpoint: that is exactly the WIDEN pass's per-side segment filter
- * expressed in SQL, and on today's stock (`tail === head`) it selects the
- * same rows the either-endpoint form did.
+ * the NAMES of the declared lanes no reader can see, so a tripped ratio can
+ * never be silently padded by them.
+ *
+ * IT READS RESOLVED ATTRIBUTION NOW, NOT THE DECLARATION INDEX
+ * (main-agent-edges spec D2). The retired form was a `NOT EXISTS` over
+ * `memory_edge_side_tags` — the index of explicit DECLARATIONS — which since
+ * resolution answers a strictly narrower question than "does any edge attribute
+ * to this lane": an edge whose side derives its lane (69% of production) has
+ * no row in that index at all, so a perfectly live lane read as empty and
+ * padded the proliferation warning's own escape hatch. The replacement loads
+ * every class-carrying edge incident to the segment's live members and asks the
+ * resolver, per side, which qualified lane it attributes to; a declared lane no
+ * side resolves to is empty.
  */
 function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegmentFacts[] {
   const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
@@ -960,36 +964,50 @@ function loadSegmentFacts(db: Database, segmentIds: readonly number[]): LaneSegm
       .all(...ids)) {
       declaredBySegment.set(row.segmentId, row.laneCount);
     }
+    const declaredTagsBySegment = new Map<number, string[]>();
     for (const row of db
       .query<{ segmentId: number; tag: string }, number[]>(
-        `SELECT l.segment_id AS segmentId, l.tag AS tag
-         FROM lanes l
-         WHERE l.segment_id IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1
-             FROM memory_edge_side_tags mest
-             JOIN memory_edges me ON me.id = mest.edge_row_id
-             JOIN turns tc ON tc.id = me.citing_id
-             JOIN turns td ON td.id = me.cited_id
-             WHERE mest.tag = l.tag
-               AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-               AND me.relation IS NOT NULL
-               AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
-               AND (
-                 (mest.side = 'tail'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id)
-                 OR (mest.side = 'head'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id)
-               )
-           )
-         ORDER BY l.segment_id ASC, l.tag ASC`,
+        `SELECT segment_id AS segmentId, tag AS tag
+           FROM lanes WHERE segment_id IN (${placeholders})
+          ORDER BY segment_id ASC, tag ASC`,
       )
       .all(...ids)) {
-      const bucket = emptyLanesBySegment.get(row.segmentId);
+      const bucket = declaredTagsBySegment.get(row.segmentId);
       if (bucket === undefined) {
-        emptyLanesBySegment.set(row.segmentId, [row.tag]);
+        declaredTagsBySegment.set(row.segmentId, [row.tag]);
       } else {
         bucket.push(row.tag);
+      }
+    }
+    // The ATTRIBUTED set, per segment: every qualified lane some incident
+    // edge's side resolves to. Seeded from the segment's own live members,
+    // because an edge can only attribute to a lane through an endpoint that
+    // is IN it.
+    const attributedBySegment = new Map<number, Set<string>>();
+    const resolver = createProjectionSideResolver(db);
+    for (const segmentId of ids) {
+      const attributed = new Set<string>();
+      attributedBySegment.set(segmentId, attributed);
+      const memberIds = loadSegmentTurnIds(db, segmentId);
+      if (memberIds.length === 0) {
+        continue;
+      }
+      const incident = loadClassEdgesTouching(db, memberIds);
+      resolver.prime(incident.flatMap((row) => [row.citingId, row.citedId]));
+      for (const row of incident) {
+        for (const side of ["tail", "head"] as const) {
+          const lane = resolver.resolve(row, side).lane;
+          if (lane !== null && lane.segmentId === segmentId) {
+            attributed.add(lane.tag);
+          }
+        }
+      }
+    }
+    for (const [segmentId, tags] of declaredTagsBySegment) {
+      const attributed = attributedBySegment.get(segmentId) ?? new Set<string>();
+      const empty = tags.filter((tag) => !attributed.has(tag));
+      if (empty.length > 0) {
+        emptyLanesBySegment.set(segmentId, empty);
       }
     }
   }
@@ -1065,13 +1083,27 @@ function parseTurnTags(raw: string | null): readonly string[] | undefined {
 }
 
 /** Row -> the core's input shape. The two side columns are the whole lane surface since ticket 09 retired the merged set (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
-function toEdgeInput(row: EdgeLiteRow): LaneEdgeInput {
+function toEdgeInput(row: EdgeLiteRow, resolver: ProjectionSideResolver): LaneEdgeInput {
+  const tail = resolver.resolve(row, "tail");
+  const head = resolver.resolve(row, "head");
   return {
     citingId: row.citingId,
     citedId: row.citedId,
     relation: row.relation,
-    tailTag: row.tailTag,
-    headTag: row.headTag,
+    relationClass: row.relationClass as LaneEdgeInput["relationClass"],
+    relationCoverage: row.relationCoverage as LaneEdgeInput["relationCoverage"],
+    // THE RESOLVED ATTRIBUTION (main-agent-edges spec D2), not the stored word
+    // — `''` for a side that attributes to no lane. Every lane-keyed reader
+    // downstream (`laneMembershipClaims`, the coupling report, the console
+    // payload, the timeline's lane chain) asks the same question this answers.
+    tailTag: tail.lane?.tag ?? "",
+    headTag: head.lane?.tag ?? "",
+    tailOutcome: tail.outcome,
+    headOutcome: head.outcome,
+    // The STORED declarations, carried alongside so an `invalid` finding can
+    // name the word that stopped being true.
+    storedTailTag: row.tailTag,
+    storedHeadTag: row.headTag,
   };
 }
 
@@ -1161,6 +1193,11 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   // against, so a read can never admit a tag the write side would refuse.
   const laneTagsFor = createLaneTagResolver(db);
 
+  // THE ONE side resolver for this whole projection (main-agent-edges D2) —
+  // discovery, widen and the final edge assembly all ask it, so no two passes
+  // can disagree about which lane a side attributes to.
+  const sideResolver = createProjectionSideResolver(db);
+
   // THE JUDGMENT WINDOW (ticket 02, module header). Absent for every caller
   // that declared none — the CLI, the console, `mcp/note.ts`, stage 1 — and
   // those callers keep loading exactly what they always did, minus the lanes
@@ -1174,7 +1211,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     seedTurnIds = [];
   } else {
     seedTurnIds = resolveSeedTurnIds(db, scope);
-    const discoveryRows = loadTaggedEdgesTouching(db, seedTurnIds);
+    const discoveryRows = loadClassEdgesTouching(db, seedTurnIds);
     // Round-5 review #13: both endpoints' owning segments yield a lane key,
     // not just the citing side's — a cross-segment tagged edge dual-
     // registers under BOTH segments in the pure core, and discovery must
@@ -1185,21 +1222,19 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
       discoveryRows.flatMap((row) => [row.citingId, row.citedId]),
     );
     const seen = new Map<string, LaneKey>();
+    sideResolver.prime(discoveryRows.flatMap((row) => [row.citingId, row.citedId]));
     for (const row of discoveryRows) {
-      // ONE key per SETTLED SIDE (lane-model-v12 D1, ticket 06): the arc's
-      // TAIL names a lane in the CITING turn's segment, its HEAD one in the
-      // CITED turn's. On today's stock (`tail === head`) this yields exactly
-      // the two keys the per-tag × per-segment fan-out yielded before — the
-      // citing side's copy and the cited side's — so discovery is unchanged
-      // row for row. On a CROSS-LANE row the two keys are genuinely
-      // different lanes, which is the fact the merged set could not carry.
-      if (row.tailTag !== "") {
-        const citingKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag: row.tailTag };
-        seen.set(laneKeyToken(citingKey), citingKey);
-      }
-      if (row.headTag !== "") {
-        const citedKey: LaneKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag: row.headTag };
-        seen.set(laneKeyToken(citedKey), citedKey);
+      // ONE key per RESOLVED SIDE (main-agent-edges spec D2). The arc's TAIL
+      // attributes to a lane in the CITING turn's task, its HEAD to one in the
+      // CITED turn's — declared where the row declares, DERIVED where the
+      // endpoint is in exactly one lane. That second arm is the change: an
+      // edge nobody had placed used to discover nothing, so its lane was
+      // reachable only if some OTHER edge had been placed there.
+      for (const side of ["tail", "head"] as const) {
+        const lane = sideResolver.resolve(row, side).lane;
+        if (lane === null) continue;
+        const key: LaneKey = { segment: String(lane.segmentId), tag: lane.tag };
+        seen.set(laneKeyToken(key), key);
       }
     }
     // DISCOVER (b), ticket 10: every lane a SEED TURN itself claims. A seed
@@ -1258,29 +1293,22 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     if (laneKey.segment !== DEFAULT_SEGMENT) {
       laneMemberTotals.push({ key: laneKey, declaredMemberCount: scannedMembers.size });
     }
-    const candidates = loadEdgesForTag(db, laneKey.tag);
-    const owningSegments =
-      candidates.length === 0
-        ? new Map<number, number>()
-        : loadOwningSegments(
-            db,
-            candidates.flatMap((row) => [row.citingId, row.citedId]),
-          );
-    // Match from EITHER endpoint's segment, but PER SIDE (ticket 06): the
-    // TAIL only ever names a lane in the CITING turn's segment and the HEAD
-    // only in the CITED turn's, so a row belongs to lane `(S, T)` when its
-    // tail is `T` and its citing turn is owned by `S`, or its head is `T`
-    // and its cited turn is. On today's stock (`tail === head === T`) this
-    // is exactly round-5 review #13's "either endpoint's segment" filter,
-    // row for row; it diverges only where the two sides carry different
-    // tags, and there the segment that matters is the one belonging to the
-    // side that actually names the lane.
-    const laneEdges = candidates.filter(
-      (row) =>
-        (row.tailTag === laneKey.tag &&
-          segmentKeyFor(owningSegments, row.citingId) === laneKey.segment) ||
-        (row.headTag === laneKey.tag &&
-          segmentKeyFor(owningSegments, row.citedId) === laneKey.segment),
+    // THE CANDIDATE PREDICATE (main-agent-edges spec D2): edges INCIDENT TO A
+    // MEMBER, not edges that STORE this lane's word. Membership is a node
+    // fact, so the lane's own edges are addressable without any writer having
+    // declared a side — which is the whole 69% the stored-side predicate was
+    // dropping. The old `memory_edge_side_tags` lookup indexed declarations
+    // only and structurally could not answer this question.
+    const candidates = loadClassEdgesTouching(db, [...scannedMembers]);
+    sideResolver.prime(candidates.flatMap((row) => [row.citingId, row.citedId]));
+    // Then PER SIDE, through the resolver: a row belongs to lane `(S, T)` when
+    // its tail resolves to `(S, T)` or its head does. The qualification is the
+    // pair, never the bare word — the same tag in another task is another lane.
+    const laneEdges = candidates.filter((row) =>
+      (["tail", "head"] as const).some((side) => {
+        const lane = sideResolver.resolve(row, side).lane;
+        return lane !== null && String(lane.segmentId) === laneKey.segment && lane.tag === laneKey.tag;
+      }),
     );
 
     if (judgmentIds === undefined) {
@@ -1298,7 +1326,18 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     // NARROW (ticket 02): the components the judgment anchors touch, plus ONE
     // nearest untouched component per touched one. The scan above found them;
     // only these are emitted.
-    const components = componentsOfLane(laneKey, scannedMembers, laneEdges, owningSegments, judgmentIds);
+    const laneEdgeOwningSegments =
+      laneEdges.length === 0
+        ? new Map<number, number>()
+        : loadOwningSegments(db, laneEdges.flatMap((row) => [row.citingId, row.citedId]));
+    const components = componentsOfLane(
+      laneKey,
+      scannedMembers,
+      laneEdges,
+      laneEdgeOwningSegments,
+      judgmentIds,
+      sideResolver,
+    );
     const kept = new Map<number, LaneComponentSlice>();
     for (const component of components) {
       if (!component.touched) continue;
@@ -1357,29 +1396,27 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   }
   const memberIdList = [...memberIds];
 
-  // ---- SUPPLEMENTARY: citedness, global-kill override, the component neighbourhood ----
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, [...CROSS_PHASE_CITEDNESS_RELATIONS])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  // UNTAGGED STANCE PASS. Every pass above seeds from DISCOVERED lane
-  // members, so a neighbourhood holding only UNTAGGED stance edges loads
-  // nothing at all. Stance edges touching the scope's own SEED turns load
-  // unconditionally instead; tagged rows arriving here are harmless
-  // duplicates the edgeMap already dedupes.
+  // ---- SUPPLEMENTARY: the neighbourhood, in ONE pass ----
   //
-  // This pass was built for E1 (the tag mandate's untagged-continuation
-  // error), which lane-declaration ticket 02 retired — an untagged stance
-  // edge is an ordinary legal edge now. It stays because its DOMAIN outlived
-  // its original consumer: an untagged stance edge is a `LANE_COMPONENT_
-  // RELATIONS` bridge, so reports 2/3 and `computeInterfaces`/`computeBypass`
-  // read it, and D9's unattributed-cluster warning (ticket 09) is defined
-  // over exactly these rows. Dropping the pass with E1 would have starved
-  // both while looking like pure cleanup.
+  // This was THREE word-keyed passes: cross-phase citedness
+  // (`grounds`/`verifies`/`refutes`), an untagged-`override` pass for the
+  // retired global kill, and an untagged STANCE pass off the seed turns that
+  // fed the component reports and D9's unattributed-cluster warning. Together
+  // they covered six of the seven words; the difference between them was a
+  // vocabulary distinction that no longer exists, and the citedness buckets
+  // they fed are deleted outright (spec D2). One pass over every
+  // class-carrying edge touching a member replaces all three — marginally
+  // wider (`consume` and `indexes` rows now arrive too), and one predicate
+  // instead of three that could disagree.
+  for (const row of loadClassEdgesTouching(db, memberIdList)) {
+    edgeMap.set(edgeKey(row), row);
+  }
   if (seedTurnIds.length > 0) {
-    for (const row of loadEdgesByRelationTouching(db, seedTurnIds, [...STANCE_RELATIONS])) {
+    // The SEED's own neighbourhood, unconditionally: every pass above seeds
+    // from DISCOVERED lane members, so a scope whose seeds join no lane at all
+    // would otherwise load nothing and D9's unattributed-cluster warning —
+    // defined over exactly those lane-less edges — would have no input.
+    for (const row of loadClassEdgesTouching(db, seedTurnIds)) {
       edgeMap.set(edgeKey(row), row);
     }
   }
@@ -1425,7 +1462,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     for (const id of memberIdList) {
       segmentGraphDomain.add(id);
     }
-    for (const row of loadEdgesByRelationTouching(db, memberIdList, [...SEGMENT_GRAPH_RELATIONS_SQL])) {
+    for (const row of loadClassEdgesTouching(db, memberIdList)) {
       segmentGraphDomain.add(row.citingId);
       segmentGraphDomain.add(row.citedId);
     }
@@ -1478,8 +1515,9 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     allTurnIds.add(row.citingId);
     allTurnIds.add(row.citedId);
   }
+  sideResolver.prime([...outOfVocabularyRows.values()].flatMap((row) => [row.citingId, row.citedId]));
   const outOfVocabularyEdges = [...outOfVocabularyRows.values()]
-    .map(toEdgeInput)
+    .map((row) => toEdgeInput(row, sideResolver))
     .sort((a, b) => {
       if (a.citingId !== b.citingId) return a.citingId - b.citingId;
       if (a.citedId !== b.citedId) return a.citedId - b.citedId;
@@ -1544,11 +1582,14 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     })
     .sort((a, b) => a.id - b.id);
 
-  const edges: LaneEdgeInput[] = [...edgeMap.values()].map(toEdgeInput).sort((a, b) => {
-    if (a.citingId !== b.citingId) return a.citingId - b.citingId;
-    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
-    return a.relation.localeCompare(b.relation);
-  });
+  sideResolver.prime([...edgeMap.values()].flatMap((row) => [row.citingId, row.citedId]));
+  const edges: LaneEdgeInput[] = [...edgeMap.values()]
+    .map((row) => toEdgeInput(row, sideResolver))
+    .sort((a, b) => {
+      if (a.citingId !== b.citingId) return a.citingId - b.citingId;
+      if (a.citedId !== b.citedId) return a.citedId - b.citedId;
+      return a.relation.localeCompare(b.relation);
+    });
 
   // D9 proliferation (ticket 09): the REAL segments this scope actually asked
   // about — every seed turn's owning segment, plus every involved lane key's

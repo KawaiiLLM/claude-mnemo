@@ -2038,12 +2038,13 @@ function handleClear(
  * make `delete`'s own empty-only guard (D4) reachable for a lane that was
  * ever used, the same relationship `merge` already has to it.
  *
- * `force` gates two classes of edge, printed either way (D8): a CROSS-LANE
- * row (the other side is a DIFFERENT declared lane, same segment or
- * another one) and a HALF-SETTLED row (the other side is the unsettled
- * sentinel `''`, never settled by anyone) — deleting either without warning
- * would silently destroy another lane's record, or leave a stranded side
- * naming a lane that no longer exists.
+ * `force` NO LONGER APPLIES HERE (main-agent-edges spec D2). It gated two
+ * classes of edge the clear used to DELETE — cross-lane and half-settled rows
+ * — and the clear deletes no relation row any more: a lane side is an
+ * attribution, so un-homing a turn re-resolves where its edges are attributed
+ * and unmakes none of them. With nothing destructive to proceed despite, the
+ * gate has nothing left to gate. The parameter itself stays on the tool for
+ * `merge`, which still has a real collision to force through.
  *
  * The whole mechanism is `db/lanes.ts`'s `clearLane`; this function is the
  * surrounding shell every lane-tier verb here shares — segment exists,
@@ -2067,7 +2068,6 @@ function handleClearLane(
   if (input.force !== undefined && typeof input.force !== "boolean") {
     return parameterError("force must be a boolean when present.");
   }
-  const force = input.force === true;
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
@@ -2085,7 +2085,7 @@ function handleClearLane(
     if (segment.status === "closed") {
       return { kind: "closed" };
     }
-    return clearLane(db, segmentId, tag, nowEpoch, force);
+    return clearLane(db, segmentId, tag, nowEpoch);
   });
 
   if (outcome.kind === "no-segment") {
@@ -2100,32 +2100,22 @@ function handleClearLane(
   if (outcome.kind === "not-declared") {
     return parameterError(`E${segmentId} has no declared lane "${tag}".`);
   }
-  if (outcome.kind === "blocked") {
-    const lines = [
-      `E${segmentId}'s lane "${tag}" cannot be cleared without force — ${outcome.blockers.length} ` +
-        "edge(s) would be affected:",
-    ];
-    for (const blocker of outcome.blockers) {
-      const detail =
-        blocker.kind === "half-settled"
-          ? "half-settled — the other side was never settled"
-          : `cross-lane — the other side is ${blocker.otherLane}`;
-      lines.push(
-        `  ${blocker.citingAddress} —${blocker.relation ?? "(bare)"}→ ${blocker.citedAddress} (${detail})`,
-      );
-    }
-    lines.push(
-      `remember(clear, id="E${segmentId}/#${tag}", force=true) proceeds anyway — it does not claim ` +
-        "you have read this list.",
-    );
-    return parameterError(lines.join("\n"));
-  }
-
   const { receipt } = outcome;
   const lines = [
-    `Cleared E${segmentId}'s lane "${tag}" — ${receipt.turnsCleared} member turn(s) released, ` +
-      `${receipt.edgesDeleted} edge(s) deleted.`,
+    `Cleared E${segmentId}'s lane "${tag}" — ${receipt.turnsCleared} member turn(s) released.`,
   ];
+  if (receipt.declarationsCleared > 0) {
+    lines.push(
+      `  ${receipt.declarationsCleared} edge side(s) no longer declare it — their lane is derived now, ` +
+        "or they name none.",
+    );
+  }
+  if (receipt.edgesDeleted > 0) {
+    lines.push(
+      `  ${receipt.edgesDeleted} edge(s) deleted — nobody can say which lane they are in any more ` +
+        "(the endpoint is still in several, and no declaration survived).",
+    );
+  }
   lines.push(`remember(delete, id="E${segmentId}/#${tag}") removes the now-empty lane.`);
   return textResult(lines.join("\n"));
 }

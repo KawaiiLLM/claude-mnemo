@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getLane, insertLane } from "../../src/db/lanes";
+import { loadEndpointLaneFacts, resolveEdgeSides } from "../../src/db/edge-side-resolution";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { searchMemory } from "../../src/db/search";
 import { initializeSchema } from "../../src/db/schema";
@@ -82,6 +83,19 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     return JSON.parse(
       db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(turnId)!.tags,
     ) as string[];
+  }
+
+  /** What each side ATTRIBUTES to (main-agent-edges spec D2) — declared or derived, never the raw column. */
+  function attributedSides(edgeId: number): { tail: string | null; head: string | null } {
+    const row = db
+      .query<{ citingId: number; citedId: number; tailTag: string; headTag: string }, [number]>(
+        `SELECT citing_id AS citingId, cited_id AS citedId,
+                tail_tag AS tailTag, head_tag AS headTag
+           FROM memory_edges WHERE id = ?`,
+      )
+      .get(edgeId)!;
+    const sides = resolveEdgeSides(row, loadEndpointLaneFacts(db, [row.citingId, row.citedId]));
+    return { tail: sides.tail.lane?.tag ?? null, head: sides.head.lane?.tag ?? null };
   }
 
   function owningSegments(turnId: number): number[] {
@@ -167,10 +181,16 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
         "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges WHERE id = ?",
       )
       .get(edgeId)!;
-    // Untouched: the tag STRING never changes on a task-tier merge, only the
-    // lane's owning segment does — the edge resolves through each endpoint's
-    // OWNING segment, which is now `into` for both sides.
-    expect(sides).toEqual({ tailTag: "shared-work", headTag: "shared-work" });
+    // The ATTRIBUTION is unchanged — the tag word never moves on a task-tier
+    // merge, only the lane's owning segment does, and the edge resolves through
+    // each endpoint's OWNING segment, which is now `into` for both sides.
+    //
+    // The DECLARATION goes, though (main-agent-edges spec D2): once both
+    // endpoints are in exactly one lane the stored side says nothing the
+    // derivation would not, and "stored means several lanes" is an invariant
+    // the membership write's own post-normalisation maintains.
+    expect(sides).toEqual({ tailTag: "", headTag: "" });
+    expect(attributedSides(edgeId)).toEqual({ tail: "shared-work", head: "shared-work" });
     expect(owningSegments(t1)).toEqual([into]);
     expect(owningSegments(t2)).toEqual([into]);
   });
@@ -539,7 +559,10 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
         "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges WHERE id = ?",
       )
       .get(edgeId)!;
-    expect(sides).toEqual({ tailTag: "contested2", headTag: "contested2" });
+    // Same disposition as the sibling above: the attribution survives, the
+    // now-redundant declaration does not.
+    expect(sides).toEqual({ tailTag: "", headTag: "" });
+    expect(attributedSides(edgeId)).toEqual({ tail: "contested2", head: "contested2" });
     expect(getLane(db, from, "contested2")).toBeNull();
     expect(getLane(db, into, "contested2")).not.toBeNull();
     expect(owningSegments(t1)).toEqual([into]);

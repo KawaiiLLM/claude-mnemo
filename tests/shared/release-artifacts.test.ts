@@ -346,7 +346,7 @@ describe("release artifacts", () => {
       // final-envelope byte bound; a stale worker bundle would 404 /console.
       "evaluateRequestGate",
       "applyGraphAutoInterval",
-      "electionCoverage", // R2 #11: election tiers computed on the full snapshot
+      "electionCoverage", // R2 #11: election ranks computed on the full snapshot
       // 0.19.0 — semantic conformance: the checker's vocabulary fact block and
       // the settlement re-annotation duty (non-conforming is never standing
       // content).
@@ -362,7 +362,7 @@ describe("release artifacts", () => {
       // the stage-2 cold resume into the child too, so the whole settlement
       // toolset is in that bundle and in no other.)
       "requires a stage-1 dispatch", // no stage 1 mounted = deterministic failure
-      "getRolledBackCiterIds", // R1 #7: the corrector fact the live edge feed cannot carry
+      "resolveEdgeSide", // main-agent-edges D2: the ONE attribution rule, in the worker too
     ]) {
       expect(worker).toContain(marker);
     }
@@ -531,7 +531,7 @@ describe("release artifacts", () => {
       // export) — a pre-batching bundle never carried this symbol, so its
       // absence means the O(P²) one-shed-per-sweep partition shipped stale.
       "collectOverflowingPageOrdinals",
-      "getRolledBackCiterIds", // R1 #7 corrector channel
+      "normalizeIncidentAttribution", // main-agent-edges P2: the one post-normalisation seam
       "compareOrderKeyAcrossSessions", // R1 #6 cross-session rank tie-break
     ]) {
       expect(mcpServer).toContain(marker);

@@ -15,6 +15,7 @@ import {
   NO_RELATION_CLASS,
   NO_RELATION_COVERAGE,
   type RelationClass,
+  relationClassBearingSql,
   type RelationClassValue,
   type RelationCoverageValue,
 } from "../shared/relation-class";
@@ -1043,11 +1044,11 @@ export interface TurnRelationEdgeLite {
 }
 
 /**
- * Every live `turn`↔`turn` edge touching `turnIds` on EITHER end, current-
- * vocabulary relations only (`EDGE_RELATIONS` — the eight-word set a fresh
- * write may carry; excludes the frozen-legacy `supersedes` word and the bare,
- * relation-NULL existence row, neither of which the election module's own
- * vocabulary reads), each row's two lane sides carried verbatim.
+ * Every live `turn`↔`turn` edge touching `turnIds` on EITHER end, CLASS-
+ * carrying rows only (`relationClassBearingSql` — the one accessor's own SQL
+ * form; excludes the frozen-legacy words and the bare, relation-NULL existence
+ * row, neither of which resolves to a class), each row's two lane sides
+ * carried verbatim.
  *
  * The milestone-election module's (`shared/milestone-election.ts`, ticket 02)
  * own DB feed — timeline.ts's `selectMilestoneTurns`/
@@ -1079,7 +1080,6 @@ export function getRelationEdgesAmongTurns(
     return [];
   }
   const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db
     .query<
       {
@@ -1091,7 +1091,7 @@ export function getRelationEdgesAmongTurns(
         relationClass: RelationClassValue | null;
         relationCoverage: RelationCoverageValue | null;
       },
-      (number | string)[]
+      number[]
     >(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag,
@@ -1101,10 +1101,10 @@ export function getRelationEdgesAmongTurns(
        JOIN turns td ON td.id = me.cited_id
        WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
     )
-    .all(...ids, ...ids, ...EDGE_RELATIONS)
+    .all(...ids, ...ids)
     .map((row) => ({
       citingId: row.citingId,
       citedId: row.citedId,
@@ -1114,52 +1114,6 @@ export function getRelationEdgesAmongTurns(
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
       relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     }));
-}
-
-/**
- * Pre-release repair R1 #7: ids among `citingTurnIds` that cite (any of
- * `EDGE_RELATIONS`, any tag state) a turn currently `was_rolled_back = 1` —
- * the fact `getRelationEdgesAmongTurns` structurally CANNOT surface, because
- * its own live-turn-scoped SQL requires BOTH endpoints live and a
- * rolled-back cited turn fails that outright by design (it is meant to
- * vanish from the live edge feed). `shared/milestone-election.ts`'s
- * `electMilestones` already honors this fact for its tier-④ corrector rule
- * ("a node that cites, any relation, a turn with `wasRolledBack: true`") —
- * this is the adapter-side query that actually feeds it (its own
- * `rolledBackCiterIds` parameter), separate from the ordinary `laneEdges`
- * feed on purpose: folding it into that feed would mean re-admitting a
- * rolled-back node as a graph endpoint, which is exactly what the live-scope
- * filter exists to prevent.
- *
- * `citingTurnIds` is the caller's own candidate/window set (already known
- * live) — this never widens who MAY become a corrector, only supplies the
- * fact for those who already could be. Ascending, deduped via `DISTINCT`.
- */
-export function getRolledBackCiterIds(
-  db: Database,
-  citingTurnIds: readonly number[],
-): number[] {
-  const ids = [...new Set(citingTurnIds)];
-  if (ids.length === 0) {
-    return [];
-  }
-  const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db
-    .query<{ citingId: number }, (number | string)[]>(
-      `SELECT DISTINCT me.citing_id AS citingId
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")}
-         AND td.was_rolled_back = 1
-       ORDER BY me.citing_id ASC`,
-    )
-    .all(...ids, ...EDGE_RELATIONS)
-    .map((row) => row.citingId);
 }
 
 /**

@@ -11,7 +11,6 @@ import type {
   LaneProliferationWarning,
   LaneStatsReport,
   LaneTimeOrderViolation,
-  LaneTooFineIndex,
   LaneUnattributedCluster,
 } from "./lane-checker";
 import {
@@ -195,29 +194,12 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
   // model, and a line that kept either half would keep teaching it. A reader
   // who wants to know what this lane converged reads its out-edges —
   // `edges:` above already counts them.
-  const grounds = lane.citedness.groundsFromNonMembers.map(
-    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
-  );
-  const used = lane.citedness.usedFromNonMembers.map(
-    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
-  );
-  const testimony = lane.citedness.testimonyFromNonMembers.map(
-    (fact) =>
-      formatTurnRef(fact.citingId, addresses) +
-      " " +
-      fact.relation +
-      " " +
-      formatTurnRef(fact.citedId, addresses),
-  );
-  lines.push(
-    "  cited from outside: depends[" +
-      (grounds.join(", ") || "-") +
-      "] used[" +
-      (used.join(", ") || "-") +
-      "] testimony[" +
-      (testimony.join(", ") || "-") +
-      "]",
-  );
+  // THE `cited from outside:` LINE IS GONE (main-agent-edges spec D2). It
+  // split incoming citations into `depends[]` / `used[]` / `testimony[]`, one
+  // bucket per retired relation word, and the three classes have no such
+  // split: `grounds` and `consume` are ONE class now, so two of the three
+  // brackets would hold the same edges and the line would be answering a
+  // question the vocabulary no longer asks.
   // TICKET 04: the coverage line names BOTH halves of the verdict. `members:`
   // above prints a NUMBER, and after ticket 02's judgment narrowing that number
   // is routinely a slice of the lane — 195 where the lane has 295 — while the
@@ -360,34 +342,6 @@ function renderUnattributedCluster(
     " turns joined by edges with no lane on either side: " +
     formatTurnRefList(cluster.turnIds, addresses) +
     cappedCountSuffix(cluster.turnCount, cluster.turnIds.length)
-  );
-}
-
-/**
- * The granularity warning (lane-state-retirement ticket 01): one turn whose
- * whole convergence batch is a single node.
- *
- * relation-vocabulary-v13 ticket 02: it reads STORED `indexes` rows and nothing
- * else can create one any more (`indexes` is deleted as a write word, ruled at
- * S15069/T2306), so this population only shrinks. The LINE stops naming the
- * retired parameter — an agent shown a word it cannot write learns a call it
- * will be refused for.
- *
- * The line says the DIAGNOSIS, not an instruction — decision 4 makes this a
- * reading ("说明太细了"), never a repair order, and a render that told the
- * agent to widen or drop the edge would be the write gate this deliberately is
- * not.
- */
-function renderTooFineIndex(
-  warning: LaneTooFineIndex,
-  addresses?: LaneAnchorAddresses,
-): string {
-  return (
-    "  " +
-    formatTurnRef(warning.citingId, addresses) +
-    " converges one node only (" +
-    formatTurnRef(warning.citedId, addresses) +
-    ") -- a phase cut this fine is usually a step"
   );
 }
 
@@ -669,7 +623,7 @@ export function renderLaneCheckerReports(
 
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");
@@ -690,19 +644,6 @@ export function renderLaneCheckerReports(
     sections.push(result.laneProliferation.length + " task(s) over the lane budget:");
     for (const warning of result.laneProliferation) {
       sections.push(renderLaneProliferation(warning));
-    }
-  }
-  if (result.tooFineIndexes.count === 0) {
-    sections.push("(no single-target index)");
-  } else {
-    sections.push(
-      result.tooFineIndexes.count +
-        " turn(s) whose whole index batch is one node" +
-        cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) +
-        ":",
-    );
-    for (const warning of result.tooFineIndexes.entries) {
-      sections.push(renderTooFineIndex(warning, anchorAddresses));
     }
   }
 
@@ -1054,14 +995,6 @@ export function projectLaneCheckerResultByScope(
     return members === undefined || intersectsWindow(members, window);
   });
 
-  // Same per-instance rule as the other two-endpoint families: a complete
-  // fact (both ids), so it is fully decidable, and `rescope` keeps `count`
-  // honest when the upstream sample was already display-capped.
-  const tooFineIndexes = rescope(
-    result.tooFineIndexes,
-    (warning) => window.has(warning.citingId) || window.has(warning.citedId),
-  );
-
   const errors = result.errors.filter((error) => window.has(error.anchorId));
 
   return {
@@ -1077,7 +1010,6 @@ export function projectLaneCheckerResultByScope(
     },
     unattributedClusters,
     laneProliferation,
-    tooFineIndexes,
     errors,
   };
 }
@@ -1230,7 +1162,7 @@ function buildLaneCheckerBlocks(
   blocks.push(
     renderBlock(
       "",
-      "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
     ),
   );
   if (result.unattributedClusters.count === 0) {
@@ -1254,21 +1186,6 @@ function buildLaneCheckerBlocks(
     blocks.push(renderBlock(result.laneProliferation.length + " task(s) over the lane budget:"));
     for (const warning of result.laneProliferation) {
       blocks.push(renderBlock(renderLaneProliferation(warning)));
-    }
-  }
-  if (result.tooFineIndexes.count === 0) {
-    blocks.push(renderBlock("(no single-target index)"));
-  } else {
-    blocks.push(
-      renderBlock(
-        result.tooFineIndexes.count +
-          " turn(s) whose whole index batch is one node" +
-          cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) +
-          ":",
-      ),
-    );
-    for (const warning of result.tooFineIndexes.entries) {
-      blocks.push(renderBlock(renderTooFineIndex(warning, addresses)));
     }
   }
 

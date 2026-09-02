@@ -28,8 +28,13 @@
     --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;
     --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;
     --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;
-    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;
-    --grounds:#2e9e6b; --consume:#9c7a5c; --verifies:#16a3a3;
+    /* THE FOUR RELATION CLASSES (main-agent-edges ticket 02). Seven word hues
+       collapse into four: the two corrections keep the retired `override` /
+       `narrows` reds and ambers they absorbed, `verify` keeps `verifies`' teal,
+       and `use` takes `extends`' blue — the four hues a reader had already
+       learned, minus the three that no longer name anything. */
+    --rel-correct-full:#d64541; --rel-correct-partial:#d98e04;
+    --rel-verify:#16a3a3; --rel-use:#3b82c4;
     /* [S15069/T1760, revised by console-focus-encoding ticket 01] GREY'S
        RESERVATION IS RELEASED. It used to say ONE thing only — this edge has
        no lane attribution yet, so nothing else may claim it — and `consume`
@@ -63,7 +68,7 @@
 
      The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and
      relation colour above was chosen against white and several (`--t-fix`,
-     `--grounds`) are far too dark to read on a dark panel, so each is lifted in
+     the greens) are far too dark to read on a dark panel, so each is lifted in
      lightness and slightly desaturated rather than reused. The hue is what
      carries the meaning; the lightness is what has to move. */
   :root[data-theme="dark"] {
@@ -72,8 +77,8 @@
     --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;
     --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;
     --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;
-    --override:#e86b67; --narrows:#e8a838; --extends:#63a3e0; --indexes:#ab82cf;
-    --grounds:#4dbb88; --consume:#c09a78; --verifies:#3cc0c0;
+    --rel-correct-full:#e86b67; --rel-correct-partial:#e8a838;
+    --rel-verify:#3cc0c0; --rel-use:#63a3e0;
     --draft:#5a626b;
     --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;
     --lane:#b394d6; --lane-bg:#2a2135;
@@ -173,7 +178,7 @@
   #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
   #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
   /* an edge the shell could not place — loud on purpose, never a silent drop */
-  #rangeBar .rangeWarn { color:var(--override); font-weight:600; }
+  #rangeBar .rangeWarn { color:var(--rel-correct-full); font-weight:600; }
 
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
@@ -199,10 +204,10 @@
   rect.rowhit { fill:transparent; cursor:pointer; }
   rect.rowhit:hover { fill:var(--row-hover); }
   path.edge { fill:none; cursor:pointer; }
-  /* console-focus-encoding ticket 01 (cf32918) took weight off `indexes` as
-     a channel of its own — it used to render thin, alone, for fanning out
-     to the batch it cites, so it reads by its own hue (--indexes) instead
-     of a thinner line. That part still holds. What that ticket ALSO did —
+  /* console-focus-encoding ticket 01 (cf32918) took weight off the relation
+     axis as a channel of its own — one word used to render thin, alone, for
+     fanning out to the batch it cited, so relation reads by HUE instead of by
+     a thinner line. That part still holds. What that ticket ALSO did —
      give width to the focused SUBGRAPH, so a whole component read thick
      under any focus and the resting graph (no focus at all) was uniformly
      thick — is revised by user ruling 2026-08-28 [S15069/T1859]: width now
@@ -327,10 +332,22 @@
 <div id="panel"><button id="close">✕</button><div id="tlbar"><input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; ⏎" title="timelineQuery 接受的任意合法地址"><select id="timelineViewSelect" title="view — 视图"><option value="">turns</option><option value="milestones">milestones</option></select><input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="预算" title="pageBudget（1–25000，默认 1000）"><input id="timelinePageInput" type="number" min="1" placeholder="页" title="page（默认 1）"><button id="timelinePrev" type="button" title="上一页">‹</button><button id="timelineNext" type="button" title="下一页">›</button></div><div id="pbody"></div></div>
 <div id="toast"></div>
 <script>
-// `refutes` left with v12 — it folded into `override`. It stayed in this list
-// long enough to keep drawing its own filter checkbox for a word no edge can carry.
-const WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies"];
-const STRUCT = new Set(["narrows","extends","override"]);
+// THE FOUR CLASSES (main-agent-edges ticket 02) — what `ConsoleGraphEdge.relation`
+// now carries. The seven-word list this replaces was already drawing filter
+// checkboxes for words the write surfaces had stopped producing.
+const WORDS = ["correct(full)","correct(partial)","verify","use"];
+// CSS custom properties cannot carry parentheses, so each token maps to its own
+// variable name here rather than being interpolated into `--${relation}`.
+const REL_VAR = {
+  "correct(full)":"--rel-correct-full",
+  "correct(partial)":"--rel-correct-partial",
+  "verify":"--rel-verify",
+  "use":"--rel-use",
+};
+// Short arcs: the two corrections and `use`. It was `narrows`/`extends`/
+// `override` — three of the four sources of exactly these three tokens, with
+// `extends`' three absorbed siblings joining it, which is what one class means.
+const STRUCT = new Set(["correct(full)","correct(partial)","use"]);
 // line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.
 // Cross-phase words never carry lane tags (lanes are phase-local), so the
 // dash axis and the tag axis can never collide on one edge.
@@ -864,10 +881,10 @@ function renderGraphSvg(){
     // or from which focused subgraph it may or may not sit inside.
     //   colour — attributed at all (grey = draft), else which relation word
     //   dash   — did the edge stay inside one lane
-    // `indexes` still does not render thin for fanning out to the batch it
-    // cites — that reading collided with the one channel a reader is
-    // actually steering by; `indexes` reads by its own hue (--indexes)
-    // instead of a thinner line.
+    // Width is never a relation channel: an earlier encoding rendered a
+    // convergence-declaring edge thin for fanning out to the batch it cited,
+    // and that reading collided with the one channel a reader is actually
+    // steering by. Relation reads by HUE alone.
     // A DRAFT is an edge missing a tag on EITHER side, which is v12's own
     // definition, so a half-settled edge greys out with a fully unsettled one.
     // That deliberately drops the distinction between E6 (blocks commit) and
@@ -881,7 +898,7 @@ function renderGraphSvg(){
     const isDraft = e.tailTag === "" || e.headTag === "";
     const p = mk("path",{class:"edge",
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,
-      style:`stroke:${isDraft?"var(--draft)":`var(--${e.relation})`}`});
+      style:`stroke:${isDraft?"var(--draft)":`var(${REL_VAR[e.relation]||"--draft"})`}`});
     if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");
     p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
     // An edge reaches AT MOST two lanes — one per side (ticket 07), which for

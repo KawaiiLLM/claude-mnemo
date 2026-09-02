@@ -1269,8 +1269,8 @@ describe("console-shell.html inline script is parseable JavaScript", () => {
     // and the compile must go red. Without this, a guard that only ever sees
     // valid input proves nothing about what it rejects.
     const broken = blocks[1].replace(
-      "// long enough to keep drawing",
-      "long enough to keep drawing",
+      "// CSS custom properties cannot carry parentheses",
+      "CSS custom properties cannot carry parentheses",
     );
     expect(broken).not.toBe(blocks[1]);
     expect(() => new Function(broken)).toThrow();

@@ -14,7 +14,9 @@ import {
   type NoteSettlementWorklistLane,
   type SettlementWritableProvenance,
 } from "../db/note-settlement-snapshots";
+import { loadEndpointLaneFacts, resolveEdgeSides } from "../db/edge-side-resolution";
 import { getTurnById } from "../db/turns";
+import { edgeRelationClass, formatRelationClass, relationClassBearingSql } from "../shared/relation-class";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
 
 /**
@@ -142,7 +144,21 @@ interface ShapeEdgeRow {
   id: number;
   citingId: number;
   citedId: number;
-  relation: string;
+  relation: string | null;
+  relationClass: string | null;
+  relationCoverage: string | null;
+  /** The row's STORED declarations — resolved into `tailLane`/`headLane` below and never compared directly. */
+  tailTag: string;
+  headTag: string;
+}
+
+/** One shape edge with its two sides RESOLVED to lane tags (`''` = attributes to none) and its class token. */
+interface ResolvedShapeEdge {
+  id: number;
+  citingId: number;
+  citedId: number;
+  /** `correct(full)` / `correct(partial)` / `verify` / `use` — what the cross counts group by since main-agent-edges ticket 02; they grouped by stored word before. */
+  relationClass: string;
   tailTag: string;
   headTag: string;
 }
@@ -162,10 +178,15 @@ const SHAPE_VERTEX_CHUNK = 400;
  *
  * Three exclusions, each load-bearing:
  *
- *   - DRAFTS. A side left unsettled carries `''`, which equals no lane tag, so
- *     a draft is excluded by the same predicate rather than by a special case.
- *   - BARE ROWS. `relation IS NULL` is a citation, not a claim about the lane's
- *     structure, and the cross counts are grouped BY relation word.
+ *   - AN UNATTRIBUTABLE SIDE. Both sides are RESOLVED first
+ *     (`db/edge-side-resolution.ts`), and a side that attributes to no lane
+ *     carries `''`, which equals no lane tag — so it is excluded by the same
+ *     predicate rather than by a special case. What CHANGED (main-agent-edges
+ *     spec D2) is that a side nobody declared no longer means "no lane": it
+ *     derives one when its endpoint is in exactly one, and those edges are
+ *     induced now where they used to be invisible.
+ *   - BARE ROWS. A row with no relation class is a citation, not a claim about
+ *     the lane's structure, and the cross counts are grouped BY class.
  *   - A CONCURRENTLY ADDED MEMBER. It is not in the frozen set, so no edge
  *     touching it is induced — invisible to these numbers BY DEFINITION, which
  *     is the property that makes a retry's numbers identical to the first
@@ -197,10 +218,41 @@ export function computeSettlementShapeNumbers(
   }
 
   const edges = readShapeEdges(db, allVertices);
+  // ONE batched endpoint-facts load for the whole frozen vertex set, then a
+  // pure per-side projection — the same seam every other lane reader uses.
+  const laneFacts = loadEndpointLaneFacts(db, [
+    ...new Set(edges.flatMap((row) => [row.citingId, row.citedId])),
+  ]);
+  const resolved: ResolvedShapeEdge[] = [];
+  for (const row of edges) {
+    const relationClass = edgeRelationClass({
+      relation: row.relation,
+      relationClass: (row.relationClass ?? "") as never,
+      relationCoverage: (row.relationCoverage ?? "") as never,
+    });
+    if (relationClass === null) {
+      continue;
+    }
+    const sides = resolveEdgeSides(
+      { citingId: row.citingId, citedId: row.citedId, tailTag: row.tailTag, headTag: row.headTag },
+      laneFacts,
+    );
+    resolved.push({
+      id: row.id,
+      citingId: row.citingId,
+      citedId: row.citedId,
+      relationClass: formatRelationClass(
+        relationClass.relationClass,
+        relationClass.relationCoverage,
+      ),
+      tailTag: sides.tail.lane?.tag ?? "",
+      headTag: sides.head.lane?.tag ?? "",
+    });
+  }
 
   const lanes: SettlementLaneShape[] = worklist.map((lane, index) => {
     const members = memberSets[index]!;
-    const induced = edges.filter(
+    const induced = resolved.filter(
       (edge) =>
         edge.tailTag === lane.laneTag &&
         edge.headTag === lane.laneTag &&
@@ -227,7 +279,7 @@ export function computeSettlementShapeNumbers(
       const membersB = memberSets[j]!;
       const byRelation = new Map<string, number>();
       let total = 0;
-      for (const edge of edges) {
+      for (const edge of resolved) {
         const forward =
           edge.tailTag === laneA.laneTag &&
           edge.headTag === laneB.laneTag &&
@@ -241,7 +293,7 @@ export function computeSettlementShapeNumbers(
         if (!forward && !backward) {
           continue;
         }
-        byRelation.set(edge.relation, (byRelation.get(edge.relation) ?? 0) + 1);
+        byRelation.set(edge.relationClass, (byRelation.get(edge.relationClass) ?? 0) + 1);
         total += 1;
       }
       if (total === 0) {
@@ -262,10 +314,16 @@ export function computeSettlementShapeNumbers(
 }
 
 /**
- * Every classified, two-sided turn→turn row whose CITING end is a frozen
- * vertex. The cited end is filtered in JS rather than in a second `IN` list:
- * chunking both sides against SQLite's parameter ceiling would multiply the
- * chunk count for a filter one `Set.has` answers.
+ * Every class-carrying turn→turn row whose CITING end is a frozen vertex. The
+ * cited end is filtered in JS rather than in a second `IN` list: chunking both
+ * sides against SQLite's parameter ceiling would multiply the chunk count for
+ * a filter one `Set.has` answers.
+ *
+ * The `tail_tag <> '' AND head_tag <> ''` predicate is gone with the
+ * stored-side model (main-agent-edges D2): attribution is decided by the
+ * resolver against the endpoints' own membership, and selecting on a
+ * declaration here would drop every derived edge before that decision was
+ * ever made.
  */
 function readShapeEdges(db: Database, vertices: ReadonlySet<number>): ShapeEdgeRow[] {
   const ids = [...vertices];
@@ -280,12 +338,13 @@ function readShapeEdges(db: Database, vertices: ReadonlySet<number>): ShapeEdgeR
                   citing_id AS citingId,
                   cited_id AS citedId,
                   relation,
+                  relation_class AS relationClass,
+                  relation_coverage AS relationCoverage,
                   tail_tag AS tailTag,
                   head_tag AS headTag
              FROM memory_edges
             WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-              AND relation IS NOT NULL
-              AND tail_tag <> '' AND head_tag <> ''
+              AND ${relationClassBearingSql("memory_edges")}
               AND citing_id IN (${placeholders})
             ORDER BY id ASC`,
         )
@@ -303,7 +362,7 @@ function readShapeEdges(db: Database, vertices: ReadonlySet<number>): ShapeEdgeR
  */
 function countWeakComponents(
   members: ReadonlySet<number>,
-  edges: readonly ShapeEdgeRow[],
+  edges: readonly { citingId: number; citedId: number }[],
 ): number {
   const parent = new Map<number, number>();
   for (const id of members) {
