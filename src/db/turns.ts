@@ -3,7 +3,11 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "./database";
 
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
-import { deriveTurnSegmentMembership, recomputeSegmentFacetsForTurn } from "./segments";
+import {
+  deriveTurnSegmentMembership,
+  recomputeSegmentFacetsForTurn,
+  writeMembershipTags,
+} from "./segments";
 
 export type TurnStatus =
   | "active"
@@ -458,6 +462,10 @@ export function resetTurnExtractionFields(
   }
   // Keep colon-namespaced internal reminder tags; drop agent freeform tags.
   const keptTags = existing.tags.filter((tag) => tag.includes(":"));
+  // `tags` LEFT OUT of this statement on purpose (settlement-read-once ticket
+  // 02): the membership primitive below owns that column, so the reset's tag
+  // write is stamped and derived like every other one instead of being a raw
+  // `UPDATE` the gate never sees.
   db.query(
     `UPDATE turns
        SET status = 'active',
@@ -465,10 +473,9 @@ export function resetTurnExtractionFields(
            content = NULL,
            insight = NULL,
            type = '[]',
-           tags = ?,
            updated_at_epoch = ?
        WHERE id = ?`,
-  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
+  ).run(updatedAtEpoch, turnId);
   // Re-index rather than delete: the extraction fields are gone, but the
   // prompt and response this turn was captured with are still the record.
   reindexTurnFromDb(db, turnId);
@@ -477,12 +484,20 @@ export function resetTurnExtractionFields(
   // gate as `updateTurnById`: a reset of a turn that already held neither
   // changes no input.
   const resetTagsMoved = JSON.stringify(existing.tags) !== stringifyArray(keptTags);
-  if (resetTagsMoved) {
-    // Ticket 14: the note that carried the segment tag is being reset, so the
-    // membership derived from it goes with it — the same derivation
-    // `updateTurnById` runs, on the same one rule.
-    deriveTurnSegmentMembership(db, turnId, keptTags, updatedAtEpoch);
-  }
+  // THE PRIMITIVE, `normal` (settlement-read-once spec D4). The note that
+  // carried the task tag is being reset, so the membership derived from it
+  // goes with it — but a FROZEN row survives: before this ticket the
+  // derivation deleted every membership row it found when the tags named no
+  // task, so resetting one turn of an unnamed task destroyed legacy ownership
+  // nothing could put back. Called unconditionally, not under
+  // `resetTagsMoved`: the primitive itself decides whether anything moved,
+  // and a turn whose stored membership disagrees with its stored tags is
+  // exactly what a reset should reconcile.
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: keptTags }],
+    nowEpoch: updatedAtEpoch,
+  });
   if (existing.type.length > 0 || resetTagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }

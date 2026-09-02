@@ -19,7 +19,7 @@ import {
   type TagNamespaceHolder,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
-import { stampField } from "./write-gate";
+import { ANONYMOUS_WRITER, stampField } from "./write-gate";
 import { eraVisibleMemberSqlClause } from "../segment-era";
 import {
   SEGMENT_EDITABLE_FIELDS,
@@ -979,32 +979,89 @@ export function setSegmentTag(
     : { ok: false, message: `E${segmentId} no longer exists.` };
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE MEMBERSHIP PRIMITIVE (settlement-read-once spec D4 + D5)
+// ---------------------------------------------------------------------------
+
 /**
- * Membership, DERIVED (spec D3e): a turn belongs to whichever segment's tag
- * it carries, and to no segment at all when it carries none. Called from the
- * one turn-write primitive (`updateTurnById`, db/turns.ts) whenever `tags`
- * actually moves — so there is no verb to call and none to forget.
+ * The three EXPLICIT operations every membership move names (spec D4). There
+ * is no fourth and no implicit one: a caller that does not state an operation
+ * gets `normal`, and `normal` is the only operation ordinary tag writes ever
+ * use.
  *
- * The explicit verbs this replaces (`note(segment=…)`, `remember(assign)`)
- * are retired in the same ticket. `reassignSegmentMembers` survives for
- * settlement's own `reassign` correction path, which still states a target.
- *
- * NOT routed through `reassignSegmentMembers`, deliberately: that function
- * carries the lane-stranding VETO, whose job is to stop an explicit MOVE from
- * breaking a stored edge. A derivation is not a move a caller chose — it is
- * the consequence of a tags write that already passed the tags gate — and a
- * veto here would leave a turn whose stored tags and stored membership
- * disagree, which is the one state derivation may never produce. Stranded
- * edges are the checker's report to raise, not this function's to prevent.
- *
- * Returns the segment the turn now belongs to (`null` = unowned).
+ *  - `normal` — every ordinary tag write, batch or single. Frozen legacy
+ *    ownership (below) is INVISIBLE to it in both directions: never deleted,
+ *    never created, and a write that would put a frozen turn into a SECOND
+ *    task is refused naming its owner.
+ *  - `thaw-owner` — the D5 retag transition unnamed→named, and nothing else.
+ *    The frozen rows of the task being named become ordinary tagged
+ *    membership in the same transaction as the name.
+ *  - `forced-detach` — task-tier `clear` and the explicit unhome, and nothing
+ *    else. The only operation that DELETES a frozen row.
  */
-export function deriveTurnSegmentMembership(
+export type MembershipOperation = "normal" | "thaw-owner" | "forced-detach";
+
+/**
+ * FROZEN LEGACY OWNERSHIP (spec D5, RULED T2393). A `segment_members` row
+ * whose segment carries no tag is ownership history: production holds 185 of
+ * them across 66 unnamed tasks, and membership has been derived from the
+ * turn's own task tag since lane-model-v12 — so an unnamed task's rows can
+ * never be reproduced by a tag write and a derivation that deleted them would
+ * destroy the only record that they exist.
+ *
+ * Returns the unnamed segments this turn is a member of, ascending.
+ */
+export function frozenOwnerSegmentIds(db: Database, turnId: number): number[] {
+  return db
+    .query<{ segmentId: number }, [number]>(
+      `SELECT sm.segment_id AS segmentId
+         FROM segment_members sm
+         JOIN segments s ON s.id = sm.segment_id
+        WHERE sm.turn_id = ?
+          AND json_array_length(s.tags) = 0
+        ORDER BY sm.segment_id ASC`,
+    )
+    .all(turnId)
+    .map((row) => row.segmentId);
+}
+
+/**
+ * NAME BEFORE GROW (spec D5). Thrown by the derivation when a `normal` write
+ * would give a frozen-owned turn a SECOND task — the one state "legacy
+ * ownership is never extended" forbids. Caught at the write faces
+ * (`mcp/note.ts`, the settlement facade, `mcp/remember.ts`) and reported as
+ * an ordinary refusal; inside a write transaction the throw is also what
+ * rolls the half-written turn row back.
+ */
+export class MembershipFrozenOwnerError extends Error {
+  constructor(
+    readonly turnId: number,
+    readonly frozenSegmentId: number,
+    readonly wouldJoinSegmentId: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "MembershipFrozenOwnerError";
+  }
+}
+
+/** The refusal sentence, one place, so every face says it the same way. */
+export function formatFrozenOwnerRefusal(
   db: Database,
   turnId: number,
-  tags: readonly string[],
-  nowEpoch: number,
-): number | null {
+  frozenSegmentId: number,
+  wouldJoinSegmentId: number,
+): string {
+  return (
+    `${turnAddress(db, turnId)} is owned by unnamed E${frozenSegmentId}; name it or detach first. ` +
+    `Legacy ownership is frozen — it is never extended, so this turn cannot also join ` +
+    `E${wouldJoinSegmentId}. remember(retag, id="E${frozenSegmentId}", tag=…) names it and thaws ` +
+    `its members into the single truth; remember(clear, id="E${frozenSegmentId}") detaches them.`
+  );
+}
+
+/** Every segment's own one tag -> its id. Globally unique by schema. */
+function segmentTagIndex(db: Database): Map<string, number> {
   const index = new Map<string, number>();
   for (const row of db
     .query<{ id: number; tag: string }, []>(
@@ -1016,15 +1073,80 @@ export function deriveTurnSegmentMembership(
       index.set(row.tag, row.id);
     }
   }
+  return index;
+}
 
-  let target: number | null = null;
+/** The segment a tag set derives into — the first tag naming one, `null` when none does. */
+function derivedTarget(index: ReadonlyMap<string, number>, tags: readonly string[]): number | null {
   for (const tag of tags) {
     const segmentId = index.get(tag);
     if (segmentId !== undefined) {
-      target = segmentId;
-      break;
+      return segmentId;
     }
   }
+  return null;
+}
+
+/**
+ * The frozen-owner question, asked without writing anything: `null` when this
+ * tag set is legal for this turn under `operation`, a refusal sentence when it
+ * is not. `thaw-owner` and `forced-detach` are exempt by definition — the
+ * first converts frozen rows, the second deletes them.
+ */
+export function checkMembershipTagWrite(
+  db: Database,
+  turnId: number,
+  tags: readonly string[],
+  operation: MembershipOperation = "normal",
+): string | null {
+  if (operation !== "normal") {
+    return null;
+  }
+  const target = derivedTarget(segmentTagIndex(db), tags);
+  if (target === null) {
+    return null;
+  }
+  const frozen = frozenOwnerSegmentIds(db, turnId);
+  const owner = frozen.find((id) => id !== target);
+  return owner === undefined ? null : formatFrozenOwnerRefusal(db, turnId, owner, target);
+}
+
+/**
+ * Membership, DERIVED (spec D3e): a turn belongs to whichever segment's tag
+ * it carries, and to no segment at all when it carries none. Reached from the
+ * one membership primitive below and, for the paths that own their own `tags`
+ * UPDATE, from the one turn-write primitive (`updateTurnById`, db/turns.ts) —
+ * so there is no assignment verb to call and none to forget (T2386: no
+ * assignment verb exists).
+ *
+ * FROZEN ROWS ARE INVISIBLE TO IT (spec D5). Before this ticket the function
+ * DELETED a turn's every `segment_members` row whenever the tags named no
+ * segment, so a reset, a compact repair or a lane clear on a member of an
+ * unnamed task silently destroyed ownership no tag could ever put back. Now
+ * the delete is restricted to rows of NAMED segments, and the insert only
+ * ever names a tagged segment anyway — frozen rows are neither deleted nor
+ * created under `normal` and `thaw-owner`. `forced-detach` is the one
+ * operation that removes them, and it says so in its name.
+ *
+ * THE LANE-STRANDING VETO IS NOT ASKED HERE, deliberately: a derivation is not
+ * a move a caller chose — it is the consequence of a tags write that already
+ * passed the tags gate — and a veto here would leave a turn whose stored tags
+ * and stored membership disagree, which is the one state derivation may never
+ * produce. The primitive below asks it, BEFORE it writes the tags, which is
+ * the only point at which a refusal can leave the database untouched.
+ * Stranded edges left by anything else are the checker's report to raise.
+ *
+ * Returns the segment the turn now belongs to (`null` = unowned).
+ */
+export function deriveTurnSegmentMembership(
+  db: Database,
+  turnId: number,
+  tags: readonly string[],
+  nowEpoch: number,
+  operation: MembershipOperation = "normal",
+): number | null {
+  const index = segmentTagIndex(db);
+  const target = derivedTarget(index, tags);
 
   const priorSegmentIds = db
     .query<{ segmentId: number }, [number]>(
@@ -1033,18 +1155,224 @@ export function deriveTurnSegmentMembership(
     .all(turnId)
     .map((row) => row.segmentId);
 
-  if (priorSegmentIds.length === (target === null ? 0 : 1) && priorSegmentIds[0] === target) {
+  const frozen = new Set(operation === "forced-detach" ? [] : frozenOwnerSegmentIds(db, turnId));
+  if (operation === "normal") {
+    const owner = [...frozen].find((id) => id !== target);
+    if (target !== null && owner !== undefined) {
+      throw new MembershipFrozenOwnerError(
+        turnId,
+        owner,
+        target,
+        formatFrozenOwnerRefusal(db, turnId, owner, target),
+      );
+    }
+  }
+
+  const removable = priorSegmentIds.filter((id) => id !== target && !frozen.has(id));
+  const alreadyThere = target !== null && priorSegmentIds.includes(target);
+  if (removable.length === 0 && (target === null || alreadyThere)) {
     return target;
   }
 
-  db.query<unknown, [number]>("DELETE FROM segment_members WHERE turn_id = ?").run(turnId);
-  if (target !== null) {
+  if (removable.length > 0) {
+    const placeholders = removable.map(() => "?").join(",");
+    db.query<unknown, number[]>(
+      `DELETE FROM segment_members WHERE turn_id = ? AND segment_id IN (${placeholders})`,
+    ).run(turnId, ...removable);
+  }
+  if (target !== null && !alreadyThere) {
     addSegmentMembers(db, target, [turnId], nowEpoch);
   }
-  for (const segmentId of priorSegmentIds.filter((id) => id !== target)) {
+  for (const segmentId of removable) {
     recomputeSegmentFacets(db, segmentId);
   }
   return target;
+}
+
+/** One turn's whole next tag set, as the primitive takes it. */
+export interface MembershipTagWrite {
+  turnId: number;
+  /** The FULL tag set this turn is to store — the primitive never merges. */
+  tags: readonly string[];
+}
+
+/** One member's reason for the whole batch being refused. */
+export interface MembershipWriteRefusal {
+  turnId: number;
+  /** `S<session>/T<prompt>`, so a refusal is written in the address vocabulary repairs take. */
+  address: string;
+  message: string;
+}
+
+export type MembershipWriteResult =
+  | {
+      ok: true;
+      operation: MembershipOperation;
+      /** The turns whose stored `tags` actually moved — the ones that earned a stamp. */
+      changedTurnIds: number[];
+      /** Where each named turn ended up (`null` = unowned). */
+      membership: Array<{ turnId: number; segmentId: number | null }>;
+    }
+  | {
+      ok: false;
+      /**
+       * EVERY failing member, never just the first — one repair call fixes the
+       * batch (user story 6). Nothing was written.
+       */
+      refusals: MembershipWriteRefusal[];
+      message: string;
+    };
+
+export interface WriteMembershipTagsInput {
+  operation: MembershipOperation;
+  writes: readonly MembershipTagWrite[];
+  /**
+   * The acting writer, for the `tags` field stamp — exactly what the `note`
+   * path does with `stampField(…, "tags", …)`. `null`/omitted stamps under
+   * `ANONYMOUS_WRITER`: it is the MUTATION that has to be recorded, not the
+   * mutator's standing, which is the same reasoning `stampTurnRelationsRevision`
+   * states for its own anonymous stamp.
+   */
+  writer?: string | null;
+  nowEpoch: number;
+  /**
+   * `thaw-owner` only: the task being named. Every write in the batch must
+   * derive into exactly this segment, which is what stops the one operation
+   * that can convert frozen rows from being borrowed for anything else.
+   */
+  thawingSegmentId?: number;
+}
+
+/**
+ * THE PRIMITIVE (spec D4). Write tags onto N turns in ONE transaction → stamp
+ * the `tags` field for the acting writer → derive `segment_members` from the
+ * tags → refresh the facets a tag write refreshes on the `note` path.
+ *
+ * Every path that moves membership reaches it: the batch and single `note` tag
+ * writes, `create … members` at both tiers, all three `retag` transitions,
+ * task merge, lane merge / clear / retag, task-tier `clear`,
+ * `resetTurnExtractionFields`, compact occupied-turn repair, and the cutover
+ * migration. `reassignSegmentMembers` — the second truth this replaces, which
+ * wrote `segment_members` directly and left the turn's own `tags` saying
+ * something else — is gone; seeding never MOVES a turn between tasks any more.
+ *
+ * ALL-OR-NOTHING, with every failure named. The two checks that can refuse —
+ * the frozen-owner rule above and the lane-stranding veto
+ * (`findMembershipLaneStrandings`) — run over the WHOLE set before the first
+ * `UPDATE`, so a refusal leaves `segment_members` and `turns.tags`
+ * byte-identical to what they were on entry without depending on the caller's
+ * transaction to unwind anything.
+ *
+ * The caller owns the transaction. Every production caller already runs inside
+ * `runWriteTransaction` (the settlement direct-write's one-transaction-per-call
+ * discipline, `remember`'s own write transactions, `mergeSegments`' caller), so
+ * a throw from anywhere below rolls the batch back whole.
+ */
+export function writeMembershipTags(
+  db: Database,
+  input: WriteMembershipTagsInput,
+): MembershipWriteResult {
+  const { operation, writes, nowEpoch } = input;
+  if (writes.length === 0) {
+    return { ok: true, operation, changedTurnIds: [], membership: [] };
+  }
+
+  const index = segmentTagIndex(db);
+  const refusals: MembershipWriteRefusal[] = [];
+
+  for (const write of writes) {
+    const target = derivedTarget(index, write.tags);
+
+    if (operation === "normal") {
+      const owner = frozenOwnerSegmentIds(db, write.turnId).find((id) => id !== target);
+      if (target !== null && owner !== undefined) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message: formatFrozenOwnerRefusal(db, write.turnId, owner, target),
+        });
+        continue;
+      }
+    }
+
+    if (operation === "thaw-owner" && input.thawingSegmentId !== undefined) {
+      if (target !== input.thawingSegmentId) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message:
+            `thaw-owner may only move a member into E${input.thawingSegmentId}, the task being ` +
+            `named — this write derives into ${target === null ? "no task" : `E${target}`}.`,
+        });
+        continue;
+      }
+    }
+
+    // The lane-stranding veto, per turn against the target this turn's OWN
+    // tags derive into — `reassignSegmentMembers` asked it against one target
+    // for the whole set, which is a question the primitive cannot ask because
+    // each member states its own tags.
+    const strandings = findMembershipLaneStrandings(db, [write.turnId], target);
+    if (strandings.length > 0) {
+      refusals.push({
+        turnId: write.turnId,
+        address: turnAddress(db, write.turnId),
+        message: formatMembershipLaneStrandingRejection(db, target, strandings),
+      });
+    }
+  }
+
+  if (refusals.length > 0) {
+    return {
+      ok: false,
+      refusals,
+      message:
+        `${refusals.length} of ${writes.length} turn(s) refused; nothing was written. ` +
+        refusals.map((entry) => `${entry.address}: ${entry.message}`).join(" "),
+    };
+  }
+
+  const readTags = db.query<{ tags: string | null }, [number]>(
+    "SELECT tags FROM turns WHERE id = ?",
+  );
+  const updateTurnTags = db.query<unknown, [string, number]>(
+    "UPDATE turns SET tags = ? WHERE id = ?",
+  );
+
+  const changedTurnIds: number[] = [];
+  const membership: Array<{ turnId: number; segmentId: number | null }> = [];
+  for (const write of writes) {
+    const raw = readTags.get(write.turnId)?.tags ?? "[]";
+    let stored: string[];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      stored = Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === "string")
+        : [];
+    } catch {
+      stored = [];
+    }
+    const next = [...write.tags];
+    const moved =
+      next.length !== stored.length || next.some((value, at) => value !== stored[at]);
+    if (moved) {
+      updateTurnTags.run(JSON.stringify(next), write.turnId);
+      // The stamp, on the mutation and only on the mutation: a restatement
+      // that changed nothing is not a write another reader's grant should go
+      // stale against. This is the seam the concurrency rule rests on — a
+      // second mutator moving these tags is exactly what makes the first
+      // writer's whole-set write refuse as stale at `checkFieldGate`.
+      stampField(db, "turn", write.turnId, "tags", input.writer ?? ANONYMOUS_WRITER, nowEpoch);
+      changedTurnIds.push(write.turnId);
+    }
+    const segmentId = deriveTurnSegmentMembership(db, write.turnId, next, nowEpoch, operation);
+    membership.push({ turnId: write.turnId, segmentId });
+    if (moved) {
+      recomputeSegmentFacetsForTurn(db, write.turnId);
+    }
+  }
+
+  return { ok: true, operation, changedTurnIds, membership };
 }
 
 /**
@@ -1221,6 +1549,17 @@ export function listRecentSegments(
  * a transaction would need the `SAVEPOINT` idiom `applySegmentWrites` uses —
  * nest-safe, unlike a bare `BEGIN` — not one added here speculatively, where
  * on today's only path it would be a redundant savepoint per settlement write.
+ */
+/**
+ * THE INSERT HALF OF THE PRIMITIVE, and the one path deliberately left outside
+ * it (settlement-read-once D4's "a path left outside is named with its
+ * reason"): `deriveTurnSegmentMembership` above is its only caller in `src/`,
+ * because a membership row is only ever created by a DERIVATION now. It stays
+ * exported for the two callers that are not membership MOVES at all — ticket
+ * 03's cutover migration, which writes the pre-cutover stock it is migrating,
+ * and test fixtures reproducing that stock (a tag-less member of a named task,
+ * a frozen row of an unnamed one). Neither is a caller a tag write could
+ * express, which is exactly why they are not routed.
  */
 export function addSegmentMembers(
   db: Database,
@@ -1448,99 +1787,34 @@ export function formatMembershipLaneStrandingRejection(
   );
 }
 
-export type ReassignSegmentMembersResult =
-  | {
-      ok: true;
-      /** The segment(s) these turns were removed FROM, distinct, excluding `targetSegmentId` itself. */
-      vacatedSegmentIds: number[];
-      /** Turn ids actually (re-)linked to `targetSegmentId` — empty when `targetSegmentId` is `null`. */
-      addedTurnIds: number[];
-      targetSegmentId: number | null;
-    }
-  | {
-      /**
-       * The move was REFUSED and `segment_members` is byte-identical to what
-       * it was on entry — the lane check runs before the delete, so there is
-       * no partial state to unwind and no transaction to depend on for it.
-       */
-      ok: false;
-      message: string;
-    };
+/**
+ * `reassignSegmentMembers` — the SECOND truth this ticket ends (spec D4,
+ * defect 4) — stood here. It wrote `segment_members` directly, taking a
+ * target the caller stated, and never touched the turn's own `tags`: the
+ * production shape it produced is 98 members of NAMED tasks carrying no task
+ * tag, and 66 unnamed tasks owning 185 turns no tag could ever have put
+ * there. Its two callers (`remember(create, members)` and `mergeSegments`)
+ * now write TAGS through `writeMembershipTags` and let the derivation decide
+ * membership, so "seeding never MOVES a turn between tasks" holds by
+ * construction rather than by convention. The lane-stranding veto it carried
+ * did not go with it: the primitive asks `findMembershipLaneStrandings`
+ * above, per turn, before its first `UPDATE`.
+ */
 
 /**
- * Ticket 02 (ownership-and-note-cadence spec, [S15069/T926], peer finding 3):
- * the ONE write path for "these turns belong here now" — single ownership
- * enforced by the WRITE, not a retroactive schema constraint (a legacy
- * segment may still share a turn with another; this function does not touch
- * that history, only what a NEW assignment does going forward). Every turn
- * named is first removed from EVERY segment it currently belongs to, then
- * (if `targetSegmentId` is not `null`) added to the target — one
- * transaction, so a turn is never observably a member of two segments at
- * once between the two halves.
+ * The structural membership read — every `segment_members` row of a segment,
+ * oldest member first.
  *
- * `targetSegmentId: null` is `remember`'s `assign` with no `id` — place the
- * named turns in NO segment (homeless). `remember`'s `create` seeds its
- * `members` through this SAME function (not `addSegmentMembers` directly):
- * a turn named in a fresh segment's `members` is evicted from wherever it
- * used to live, the identical single-ownership rule `assign` enforces, not a
- * second, looser path a caller could use to sidestep it.
- *
- * Facets are recomputed for every segment whose membership actually
- * changed — every vacated segment, and the target if anything landed there
- * (`addSegmentMembers` already does the target's own recomputation). A
- * segment reassigned to the SAME segment it already belonged to is a no-op
- * for `vacatedSegmentIds` (filtered out) but still exercises the delete+
- * re-insert cycle, which is harmless.
- *
- * Lane-declaration ticket 02 (spec D2): this is also where the lane gate's
- * MEMBERSHIP half runs — `findMembershipLaneStrandings` above, checked BEFORE
- * the delete, so a refusal leaves `segment_members` byte-identical without
- * depending on the caller's transaction to unwind anything. The result became
- * a discriminated union in the same change: a refusal a caller could ignore by
- * reading `addedTurnIds` off the old shape would be a gate in name only, and
- * the union makes every call site handle it or fail to compile.
+ * NO LIVENESS FILTER, AND THAT IS THE CONTRACT (spec D4, stated plainly
+ * rather than assumed). It returns FROZEN rows — the legacy ownership of an
+ * unnamed task, which the derivation may never touch — and it returns the
+ * rows of compacted and rewound turns (production: of 185 frozen members, 1
+ * compacted and 38 skipped/rewound). A frozen row is ownership HISTORY and is
+ * listed as such; the verbs built on this reader (`clear`'s roster, the
+ * task-tier delete guard, the merge's member population) all see it. What a
+ * recall surface chooses to DISPLAY is a render-time decision and is not this
+ * function's to make.
  */
-export function reassignSegmentMembers(
-  db: Database,
-  turnIds: readonly number[],
-  targetSegmentId: number | null,
-  nowEpoch: number,
-): ReassignSegmentMembersResult {
-  if (turnIds.length === 0) {
-    return { ok: true, vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
-  }
-
-  const strandings = findMembershipLaneStrandings(db, turnIds, targetSegmentId);
-  if (strandings.length > 0) {
-    return {
-      ok: false,
-      message: formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings),
-    };
-  }
-
-  const placeholders = turnIds.map(() => "?").join(",");
-  const priorSegmentIds = db
-    .query<{ segmentId: number }, number[]>(
-      `SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id IN (${placeholders})`,
-    )
-    .all(...turnIds)
-    .map((row) => row.segmentId);
-
-  db.query<unknown, number[]>(
-    `DELETE FROM segment_members WHERE turn_id IN (${placeholders})`,
-  ).run(...turnIds);
-
-  const addedTurnIds =
-    targetSegmentId === null ? [] : addSegmentMembers(db, targetSegmentId, turnIds, nowEpoch);
-
-  const vacatedSegmentIds = priorSegmentIds.filter((id) => id !== targetSegmentId);
-  for (const segmentId of vacatedSegmentIds) {
-    recomputeSegmentFacets(db, segmentId);
-  }
-
-  return { ok: true, vacatedSegmentIds, addedTurnIds, targetSegmentId };
-}
-
 export function getSegmentMemberTurnIds(
   db: Database,
   segmentId: number,
@@ -2026,9 +2300,7 @@ export function clearSegmentMembers(db: Database, segmentId: number, nowEpoch: n
   const readTags = db.query<{ tags: string | null }, [number]>(
     "SELECT tags FROM turns WHERE id = ?",
   );
-  const updateTurnTags = db.query<unknown, [string, number]>(
-    "UPDATE turns SET tags = ? WHERE id = ?",
-  );
+  const writes: MembershipTagWrite[] = [];
   for (const turnId of memberTurnIds) {
     const raw = readTags.get(turnId)?.tags ?? "[]";
     let stored: string[];
@@ -2040,12 +2312,18 @@ export function clearSegmentMembers(db: Database, segmentId: number, nowEpoch: n
     } catch {
       stored = [];
     }
-    const next = ownTag !== null ? stored.filter((value) => value !== ownTag) : stored;
-    if (next.length !== stored.length) {
-      updateTurnTags.run(JSON.stringify(next), turnId);
-    }
-    deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+    writes.push({
+      turnId,
+      tags: ownTag !== null ? stored.filter((value) => value !== ownTag) : stored,
+    });
   }
+
+  // `forced-detach` (spec D4), NAMED rather than implicit. This tier used to
+  // delete an unnamed task's rows through the derivation, as a side effect of
+  // stripping a tag that was never there; now the derivation preserves frozen
+  // rows for every other operation and THIS is the one path allowed to remove
+  // them. The outcome is what it always was — the operation is now stated.
+  writeMembershipTags(db, { operation: "forced-detach", writes, nowEpoch });
   return memberTurnIds.length;
 }
 
@@ -2415,13 +2693,11 @@ export function mergeSegments(
   if (memberTurnIds.length > 0) {
     // AN UNNAMED DESTINATION CANNOT HOLD MEMBERS (peer review [S15069/T1773],
     // reproduced). Membership is DERIVED from a turn's own task tag, so the
-    // backfill below strips `fromTag` and has no `intoTag` to put in its
-    // place; `deriveTurnSegmentMembership` then deletes the very rows
-    // `reassignSegmentMembers` just wrote. The merge went on to delete the
-    // source and hand back `kind: "merged", membersMoved: 1` — a success
-    // receipt over an orphaned turn and a destroyed container. Refused before
-    // anything moves, because there is no ordering of these writes that
-    // preserves the invariant: the destination has to be nameable first.
+    // backfill below strips `fromTag` and would have no `intoTag` to put in
+    // its place, leaving every moved turn unowned and the source destroyed
+    // under a `kind: "merged"` receipt. Refused before anything moves, because
+    // there is no ordering of these writes that preserves the invariant: the
+    // destination has to be nameable first.
     const destination = getSegment(db, intoId);
     if (destination !== null && segmentTagOf(destination) === null) {
       return {
@@ -2433,11 +2709,21 @@ export function mergeSegments(
       };
     }
 
-    const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
-    if (!moved.ok) {
-      return { kind: "members-blocked", message: moved.message };
+    // AN UNNAMED SOURCE REFUSES (spec D5 rule 3). Its member rows are FROZEN
+    // legacy ownership: no tag put them there, so no tag write can move them,
+    // and a merge that pretended otherwise would either lose them silently or
+    // extend legacy ownership into a second container. "Name the source
+    // first" is the same name-before-grow rule seeding and `retag` obey.
+    if (fromTag === null) {
+      return {
+        kind: "members-blocked",
+        message:
+          `E${fromId} has no task tag, so its ${memberTurnIds.length} member turn(s) are FROZEN ` +
+          `legacy ownership — membership is derived from a task tag and none put them there. ` +
+          `Name the source first (remember(retag, id="E${fromId}", tag=…)), which thaws them into ` +
+          `the single truth, then merge. remember(clear, id="E${fromId}") detaches them instead.`,
+      };
     }
-    membersMoved = memberTurnIds.length;
 
     const intoSegment = getSegment(db, intoId);
     const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
@@ -2445,9 +2731,7 @@ export function mergeSegments(
     const readTags = db.query<{ tags: string | null }, [number]>(
       "SELECT tags FROM turns WHERE id = ?",
     );
-    const updateTurnTags = db.query<unknown, [string, number]>(
-      "UPDATE turns SET tags = ? WHERE id = ?",
-    );
+    const writes: MembershipTagWrite[] = [];
     for (const turnId of memberTurnIds) {
       const raw = readTags.get(turnId)?.tags ?? "[]";
       let stored: string[];
@@ -2459,7 +2743,7 @@ export function mergeSegments(
       } catch {
         stored = [];
       }
-      let next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
+      let next = stored.filter((value) => value !== fromTag);
       if (intoTag !== null && !next.includes(intoTag)) {
         // Prepended, not appended — the segment's own tag leads the array in
         // every other write path this codebase has (`create`, `mergeLaneTag`'s
@@ -2468,13 +2752,24 @@ export function mergeSegments(
         // looks first for "whose segment is this".
         next = [intoTag, ...next];
       }
-      const changed =
-        next.length !== stored.length || next.some((value, index) => value !== stored[index]);
-      if (changed) {
-        updateTurnTags.run(JSON.stringify(next), turnId);
-      }
-      deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+      writes.push({ turnId, tags: next });
     }
+
+    // THE PRIMITIVE (spec D4). One call writes the tags, stamps `tags`, and
+    // lets the derivation move `segment_members` — where this used to call
+    // `reassignSegmentMembers` first and rewrite the tags afterwards, which is
+    // exactly the two-truths shape the ticket ends. The lane-stranding veto is
+    // the primitive's own pre-check, so a refusal still leaves the database
+    // byte-identical.
+    const moved = writeMembershipTags(db, {
+      operation: "normal",
+      writes,
+      nowEpoch,
+    });
+    if (!moved.ok) {
+      return { kind: "members-blocked", message: moved.message };
+    }
+    membersMoved = memberTurnIds.length;
   }
 
   // --- 2b. turns still carrying `fromTag` after the retag (lane-merge-

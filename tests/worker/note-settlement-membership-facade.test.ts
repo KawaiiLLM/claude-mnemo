@@ -13,7 +13,6 @@ import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
   createSegment,
-  reassignSegmentMembers,
   setSegmentTags,
   toggleSegmentStatus,
 } from "../../src/db/segments";
@@ -362,7 +361,10 @@ describe("create (lane tier) / delete — settlement's half of the lane registry
     const segmentId = openSegment();
     const cited = seedTurn(sessionDbId, 1, { type: ["design"], tags: ["write-gate"] });
     const citing = seedTurn(sessionDbId, 2, { type: ["design"], tags: ["write-gate"] });
-    expect(reassignSegmentMembers(db, [cited, citing], segmentId, NOW).ok).toBe(true);
+    // FROZEN legacy ownership on purpose (settlement-read-once D5): this
+    // fixture's task is UNNAMED, so no tag write could place these turns —
+    // `addSegmentMembers` is the shape production's 185 legacy rows have.
+    addSegmentMembers(db, segmentId, [cited, citing], NOW);
     expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "write-gate" }).ok).toBe(true);
 
     writeMemoryEdges(

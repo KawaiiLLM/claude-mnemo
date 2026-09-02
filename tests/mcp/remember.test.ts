@@ -6,6 +6,7 @@ import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
+  addSegmentMembers,
   getAttachedSegmentIds,
   getSegment,
   getSegmentMemberTurnIds,
@@ -182,6 +183,9 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "Adopted from a proposal",
+          // NAME BEFORE GROW (settlement-read-once D5): membership is derived
+          // from the task's own tag, so seeding needs one in the same call.
+          tag: "adopted-proposal",
           members: [`S${sessionId}/T1`, `S${sessionId}/T2`],
         }),
       );
@@ -200,6 +204,7 @@ describe("remember tool (ticket 02)", () => {
         rememberTool(db, {
           verb: "create",
           title: "Should not exist",
+          tag: "should-not-exist",
           members: [`S${sessionId}/T1`, `S${sessionId}/T999`, "not-an-address"],
         }),
       );
@@ -1164,7 +1169,7 @@ describe("remember tool (ticket 02)", () => {
       // `segment_members` WITHOUT the task's own tag — a selection keyed off
       // `turns.tags` would move NONE of this member, and the cascade off
       // `from`'s own deletion would then silently orphan it.
-      test("a member seeded via create(members=[...]) — carrying NO task tag — still moves, and is backfilled", () => {
+      test("a member seeded via create(members=[...]) CARRIES the task tag from the start, and the merge rewrites it", () => {
         const t1 = seedTurn(1, 100);
         const seedText = resultText(
           rememberTool(db, {
@@ -1176,12 +1181,22 @@ describe("remember tool (ticket 02)", () => {
         );
         const from = Number(/Created E(\d+)/.exec(seedText)![1]);
         const into = createViaTool("merge task into2", "merge-task-into2");
-        // The precondition this test exists to pin: `create`'s own `members`
-        // seeding never touched `t1`'s tags at all — it is a member ONLY by
-        // `segment_members`, the exact state a tag-keyed selection would miss.
+        // THE DEFECT THIS TICKET ENDS (settlement-read-once D4, defect 4).
+        // `create`'s `members` seeding used to write `segment_members`
+        // directly and never touch `t1`'s tags — a member ONLY by row, the
+        // exact state a tag-keyed selection misses and the source of
+        // production's 98 tag-less members of named tasks. Seeding now writes
+        // the TASK TAG and lets the derivation place the row, so the two
+        // truths are one.
+        //
+        // MUTATION: put the seeding back on a direct `segment_members` write
+        // and this assertion goes red first.
         expect(
-          db.query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?").get(t1)!.tags,
-        ).toBeNull();
+          JSON.parse(
+            db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(t1)!
+              .tags,
+          ),
+        ).toEqual(["merge-task-from2"]);
         expect(getSegmentMemberTurnIds(db, from)).toEqual([t1]);
 
         const text = resultText(rememberTool(db, { verb: "merge", id: `E${from}`, into: `E${into}` }));
@@ -1508,13 +1523,15 @@ describe("remember tool (ticket 02)", () => {
           verb: "create",
           title: "task with an untagged member",
           tag: "untagged-member-task",
-          members: [`S${sessionId}/T1`],
         }),
       );
       const segmentId = Number(/Created E(\d+)/.exec(text)![1]);
-      // The member carries no tag naming this segment — confirms the fixture
-      // actually exercises the ownership-not-tag reading: `create(members)`
-      // seeds `segment_members` without touching the turn's own `tags`.
+      // A TAG-LESS member written straight into `segment_members` — the
+      // pre-cutover shape production holds 98 of, which `create(members)` can
+      // no longer produce now that seeding writes the task tag
+      // (settlement-read-once D4). The row is what the delete guard reads, and
+      // the point of this test is that it reads OWNERSHIP, not the tag.
+      addSegmentMembers(db, segmentId, [turnId], 100);
       const turnTags = db
         .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
         .get(turnId)!.tags;

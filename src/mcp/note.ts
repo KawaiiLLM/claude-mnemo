@@ -31,6 +31,7 @@ import {
 import { parseBareAddressReference, validateReferences } from "../db/references";
 import {
   attachSegmentToSession,
+  checkMembershipTagWrite,
   getOwningSegmentId,
   isSegmentDetachedFromSession,
 } from "../db/segments";
@@ -1184,6 +1185,16 @@ function handleTurnWrite(
         // The gate's effective set is what actually lands: the replacement
         // set plus any hook-owned machine tags the caller omitted.
         tagsResolution.value = gate.effectiveTags;
+        // NAME BEFORE GROW (settlement-read-once spec D5), asked right after
+        // the vocabulary gate and before anything lands: a turn owned by an
+        // UNNAMED task carries frozen legacy ownership, and a write that would
+        // also give it a named task's tag would put it in two tasks at once.
+        // `updateTurnById` refuses the same write structurally; this face asks
+        // first so the caller hears the refusal instead of an exception.
+        const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+        if (frozen !== null) {
+          fail(frozen);
+        }
         topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }

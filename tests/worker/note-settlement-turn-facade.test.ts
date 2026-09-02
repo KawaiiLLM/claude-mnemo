@@ -11,7 +11,7 @@ import {
 } from "../../src/db/note-settlement";
 import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
-import { createSegment, reassignSegmentMembers } from "../../src/db/segments";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
@@ -161,7 +161,11 @@ function seedTurn(sessionDbId: number, promptNumber: number): number {
     )!.id;
   // D2: every fixture turn gets a home, so a tagged edge between any two of
   // them has a segment to look its lane up in.
-  expect(reassignSegmentMembers(db, [turnId], laneHomeSegment(), 100).ok).toBe(true);
+  // A TAG-LESS member of a NAMED task — the pre-cutover shape production
+  // holds 98 of (settlement-read-once D5). Written directly rather than
+  // through the membership primitive on purpose: the primitive derives from
+  // tags, and these fixtures assert on `tags` they set themselves.
+  addSegmentMembers(db, laneHomeSegment(), [turnId], 100);
   return turnId;
 }
 

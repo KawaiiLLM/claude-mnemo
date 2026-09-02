@@ -240,6 +240,11 @@ describe("acceptance criterion — remember(create) seeds exactly a proposal's a
     const result = rememberTool(db, {
       verb: "create",
       title: proposal!.title,
+      // NAME BEFORE GROW (settlement-read-once D5): the approving call names
+      // the task in the same breath, because membership is derived from that
+      // word — the proposal itself still supplies the title and the addresses
+      // unmodified, which is what this test is about.
+      tag: "lease-fencing",
       members: proposal!.addresses,
     });
 

@@ -12,7 +12,11 @@ import {
   type EdgeNode,
   type EdgeNodeKind,
 } from "./memory-edges";
-import { deriveTurnSegmentMembership, getOwningSegmentId } from "./segments";
+import {
+  getOwningSegmentId,
+  writeMembershipTags,
+  type MembershipTagWrite,
+} from "./segments";
 import {
   findTagNamespaceHolder,
   TagNamespaceCollisionError,
@@ -617,10 +621,8 @@ export function mergeLaneTag(
     )
     .all(segmentId, from);
 
-  const updateTurnTags = db.query<unknown, [string, number]>(
-    "UPDATE turns SET tags = ? WHERE id = ?",
-  );
   let turnsDeduplicated = 0;
+  const memberWrites: MembershipTagWrite[] = [];
   for (const turn of memberTurns) {
     const stored = (JSON.parse(turn.tags) as unknown[]).filter(
       (tag): tag is string => typeof tag === "string",
@@ -635,9 +637,14 @@ export function mergeLaneTag(
         next.push(rewritten);
       }
     }
-    updateTurnTags.run(JSON.stringify(next), turn.id);
-    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
+    memberWrites.push({ turnId: turn.id, tags: next });
   }
+  // THE MEMBERSHIP PRIMITIVE (settlement-read-once spec D4), `normal`: it
+  // writes the tags, STAMPS the `tags` field, and derives — where this loop
+  // used to raw-`UPDATE turns SET tags` and stamp nothing, so a lane merge
+  // moved a turn's tags underneath a writer holding a read grant on them and
+  // that writer's next whole-set write was admitted as fresh.
+  writeMembershipTags(db, { operation: "normal", writes: memberWrites, nowEpoch });
 
   // --- 1b. turns still carrying `from` after the retag (lane-merge-skip-
   //         receipt ticket 01) ---------------------------------------------
@@ -1099,17 +1106,18 @@ export function clearLane(
     )
     .all(segmentId, tag);
 
-  const updateTurnTags = db.query<unknown, [string, number]>(
-    "UPDATE turns SET tags = ? WHERE id = ?",
-  );
-  for (const turn of memberTurns) {
-    const stored = (JSON.parse(turn.tags) as unknown[]).filter(
-      (value): value is string => typeof value === "string",
-    );
-    const next = stored.filter((value) => value !== tag);
-    updateTurnTags.run(JSON.stringify(next), turn.id);
-    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
-  }
+  // Same primitive, same `normal` operation, same reason as `mergeLaneTag`'s
+  // own member loop: the tag write is stamped and derived in one place.
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: memberTurns.map((turn) => ({
+      turnId: turn.id,
+      tags: (JSON.parse(turn.tags) as unknown[])
+        .filter((value): value is string => typeof value === "string")
+        .filter((value) => value !== tag),
+    })),
+    nowEpoch,
+  });
 
   // --- 2. edges: bulk delete, grouped by citing node for the D5b restore --
   const dropSideTagRows = db.query<unknown, [number]>(

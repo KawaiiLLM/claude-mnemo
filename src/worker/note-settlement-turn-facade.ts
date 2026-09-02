@@ -27,10 +27,20 @@ import type { EdgeNode, MemoryEdge } from "../db/memory-edges";
 import { closeNoteDebtAsNoted } from "../db/note-debt";
 import type { NoteSettlementStage } from "../db/note-settlement";
 import { parseBareAddressReference, validateReferences } from "../db/references";
-import { getOwningSegmentId } from "../db/segments";
+import {
+  checkMembershipTagWrite,
+  getOwningSegmentId,
+  getSegment,
+  segmentTagOf,
+  writeMembershipTags,
+} from "../db/segments";
 import { getSession, updateSessionFields } from "../db/sessions";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
-import { checkTurnTagWrite } from "../db/turn-tag-gate";
+import {
+  checkTurnTagWrite,
+  loadDeclaredLaneTags,
+  loadSegmentTagIndex,
+} from "../db/turn-tag-gate";
 import {
   getTurn,
   getTurnById,
@@ -366,6 +376,53 @@ export function parameterError(message: string): ToolTextResult {
 export const settlementTurnWriteInputShape = {
   ...settlementNoteInputShape,
   /**
+   * THE BATCH TAG WRITE (settlement-read-once spec D4, user stories 5–8;
+   * RULED T2386 — a batch of TAGS, and no assignment verb). SETTLEMENT-ONLY,
+   * and that is a scope decision rather than an accident of where the key was
+   * typed: every user story behind it is the settlement writer's, and the
+   * public per-turn `note` stays exactly as it is (story 13). It therefore
+   * lands on THIS shape and never on `noteInputShape`, the same one-ticket
+   * discipline `typeReason` above states.
+   *
+   * `note(turns: ["S12/T4", …], task: "E7", addTags: ["#pager"])` — tags-only,
+   * ADDITIVE, all-or-nothing, one transaction. `turns` and `turn` are mutually
+   * exclusive, and any other content field beside `turns` refuses.
+   */
+  turns: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      'The turns this one call tags — fully qualified "S<session>/T<prompt>" addresses. ' +
+        "Requires task and addTags, refuses every other field, and is mutually exclusive with " +
+        "turn. The write is ADDITIVE (each turn keeps its topic: words and whatever else it " +
+        "carries) and ALL-OR-NOTHING: one member that fails a check means nothing is written and " +
+        "every failure is named, so one repair call fixes the batch.",
+    ),
+  /**
+   * The batch's explicit task coordinate. There is no per-member owner
+   * inference: the task tag that rides along is THIS task's, every `addTags`
+   * entry must be a lane declared in THIS task, and a member already carrying
+   * a DIFFERENT task's tag refuses the batch naming it.
+   */
+  task: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The task these turns belong to, as "E<n>". Its own tag rides along onto any member that ' +
+        "lacks one, every addTags entry must be a lane declared in it, and a member already " +
+        "carrying a DIFFERENT task's tag refuses the whole batch naming it. Batch writes only.",
+    ),
+  addTags: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      "The lane tags to ADD to every turn in turns — each one a lane DECLARED in task. Nothing " +
+        "is ever removed by this call. Batch writes only.",
+    ),
+  /**
    * STAGED-SETTLEMENT TICKET 06 (spec Rev 5, §`topic:` grammar — "the only
    * removal path is stage 1's explicit correction form"). The gate has taken
    * `retiringTopicTag` since ticket 01 and `mcp/note.ts` has passed it since
@@ -523,10 +580,25 @@ export interface SessionNarrativeOutcome {
   usage: string[];
 }
 
+/** The batch tag write's receipt material (spec D4). */
+export interface BatchTagOutcome {
+  segmentId: number;
+  /** The task's own tag — what rode along onto the members that lacked it. */
+  taskTag: string;
+  /** The lane tags this call added. */
+  addedTags: string[];
+  /** Every member address, in the order the caller named them. */
+  members: string[];
+  /** How many members actually gained a tag (the rest already carried all of them). */
+  changed: number;
+}
+
 export interface SettlementTurnWriteOutcome {
   ref: string;
   /** `null` for a `session`-addressed outcome — there is no turn row. */
   turnId: number | null;
+  /** The batch tag write's receipt, `null` on every single-turn call. */
+  batch?: BatchTagOutcome | null;
   review: ReviewOutcome | null;
   relations: RelationOutcome | null;
   /** Ticket 04: the turn's own prose, `null` when this call wrote none. */
@@ -857,6 +929,257 @@ function recordHomelessMotivatedRetractions(
  * `evaluateSettlementSessionWrite` above — the rest of this function is
  * unchanged, turn-addressed behaviour.
  */
+/**
+ * Every field a batch tag write may NOT carry. Derived from the shape rather
+ * than typed out, so a field added to the settlement `note` tomorrow is
+ * refused here without anyone remembering to list it — the batch is
+ * TAGS-ONLY, and "tags-only" has to stay true as the shape grows.
+ */
+const BATCH_ALLOWED_KEYS: ReadonlySet<string> = new Set(["turns", "task", "addTags"]);
+
+/**
+ * THE BATCH TAG WRITE (settlement-read-once spec D4; user stories 5–8).
+ *
+ * One call adds the same lane tags to every turn of a topic, so N members do
+ * not cost N round trips and N results. It is ADDITIVE — each member's
+ * `topic:` words and everything else it carries survive, because story 7 is
+ * about exactly the loss a whole-set replacement causes — and it is
+ * ALL-OR-NOTHING with EVERY failure named (story 6), so one repair call fixes
+ * the batch instead of N discoveries one refusal at a time.
+ *
+ * `task` is the EXPLICIT coordinate and there is no per-member owner
+ * inference: the tag that rides along onto a member that has none is THAT
+ * task's, every `addTags` entry must be a lane declared in THAT task, and a
+ * member already carrying a DIFFERENT task's tag refuses the batch naming it
+ * (story 8). Seeding never MOVES a turn between tasks — the verb that used to
+ * do that is gone (T2386: no assignment verb exists).
+ *
+ * Every check a single tag write runs runs here too, per member: the address
+ * resolves, the turn is in this dispatch's reviewable window, the dispatch has
+ * FIELD authority on it (a relations-only turn refuses), the tag vocabulary
+ * gate (`checkTurnTagWrite`), the frozen-owner rule, and the write gate's
+ * staleness judgment on `tags`. The one check that does NOT apply is the
+ * set-field mode: `mode.tags` declares a REPLACEMENT, and this call replaces
+ * nothing.
+ *
+ * ONE TRANSACTION: the caller (`note-settlement-direct-write.ts`'s `writeNote`)
+ * already wraps every evaluation in `writeTransaction`, and the primitive
+ * itself refuses whole before its first `UPDATE`, so the batch is atomic twice
+ * over.
+ */
+function evaluateSettlementBatchTagWrite(
+  db: Database,
+  context: SettlementTurnFacadeContext,
+  rawInput: SettlementTurnWriteInput,
+  nowEpoch: number,
+): SettlementTurnWriteEvaluation {
+  const stray = Object.keys(rawInput).filter(
+    (key) => rawInput[key as keyof SettlementTurnWriteInput] !== undefined && !BATCH_ALLOWED_KEYS.has(key),
+  );
+  if (stray.length > 0) {
+    return {
+      ok: false,
+      message:
+        `the batch tag write is TAGS-ONLY — ${stray.sort().join(", ")} may not ride along with ` +
+        "turns. Write the tags in one call, then correct fields per turn with the ordinary form.",
+    };
+  }
+  const addresses = rawInput.turns ?? [];
+  if (rawInput.task === undefined || rawInput.addTags === undefined) {
+    return {
+      ok: false,
+      message: "the batch tag write requires turns, task and addTags together.",
+    };
+  }
+
+  const taskRef = parseBareAddressReference(rawInput.task.trim());
+  if (!taskRef || taskRef.kind !== "segment") {
+    return { ok: false, message: `task must be an "E<n>" task address; got "${rawInput.task}".` };
+  }
+  const segmentId = taskRef.segmentId;
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return { ok: false, message: `no task E${segmentId}.` };
+  }
+  const taskTag = segmentTagOf(segment);
+  if (taskTag === null) {
+    // NAME BEFORE GROW (spec D5): an unnamed task takes no members at all, so
+    // there is no tag for the batch to ride along and nothing legal to write.
+    return {
+      ok: false,
+      message:
+        `E${segmentId} has no task tag, and membership is derived from one — an unnamed task takes ` +
+        "no members. Name it first, in front of the user; a headless run does not open or name a " +
+        "container because nothing fit.",
+    };
+  }
+
+  const declared = loadDeclaredLaneTags(db, segmentId);
+  const addTags = [...new Set(rawInput.addTags.map((tag) => tag.trim()))];
+  const undeclared = addTags.filter((tag) => !declared.has(tag));
+  if (undeclared.length > 0) {
+    return {
+      ok: false,
+      message:
+        `${undeclared.map((tag) => JSON.stringify(tag)).join(", ")} ` +
+        `${undeclared.length === 1 ? "is not a lane" : "are not lanes"} declared in E${segmentId} — ` +
+        `every addTags entry must be one. Declared there now: ${
+          declared.size === 0 ? "(none)" : [...declared].sort().join(", ")
+        }.`,
+    };
+  }
+  if (addTags.includes(taskTag)) {
+    return {
+      ok: false,
+      message:
+        `"${taskTag}" is E${segmentId}'s own task tag, not a lane — it rides along automatically ` +
+        "onto any member that lacks it. Name only lanes in addTags.",
+    };
+  }
+
+  const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
+  const segmentTags = loadSegmentTagIndex(db);
+
+  interface Member {
+    ref: string;
+    turn: TurnRecord;
+    nextTags: string[];
+  }
+  const members: Member[] = [];
+  const failures: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of addresses) {
+    const parsed = parseTurnAddress(raw);
+    if (!parsed) {
+      failures.push(`"${raw}": not a fully qualified "S<session>/T<prompt>" address`);
+      continue;
+    }
+    const ref = `S${parsed.sessionId}/T${parsed.promptNumber}`;
+    if (seen.has(ref)) {
+      failures.push(`${ref}: named twice in the same batch`);
+      continue;
+    }
+    seen.add(ref);
+    const turn = getTurn(db, parsed.sessionId, parsed.promptNumber);
+    if (!turn) {
+      failures.push(`${ref}: no such turn`);
+      continue;
+    }
+    if (turn.type.includes("compact")) {
+      failures.push(`${ref}: a compact marker, not a turn`);
+      continue;
+    }
+    if (!context.reviewableTurnIds.has(turn.id)) {
+      failures.push(`${ref}: outside this dispatch's reviewable window`);
+      continue;
+    }
+    if (!settlementTurnPermissions(context.writableProvenance, turn.id).fields) {
+      failures.push(
+        `${ref}: writable to this dispatch for its RELATIONS ONLY — its tags belong to whichever ` +
+          "window owns this turn's fields",
+      );
+      continue;
+    }
+
+    // A member already carrying ANOTHER task's tag refuses the batch naming
+    // it (story 8). Not "moved": seeding never moves a turn between tasks.
+    const foreign = turn.tags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+    if (foreign !== undefined) {
+      failures.push(
+        `${ref}: already carries "${foreign}", which is E${segmentTags.get(foreign)!}'s task tag — ` +
+          `this batch names E${segmentId}, and a turn belongs to at most one task. There is no ` +
+          "assignment verb: correct the turn's own tags first if it belongs here",
+      );
+      continue;
+    }
+
+    // UNION, in a stable order: what the turn already carries, then the task
+    // tag if it was missing (it "rides along"), then the new lanes.
+    const nextTags = [...turn.tags];
+    if (!nextTags.includes(taskTag)) {
+      nextTags.push(taskTag);
+    }
+    for (const tag of addTags) {
+      if (!nextTags.includes(tag)) {
+        nextTags.push(tag);
+      }
+    }
+
+    const gate = checkTurnTagWrite(db, { nextTags, priorTags: turn.tags });
+    if (!gate.ok) {
+      failures.push(`${ref}: ${gate.message}`);
+      continue;
+    }
+    const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+    if (frozen !== null) {
+      failures.push(`${ref}: ${frozen}`);
+      continue;
+    }
+    // The write gate's staleness judgment — `requireCompleteRead` false,
+    // because an additive write drops nothing a partial read could have
+    // hidden. This is the seam the concurrency rule rests on: another mutator
+    // moving these tags through the primitive stamps `tags`, and that stamp is
+    // what makes this whole-set write refuse.
+    const verdict = checkFieldGate(db, writer, "turn", turn.id, "tags", ref);
+    if (!verdict.ok) {
+      failures.push(`${ref}: ${verdict.message}`);
+      continue;
+    }
+    members.push({ ref, turn, nextTags: gate.effectiveTags });
+  }
+
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      message:
+        `${failures.length} of ${addresses.length} turn(s) refused, so NOTHING was written — ` +
+        `${failures.join("; ")}. Fix every one of them and resend the batch.`,
+    };
+  }
+  if (members.length === 0) {
+    return { ok: false, message: "turns named no addresses." };
+  }
+
+  const written = writeMembershipTags(db, {
+    operation: "normal",
+    writes: members.map((member) => ({ turnId: member.turn.id, tags: member.nextTags })),
+    writer,
+    nowEpoch,
+  });
+  if (!written.ok) {
+    return { ok: false, message: written.message };
+  }
+
+  const laneTouches: Array<{ turnId: number; tag: string }> = [];
+  for (const member of members) {
+    for (const tag of [taskTag, ...addTags]) {
+      laneTouches.push({ turnId: member.turn.id, tag });
+    }
+  }
+
+  return {
+    ok: true,
+    outcome: {
+      ref: `E${segmentId}`,
+      turnId: null,
+      batch: {
+        segmentId,
+        taskTag,
+        addedTags: addTags,
+        members: members.map((member) => member.ref),
+        changed: written.changedTurnIds.length,
+      },
+      review: null,
+      relations: null,
+      prose: null,
+      session: null,
+      laneTouches,
+      laneKeyTouches: [],
+    },
+  };
+}
+
 export function evaluateSettlementTurnWrite(
   db: Database,
   context: SettlementTurnFacadeContext,
@@ -887,6 +1210,28 @@ export function evaluateSettlementTurnWrite(
       return { ok: false, message: fieldModeErrorMessage(error, syntaxAddressLabel) };
     }
     throw error;
+  }
+
+  // THE BATCH TAG WRITE (spec D4), branched before the single-turn address is
+  // even parsed: it is a different call shape, not a variant of this one.
+  if (rawInput.turns !== undefined) {
+    if (rawInput.turn !== undefined || rawInput.session !== undefined) {
+      return {
+        ok: false,
+        message:
+          "turns is the batch tag write and is mutually exclusive with turn and session — " +
+          "one call tags many turns, or writes one turn's fields, never both.",
+      };
+    }
+    return evaluateSettlementBatchTagWrite(db, context, rawInput, nowEpoch);
+  }
+  if (rawInput.task !== undefined || rawInput.addTags !== undefined) {
+    return {
+      ok: false,
+      message:
+        "task and addTags belong to the batch tag write and require turns — " +
+        "a single-turn call states its whole tag set in tags.",
+    };
   }
 
   if (rawInput.session !== undefined) {
@@ -1076,6 +1421,14 @@ export function evaluateSettlementTurnWrite(
     });
     if (!gate.ok) {
       return { ok: false, message: `${ref}: ${gate.message}` };
+    }
+    // NAME BEFORE GROW (settlement-read-once spec D5), the same question the
+    // main agent's face asks in the same position: a turn owned by an UNNAMED
+    // task holds frozen legacy ownership, and this write may not put it in a
+    // second task.
+    const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+    if (frozen !== null) {
+      return { ok: false, message: `${ref}: ${frozen}` };
     }
     // What the landing below stores: the caller's set plus any hook-owned
     // machine tags it omitted — same union the main agent's face applies.
@@ -1783,6 +2136,17 @@ export function renderSettlementTurnWriteReceipt(
 ): string {
   const verb = "Landed";
   const parts: string[] = [];
+  if (outcome.batch) {
+    // One line, whatever the member count: the batch exists so N members cost
+    // one result, and a per-member roll call would give that saving straight
+    // back. The addresses are the caller's own input restated once.
+    parts.push(
+      `${verb} tags on ${outcome.batch.members.length} turn(s) in E${outcome.batch.segmentId}: ` +
+        `+${outcome.batch.addedTags.join(", +")} (task tag "${outcome.batch.taskTag}" rides along). ` +
+        `${outcome.batch.changed} turn(s) changed; the rest already carried them. ` +
+        `Members: ${outcome.batch.members.join(", ")}.`,
+    );
+  }
   if (outcome.review) {
     const landedBits: string[] = [];
     const yieldedBits: string[] = [];

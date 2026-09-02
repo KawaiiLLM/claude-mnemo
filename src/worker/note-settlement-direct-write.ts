@@ -196,6 +196,12 @@ function accumulateTurnWriteCounts(
   counts: NoteSettlementCommitCounts,
   outcome: SettlementTurnWriteOutcome,
 ): void {
+  if (outcome.batch) {
+    // Settlement-read-once ticket 02: one batch tag write is N reviews, not
+    // one — the counter answers "how many turns did this run touch", and a
+    // shape that tags forty turns in one call must not read as one.
+    counts.turnsReviewed += outcome.batch.members.length;
+  }
   if (outcome.review) {
     counts.turnsReviewed += 1;
     const anyYielded =

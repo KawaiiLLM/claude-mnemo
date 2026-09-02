@@ -20,14 +20,15 @@ import {
   getSegmentMemberTurnIds,
   listLiveSegmentsByActivity,
   mergeSegments,
-  reassignSegmentMembers,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   replaceInSegmentWorkingStateField,
   segmentEditableFieldValue,
   segmentTagOf,
   setSegmentTag,
   toggleSegmentStatus,
+  writeMembershipTags,
   writeSegmentWorkingStateField,
+  type MembershipTagWrite,
   type ReplaceSegmentWorkingStateFieldResult,
   type SegmentMergeOutcome,
   type SegmentRecord,
@@ -411,6 +412,28 @@ function resolveMemberAddresses(
   return { turnIds: accepted.map((entry) => entry.node.id), rejections };
 }
 
+/**
+ * A turn's stored `tags`, for the seeding paths that ADD a word to them.
+ * Seeding is additive by construction now (settlement-read-once D4: "seeding
+ * never MOVES a turn between tasks") — the frozen-owner rule inside the
+ * primitive is what stops the addition creating a second home, so this reader
+ * only has to hand back what is already there.
+ */
+function memberTagsOf(db: Database, turnId: number): string[] {
+  const raw = db
+    .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+    .get(turnId)?.tags;
+  if (typeof raw !== "string") {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 interface CreateTransactionResult {
   segment: SegmentRecord;
   memberTurnIds: number[];
@@ -435,7 +458,7 @@ function handleCreate(
         'id must be a lane address ("E<n>/#<tag>") when present — omit it to mint a task instead.',
       );
     }
-    return handleCreateLane(db, input.id, options);
+    return handleCreateLane(db, input.id, input, options);
   }
 
   let title: string;
@@ -477,6 +500,19 @@ function handleCreate(
       }
     } else {
       fail("tag must be a single string when present — the segment's one globally unique tag.");
+    }
+
+    // NAME BEFORE GROW (settlement-read-once spec D5, RULED T2393): membership
+    // is derived from the task's own tag, so an UNNAMED task cannot take
+    // members — a seed into one could only be written as a bare
+    // `segment_members` row no tag explains, which is precisely the frozen
+    // legacy ownership this ticket stops producing.
+    if (memberAddresses.length > 0 && tags.length === 0) {
+      fail(
+        "members needs a tag — membership is derived from the task's own tag, so a task with no " +
+          "name can hold no members. Pass tag=… in this same call, or create the task first and " +
+          "name it with remember(retag) before seeding it.",
+      );
     }
   } catch (error) {
     if (error instanceof RememberValidationError) {
@@ -529,20 +565,23 @@ function handleCreate(
         nowEpoch,
       });
 
-      // Ticket 02 (ownership-and-note-cadence spec): `members` seeding goes
-      // through the SAME write path `assign` uses — `reassignSegmentMembers`,
-      // not `addSegmentMembers` directly — so single ownership is enforced
-      // uniformly. A fresh segment has no prior members of its own, but a
-      // named turn may already belong to ANOTHER segment; seeding it here
-      // evicts it from that segment the identical way an explicit `assign`
-      // would, rather than opening a second, looser path around the rule.
+      // Settlement-read-once ticket 02 (spec D4/D5): seeding writes the TASK
+      // TAG onto each named turn and lets the derivation decide membership —
+      // the one primitive, `normal` operation. It used to call
+      // `reassignSegmentMembers`, which wrote `segment_members` directly and
+      // added no tag at all: 98 of production's members of NAMED tasks carry
+      // no task tag because of exactly this path. The lane-stranding veto the
+      // old call carried is the primitive's own pre-check, so a turn whose
+      // tagged edge would be stranded is still refused before anything lands.
       if (turnIds.length > 0) {
-        // Lane-declaration ticket 02 (D2): seeding is a membership MOVE, so
-        // it answers to the same stranding gate `assign` does. A fresh segment
-        // has declared no lanes yet, so a turn carrying a tagged edge into one
-        // is refused until the lane is declared there — which is the rule, not
-        // an accident of ordering.
-        const seeded = reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+        const seeded = writeMembershipTags(db, {
+          operation: "normal",
+          writes: turnIds.map((turnId) => ({
+            turnId,
+            tags: [wanted!, ...memberTagsOf(db, turnId).filter((value) => value !== wanted)],
+          })),
+          nowEpoch,
+        });
         if (!seeded.ok) {
           fail(seeded.message);
         }
@@ -650,6 +689,7 @@ function parseLaneCreateAddress(
 function handleCreateLane(
   db: Database,
   rawId: string,
+  input: RememberToolInput,
   options: RememberToolOptions,
 ): ToolTextResult {
   const parsed = parseLaneCreateAddress(rawId);
@@ -682,6 +722,31 @@ function handleCreateLane(
     );
   }
 
+  // `members` AT THE LANE TIER (settlement-read-once spec D4). This tier used
+  // to IGNORE the parameter outright — a caller naming members got a lane and
+  // no members, silently. It now seeds them through the one primitive, and an
+  // UNNAMED parent refuses (spec D5: "a lane in an unnamed task takes no
+  // members"): a lane tag rides only on a turn that already carries its task's
+  // tag, so with no task tag to ride on there is nothing legal to write.
+  let memberAddresses: string[] = [];
+  if (input.members !== undefined) {
+    if (
+      !Array.isArray(input.members) ||
+      !input.members.every((value) => typeof value === "string")
+    ) {
+      return parameterError("members must be an array of strings when present.");
+    }
+    memberAddresses = input.members as string[];
+  }
+  const parentTag = segmentTagOf(segment);
+  if (memberAddresses.length > 0 && parentTag === null) {
+    return parameterError(
+      `E${segment.id} has no task tag, so a lane inside it can take no members — a lane tag rides ` +
+        `only on a turn that already carries its task's tag. Name the task first ` +
+        `(remember(retag, id="E${segment.id}", tag=…)), then seed the lane. Nothing was written.`,
+    );
+  }
+
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
@@ -689,9 +754,16 @@ function handleCreateLane(
     | { kind: "duplicate"; lane: LaneRecord }
     | { kind: "curated-collision" }
     | { kind: "namespace-collision"; message: string }
-    | { kind: "created"; lane: LaneRecord; conscripted: { total: number; inSegment: number } };
+    | {
+        kind: "created";
+        lane: LaneRecord;
+        conscripted: { total: number; inSegment: number };
+        membersSeeded: number;
+      };
 
-  const outcome = writeTransaction(db, (): CreateLaneOutcome => {
+  let outcome: CreateLaneOutcome;
+  try {
+    outcome = writeTransaction(db, (): CreateLaneOutcome => {
     const existing = getLane(db, segmentId, tag);
     if (existing) {
       return { kind: "duplicate", lane: existing };
@@ -733,8 +805,39 @@ function handleCreateLane(
       kind: "declare",
       nowEpoch,
     });
-    return { kind: "created", lane, conscripted };
-  });
+
+    // The seed, AFTER the declaration in the same transaction: the tags gate
+    // this write answers to refuses a lane tag whose lane is not declared, so
+    // the lane has to exist first.
+    let membersSeeded = 0;
+    if (memberAddresses.length > 0) {
+      const { turnIds, rejections } = resolveMemberAddresses(db, memberAddresses);
+      if (rejections.length > 0) {
+        // THROWN, not returned: the lane row is already inserted a few
+        // statements above, so only the transaction's own rollback can make
+        // "nothing was written" true.
+        fail(formatMemberRejections(rejections));
+      }
+      const writes: MembershipTagWrite[] = turnIds.map((turnId) => {
+        const stored = memberTagsOf(db, turnId).filter(
+          (value) => value !== parentTag && value !== tag,
+        );
+        return { turnId, tags: [parentTag!, tag, ...stored] };
+      });
+      const seeded = writeMembershipTags(db, { operation: "normal", writes, nowEpoch });
+      if (!seeded.ok) {
+        fail(seeded.message);
+      }
+      membersSeeded = turnIds.length;
+    }
+    return { kind: "created", lane, conscripted, membersSeeded };
+    });
+  } catch (error) {
+    if (error instanceof RememberValidationError) {
+      return parameterError(`${error.message} Nothing was written.`);
+    }
+    throw error;
+  }
 
   if (outcome.kind === "duplicate") {
     return parameterError(
@@ -758,8 +861,12 @@ function handleCreateLane(
         `${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} — ` +
         "they are its members from now on. A large number means the word is too generic to be a lane; " +
         `remember(delete, id="E${segmentId}/#${tag}") takes it back.`;
+  const seeded =
+    outcome.membersSeeded > 0
+      ? ` ${outcome.membersSeeded} member(s) seeded — each now carries "${parentTag}" and "${tag}".`
+      : "";
   return textResult(
-    `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}`,
+    `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}${seeded}`,
   );
 }
 
@@ -1335,10 +1442,12 @@ function handleClose(
  * this segment's own LANES, a word another segment already holds, and any
  * change at all on a closed segment.
  *
- * Renaming does NOT re-derive existing members. The turns carrying the old
- * word keep their membership rows; the new word governs writes from here on.
- * Same grandfathering the one-tag migration applies, and for the same reason:
- * a rename is not a statement about which past turns belonged here.
+ * RENAMING RE-TAGS EVERY OWNED MEMBER (settlement-read-once spec D5, RULED A
+ * at T2397) — the reverse of what this verb did before that ruling, and the
+ * reversal is the point. Leaving members untouched was defensible while
+ * membership rows and tags were two truths; once the cutover makes the tag the
+ * ONLY truth, a container-only rename recreates "named task with tag-less
+ * members" immediately. See the three transitions at the write below.
  */
 function handleRetag(
   db: Database,
@@ -1409,11 +1518,66 @@ function handleRetag(
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const priorTag = segmentTagOf(resolution.segment);
+  // THE RETAG LIFECYCLE (settlement-read-once spec D5, RULED A at T2397).
+  // HEAD left members untouched by design ("Renaming does NOT re-derive
+  // existing members"), which after the D5 cutover would recreate the very
+  // shape that ticket ends — a NAMED task owning tag-less members — the day
+  // after it ran. All three transitions now go through the D4 primitive, in
+  // this same transaction as the name itself:
+  //
+  //   unnamed → named   `thaw-owner`: every FROZEN member receives the new
+  //                     tag, so legacy ownership becomes the single truth and
+  //                     the task may grow from then on.
+  //   named → new tag   `normal`: every owned member's task tag is replaced
+  //                     by the new word.
+  //   named → null      REFUSED while the task owns any member — unnaming
+  //                     would mint new legacy ownership, which "never
+  //                     extended" forbids. `clear` first, explicitly.
+  //
+  // Rejected alternative B (container-only `retag` plus an explicit backfill
+  // call) would leave the bad state existing between the two calls.
+  const ownedMemberIds = getSegmentMemberTurnIds(db, resolution.segment.id);
+  if (tag === null && priorTag !== null && ownedMemberIds.length > 0) {
+    return parameterError(
+      `E${resolution.segment.id} owns ${ownedMemberIds.length} member turn(s), so its tag cannot be ` +
+        `cleared — membership is derived from that word, and unnaming the task would turn every one ` +
+        `of them into frozen legacy ownership no tag explains. remember(clear, id="E${resolution.segment.id}") ` +
+        "detaches them first, explicitly. Nothing was written.",
+    );
+  }
+
   // Uniqueness re-checked INSIDE the transaction (`setSegmentTag`), so a
   // concurrent retag cannot slip past a stale pre-check — the same discipline
   // lane-tier `create` applies to its own two checks.
-  const outcome = writeTransaction(db, () => {
+  let retaggedMembers = 0;
+  let outcome: ReturnType<typeof setSegmentTag>;
+  try {
+    outcome = writeTransaction(db, () => {
     const named = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+    if (named.ok && tag !== null && ownedMemberIds.length > 0) {
+      // The name landed a statement ago, so these rows are no longer frozen
+      // to the derivation — which is exactly the ordering `thaw-owner`
+      // needs: it converts rows the primitive can now see.
+      const writes: MembershipTagWrite[] = ownedMemberIds.map((turnId) => {
+        const stored = memberTagsOf(db, turnId).filter(
+          (value) => value !== tag && value !== priorTag,
+        );
+        return { turnId, tags: [tag, ...stored] };
+      });
+      const moved = writeMembershipTags(db, {
+        operation: priorTag === null ? "thaw-owner" : "normal",
+        writes,
+        nowEpoch,
+        thawingSegmentId: priorTag === null ? resolution.segment.id : undefined,
+      });
+      if (!moved.ok) {
+        // THROWN, not returned: the name is already written, so only the
+        // rollback makes "nothing was written" true.
+        fail(moved.message);
+      }
+      retaggedMembers = ownedMemberIds.length;
+    }
     if (named.ok) {
       // THE TASK-TIER LIFECYCLE DEBT (lane-impressions spec Rev 8, "Lifecycle
       // debts"; ticket 03) — `lane_tag NULL` is what makes it task tier
@@ -1433,19 +1597,34 @@ function handleRetag(
       });
     }
     return named;
-  });
+    });
+  } catch (error) {
+    if (error instanceof RememberValidationError) {
+      return parameterError(`${error.message} Nothing was written.`);
+    }
+    throw error;
+  }
 
   if (!outcome.ok) {
     return parameterError(outcome.message);
   }
 
   const named = segmentTagOf(outcome.segment);
+  // The receipt NAMES how many members it re-tagged (spec D5's own test list):
+  // a transition that moved 40 turns and one that moved none are two different
+  // events, and a caller that cannot tell them apart cannot audit the cutover.
+  const memberClause =
+    retaggedMembers === 0
+      ? " It owns no member turns."
+      : priorTag === null
+        ? ` ${retaggedMembers} frozen member turn(s) thawed — each now carries "${named}".`
+        : ` ${retaggedMembers} member turn(s) re-tagged from "${priorTag}" to "${named}".`;
   return textResult(
     named === null
       ? `Cleared E${outcome.segment.id}'s segment tag — nothing derives into it until it is named again. ` +
-          "Existing members are untouched."
-      : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment; ` +
-          "existing members are untouched.",
+          "It owned no members, so no legacy ownership was minted."
+      : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment.` +
+          memberClause,
   );
 }
 
