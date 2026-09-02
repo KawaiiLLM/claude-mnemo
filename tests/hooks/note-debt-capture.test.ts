@@ -8,6 +8,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
+import { backfillShadowNoteWriterModels } from "../../src/hooks/backfill";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { parseReplayTranscript } from "../../src/shared/transcript-parser";
 
@@ -29,15 +30,19 @@ describe("writer_model backfill on Stop", () => {
   let sessionId: number;
   let directory: string;
 
-  function addTurn(promptNumber: number, prompt = `prompt ${promptNumber}`): number {
+  function addTurn(
+    promptNumber: number,
+    prompt = `prompt ${promptNumber}`,
+    contentPromptId: string | null = null,
+  ): number {
     return db
-      .query<{ id: number }, [number, number, string]>(
+      .query<{ id: number }, [number, number, string, string | null]>(
         `INSERT INTO turns (
-           session_id, prompt_number, status, user_prompt, created_at_epoch
-         ) VALUES (?, ?, 'active', ?, 100)
+           session_id, prompt_number, status, user_prompt, content_prompt_id, created_at_epoch
+         ) VALUES (?, ?, 'active', ?, ?, 100)
          RETURNING id`,
       )
-      .get(sessionId, promptNumber, prompt)!.id;
+      .get(sessionId, promptNumber, prompt, contentPromptId)!.id;
   }
 
   function writeTranscript(lines: unknown[]): string {
@@ -146,5 +151,142 @@ describe("writer_model backfill on Stop", () => {
     const [turn] = parseReplayTranscript(transcriptPath);
 
     expect(turn?.assistantModel).toBe("claude-sonnet-5");
+  });
+
+  /**
+   * ticket 10 (`.scratch/main-agent-edges/issues/10-writer-model-empty.md`):
+   * a turn created without ever capturing its own `content_prompt_id` (a
+   * cross-session-message delivery is the reproducible case in production —
+   * `backfillFromTranscript` only ever records `content_prompt_id` for
+   * whichever turn is the LATEST pending one at the moment its own Stop cycle
+   * runs, so a turn superseded before that moment stays NULL forever) can
+   * never be reached by the position-based matcher above: whatever transcript
+   * entry happens to sit at that turn's own `prompt_number` almost always
+   * carries ITS OWN promptId, which wins the `??` and diverts the match to a
+   * completely different, correctly-addressed row before the promptNumber
+   * fallback is ever tried for that position. The note rides forever
+   * unattributed. `backfillOrphanedRideTurns` recovers it by the one thing a
+   * synthetic delivery still shares verbatim with its transcript echo: the
+   * stored `user_prompt` text.
+   */
+  test("an orphaned ride turn (no content_prompt_id, position claimed by someone else) is recovered by text", async () => {
+    const about = addTurn(1, "do the work");
+    const ride = addTurn(
+      2,
+      '<cross-session-message from="uds:/tmp/x.sock">\nunique-marker-xyz payload',
+    );
+    // A turn whose own content_prompt_id legitimately owns "p2" — this is what
+    // makes prompt_number 2 unreachable via the fallback: the transcript entry
+    // sitting at position 2 resolves to THIS turn by promptId, not by falling
+    // through to a positional match against `ride`.
+    addTurn(99, "some other prompt entirely", "p2");
+
+    upsertShadowNote(db, {
+      turnId: about,
+      title: "measure+capture: orphaned ride turn",
+      content: "…",
+      rideTurnId: ride,
+      nowEpoch: 400,
+    });
+    expect(getShadowNote(db, about)?.writerModel).toBeNull();
+
+    const transcriptPath = writeTranscript([
+      {
+        type: "user",
+        role: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: { role: "user", content: [{ type: "text", text: "do the work" }] },
+      },
+      {
+        type: "assistant",
+        promptId: "p1",
+        message: { role: "assistant", model: "claude-haiku-5", content: [{ type: "text", text: "a" }] },
+      },
+      {
+        type: "user",
+        role: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        message: { role: "user", content: [{ type: "text", text: "some other prompt entirely" }] },
+      },
+      {
+        type: "assistant",
+        promptId: "p2",
+        message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "b" }] },
+      },
+      {
+        type: "user",
+        role: "user",
+        promptId: "p3",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                'Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/x.sock">\nunique-marker-xyz payload',
+            },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        promptId: "p3",
+        message: { role: "assistant", model: "claude-opus-9", content: [{ type: "text", text: "c" }] },
+      },
+    ]);
+
+    await createStopHandler({ db, now: () => 500, workerEnv: {} })({
+      eventName: "Stop",
+      sessionId: "session-capture",
+      cwd: "/tmp/project",
+      transcriptPath,
+      stopHookActive: false,
+      raw: {},
+    });
+
+    // Recovered from the text-anchored match (position 3), never from the
+    // model that happened to land on the stolen position 2.
+    expect(getShadowNote(db, about)?.writerModel).toBe("claude-opus-9");
+  });
+
+  test("the text-anchored fallback leaves writer_model NULL when no transcript entry carries the payload", () => {
+    const about = addTurn(1, "do the work");
+    const ride = addTurn(
+      2,
+      '<cross-session-message from="uds:/tmp/x.sock">\nnever-echoed payload',
+    );
+
+    upsertShadowNote(db, {
+      turnId: about,
+      title: "measure+capture: orphaned ride turn, no echo",
+      content: "…",
+      rideTurnId: ride,
+      nowEpoch: 400,
+    });
+
+    // Fed directly to backfillShadowNoteWriterModels — the exact shape
+    // parseReplayTranscript would produce, but constructed by hand so this
+    // test does not depend on file-backed transcript parsing at all.
+    const transcriptTurns = [
+      {
+        promptNumber: 1,
+        promptId: "p1",
+        transcriptLineStart: 1,
+        userPrompt: "do the work",
+        assistantText: "a",
+        toolCalls: [],
+        isSidechain: false,
+        wasInterrupted: false,
+        assistantModel: "claude-haiku-5",
+      },
+    ];
+
+    const filled = backfillShadowNoteWriterModels(db, sessionId, transcriptTurns);
+
+    expect(filled).toBe(0);
+    expect(getShadowNote(db, about)?.writerModel).toBeNull();
   });
 });
