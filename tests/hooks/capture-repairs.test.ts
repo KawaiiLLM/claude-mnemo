@@ -7,6 +7,12 @@ import { join } from "node:path";
 import { createDatabase } from "../../src/db/database";
 import { createObservation } from "../../src/db/observations";
 import { getOrphanTurns } from "../../src/db/orphan-turns";
+import {
+  addSegmentMembers,
+  createSegment,
+  getSegmentMemberTurnIds,
+  writeMembershipTags,
+} from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import {
@@ -386,6 +392,35 @@ describe("capture repairs", () => {
         transcriptLineStart: 41,
         parentTurnId: null,
       });
+    });
+
+    test("the conversion DERIVES membership — the task row goes, a FROZEN row stays", () => {
+      const { turnId, path } = seedOccupiedTurn();
+
+      // A named task owns the turn by its own tag…
+      const named = createSegment(db, { title: "named", tags: ["a-task"], nowEpoch: 700 }).id;
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [{ turnId, tags: ["a-task"] }],
+          nowEpoch: 700,
+        }).ok,
+      ).toBe(true);
+      // …and an UNNAMED one owns it by a legacy row no tag explains.
+      const frozen = createSegment(db, { title: "legacy", nowEpoch: 700 }).id;
+      addSegmentMembers(db, frozen, [turnId], 700);
+
+      repair(path);
+
+      // Settlement-read-once ticket 02: this repair used to replace the tags
+      // and derive NOTHING, leaving the task's membership row standing beside
+      // tags that no longer carried its word.
+      //
+      // MUTATION: drop the `writeMembershipTags` call from
+      // `convertOccupiedTurnToMarker` and the first expectation goes red.
+      expect(getSegmentMemberTurnIds(db, named)).toEqual([]);
+      // …and the frozen row survives, because no tag write could put it back.
+      expect(getSegmentMemberTurnIds(db, frozen)).toEqual([turnId]);
     });
 
     test("prunes the converted turn's outgoing citations and keeps incoming ones", () => {

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { reindexTurnFromDb } from "../db/search";
+import { writeMembershipTags } from "../db/segments";
 import { getMaxPromptNumber } from "../db/turns";
 import {
   rewindSessionScanCursor,
@@ -201,14 +202,13 @@ function convertOccupiedTurnToMarker(
   claim: CompactBoundaryClaim,
   nowEpoch: number,
 ): void {
-  db.query<unknown, [string, number, string, number]>(
+  db.query<unknown, [string, number, number]>(
     `UPDATE turns
      SET type = '["compact"]',
          status = 'extracted',
          title = '/compact',
          compact_boundary_uuid = ?,
          updated_at_epoch = ?,
-         tags = ?,
          content = NULL,
          insight = NULL,
          significance_grade = NULL,
@@ -223,9 +223,22 @@ function convertOccupiedTurnToMarker(
   ).run(
     claim.uuid,
     nowEpoch,
-    JSON.stringify(compactMetadataTags(claim)),
     turnId,
   );
+
+  // THE TAGS WRITE GOES THROUGH THE MEMBERSHIP PRIMITIVE (settlement-read-once
+  // spec D4), `normal`. This repair used to replace the turn's tags with two
+  // `compact:` words inside the statement above and DERIVE NOTHING — leaving
+  // the old `segment_members` rows standing beside tags that no longer carry
+  // the task: the double truth in miniature. The derive now runs, so a
+  // converted turn leaves the task its tag no longer names; a FROZEN row (an
+  // unnamed task's legacy ownership) is preserved, because no tag put it there
+  // and none can put it back.
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: compactMetadataTags(claim) }],
+    nowEpoch,
+  });
 
   // Outgoing only. Rows citing this turn (`cited_id = ?`) are other turns'
   // provenance, not this row's, and survive.

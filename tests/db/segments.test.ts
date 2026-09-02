@@ -19,13 +19,13 @@ import {
   getSegmentsForTurn,
   isLiveSegmentEra,
   listLiveSegmentsByActivity,
-  reassignSegmentMembers,
   SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH,
   listOpenSegments,
   listRecentSegments,
   repairStaleSegmentFacets,
   setSegmentTags,
   toggleSegmentStatus,
+  writeMembershipTags,
   writeSegmentWorkingStateField,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
@@ -708,21 +708,22 @@ describe("segments and membership", () => {
       expect(getSegment(db, segment.id)?.tags).toEqual(["lease"]);
     });
 
-    test("reassignSegmentMembers performs no SEGMENT-TAG gate check — that gate is the CALLER's own responsibility at each of the three write paths", () => {
-      // This is the low-level primitive the three gated call sites (and the
-      // ungated `create` seeding) all share; the CURATED-TAG gate must stay
-      // out of it so a caller who forgets the check does NOT get a free pass
-      // from this layer silently enforcing it a second, inconsistent way.
+    test("the membership primitive performs no SEGMENT-TAG gate check — that gate is the CALLER's own responsibility at each write face", () => {
+      // The primitive every membership move shares; the CURATED-TAG gate must
+      // stay out of it so a caller who forgets the check does NOT get a free
+      // pass from this layer silently enforcing it a second, inconsistent way.
       // (The LANE gate is a different question and DOES live here — see the
       // stranding block below: it guards a stored edge, not a policy the
       // caller could reasonably own.)
       const segment = createSegment(db, { title: "x", tags: ["required"], nowEpoch: 100 });
       const turnId = addTurn(1, 100, { tags: [] });
-      const result = reassignSegmentMembers(db, [turnId], segment.id, 100);
+      const result = writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId, tags: ["required"] }],
+        nowEpoch: 100,
+      });
       expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.addedTurnIds).toEqual([turnId]);
-      }
+      expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([turnId]);
     });
   });
 
@@ -743,17 +744,45 @@ describe("segments and membership", () => {
       );
     }
 
+    /**
+     * Settlement-read-once ticket 02: the gate moved onto the ONE membership
+     * primitive, so a "move" is now a TAG write and both segments have to be
+     * NAMED for one to be expressible at all — which is the model, not a
+     * fixture detail: an unnamed task's rows are frozen legacy ownership no
+     * tag write can produce or move.
+     */
+    function move(turnId: number, tags: string[], nowEpoch: number) {
+      return writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId, tags }],
+        nowEpoch,
+      });
+    }
+
     function seedLaneEdge(): {
       home: number;
       destination: number;
       citing: number;
       cited: number;
     } {
-      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
-      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
-      const cited = addTurn(1, 100, { type: ["design"], tags: ["lane-a"] });
-      const citing = addTurn(2, 110, { type: ["design"], tags: ["lane-a"] });
-      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      const home = createSegment(db, { title: "E60", tags: ["home-task"], nowEpoch: 100 }).id;
+      const destination = createSegment(db, {
+        title: "E67",
+        tags: ["dest-task"],
+        nowEpoch: 100,
+      }).id;
+      const cited = addTurn(1, 100, { type: ["design"] });
+      const citing = addTurn(2, 110, { type: ["design"] });
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [
+            { turnId: cited, tags: ["home-task", "lane-a"] },
+            { turnId: citing, tags: ["home-task", "lane-a"] },
+          ],
+          nowEpoch: 100,
+        }).ok,
+      ).toBe(true);
       expect(insertLane(db, home, "lane-a", 100)).not.toBeNull();
       writeMemoryEdges(
         db,
@@ -775,7 +804,7 @@ describe("segments and membership", () => {
       const { destination, citing, cited } = seedLaneEdge();
       const before = snapshotMembers();
 
-      const result = reassignSegmentMembers(db, [citing], destination, 200);
+      const result = move(citing, ["dest-task", "lane-a"], 200);
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -784,6 +813,15 @@ describe("segments and membership", () => {
         expect(result.message).toContain("--extends-->");
         expect(result.message).toContain("nothing was moved");
       }
+      // The TAG write did not land either — a refused move leaves the turn's
+      // own `tags` exactly as they were, which is the half `reassignSegment-
+      // Members` could never promise because it never touched them.
+      expect(
+        JSON.parse(
+          db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(citing)!
+            .tags,
+        ),
+      ).toEqual(["home-task", "lane-a"]);
       // The whole point: byte-identical, with no partial move to unwind.
       expect(snapshotMembers()).toBe(before);
       expect(getSegmentsForTurn(db, citing).map((segment) => segment.id)).toEqual(
@@ -793,16 +831,13 @@ describe("segments and membership", () => {
 
     test("declaring the SAME lane in the destination first makes the identical move succeed", () => {
       const { destination, citing } = seedLaneEdge();
-      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(false);
+      expect(move(citing, ["dest-task", "lane-a"], 200).ok).toBe(false);
 
       // The ONLY change.
       expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
 
-      const result = reassignSegmentMembers(db, [citing], destination, 210);
+      const result = move(citing, ["dest-task", "lane-a"], 210);
       expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.addedTurnIds).toEqual([citing]);
-      }
       expect(getSegmentsForTurn(db, citing).map((segment) => segment.id)).toEqual([destination]);
     });
 
@@ -810,7 +845,7 @@ describe("segments and membership", () => {
       const { citing } = seedLaneEdge();
       const before = snapshotMembers();
 
-      const result = reassignSegmentMembers(db, [citing], null, 200);
+      const result = move(citing, ["lane-a"], 200);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.message).toContain("belong to NO segment");
@@ -821,17 +856,39 @@ describe("segments and membership", () => {
 
     test("moving BOTH endpoints together is fine once the destination declares the lane, and refused before that", () => {
       const { destination, citing, cited } = seedLaneEdge();
-      expect(reassignSegmentMembers(db, [citing, cited], destination, 200).ok).toBe(false);
+      const both = (nowEpoch: number) =>
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [
+            { turnId: citing, tags: ["dest-task", "lane-a"] },
+            { turnId: cited, tags: ["dest-task", "lane-a"] },
+          ],
+          nowEpoch,
+        });
+      expect(both(200).ok).toBe(false);
       expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
-      expect(reassignSegmentMembers(db, [citing, cited], destination, 210).ok).toBe(true);
+      expect(both(210).ok).toBe(true);
     });
 
     test("an UNTAGGED edge never blocks a move — the gate is about lanes, not about edges", () => {
-      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
-      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
+      createSegment(db, { title: "E60", tags: ["home-task"], nowEpoch: 100 });
+      const destination = createSegment(db, {
+        title: "E67",
+        tags: ["dest-task"],
+        nowEpoch: 100,
+      }).id;
       const cited = addTurn(1, 100, { type: ["design"] });
       const citing = addTurn(2, 110, { type: ["design"] });
-      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [
+            { turnId: cited, tags: ["home-task"] },
+            { turnId: citing, tags: ["home-task"] },
+          ],
+          nowEpoch: 100,
+        }).ok,
+      ).toBe(true);
       writeMemoryEdges(
         db,
         [
@@ -846,7 +903,8 @@ describe("segments and membership", () => {
         120,
       );
 
-      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(true);
+      expect(move(citing, ["dest-task"], 200).ok).toBe(true);
+      expect(getSegmentsForTurn(db, citing).map((segment) => segment.id)).toEqual([destination]);
     });
 
     /**
@@ -862,11 +920,24 @@ describe("segments and membership", () => {
      * they could not stand in for it.
      */
     test("a CROSS-LANE edge is seen: moving the TAIL endpoint away from its own lane's segment is refused", () => {
-      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
-      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
-      const cited = addTurn(1, 100, { type: ["design"], tags: ["lane-b"] });
-      const citing = addTurn(2, 110, { type: ["design"], tags: ["lane-a"] });
-      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      const home = createSegment(db, { title: "E60", tags: ["home-task"], nowEpoch: 100 }).id;
+      const destination = createSegment(db, {
+        title: "E67",
+        tags: ["dest-task"],
+        nowEpoch: 100,
+      }).id;
+      const cited = addTurn(1, 100, { type: ["design"] });
+      const citing = addTurn(2, 110, { type: ["design"] });
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [
+            { turnId: cited, tags: ["home-task", "lane-b"] },
+            { turnId: citing, tags: ["home-task", "lane-a"] },
+          ],
+          nowEpoch: 100,
+        }).ok,
+      ).toBe(true);
       expect(insertLane(db, home, "lane-a", 100)).not.toBeNull();
       expect(insertLane(db, home, "lane-b", 100)).not.toBeNull();
       writeMemoryEdges(
@@ -897,7 +968,7 @@ describe("segments and membership", () => {
           segmentIdAfter: destination,
         },
       ]);
-      const result = reassignSegmentMembers(db, [citing], destination, 200);
+      const result = move(citing, ["dest-task", "lane-a"], 200);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.message).toContain('has not declared lane "lane-a"');
@@ -906,18 +977,31 @@ describe("segments and membership", () => {
       // …and once the destination declares THAT side's lane, the move lands —
       // it is never asked for `lane-b`, which stays where its own endpoint is.
       expect(insertLane(db, destination, "lane-a", 200)).not.toBeNull();
-      expect(reassignSegmentMembers(db, [citing], destination, 210).ok).toBe(true);
+      expect(move(citing, ["dest-task", "lane-a"], 210).ok).toBe(true);
     });
 
     test("an ALREADY-stranded edge does not veto an unrelated move — the gate reports the DELTA, not the absolute state", () => {
       // Legacy stock: the tag rides an edge whose home never declared it. A
       // move that leaves that fact exactly as it was must not be refused, or
       // the repair moves for such stock would deadlock forever.
-      const home = createSegment(db, { title: "E60", nowEpoch: 100 }).id;
-      const destination = createSegment(db, { title: "E67", nowEpoch: 100 }).id;
-      const cited = addTurn(1, 100, { type: ["design"], tags: ["legacy"] });
-      const citing = addTurn(2, 110, { type: ["design"], tags: ["legacy"] });
-      expect(reassignSegmentMembers(db, [cited, citing], home, 100).ok).toBe(true);
+      createSegment(db, { title: "E60", tags: ["home-task"], nowEpoch: 100 });
+      const destination = createSegment(db, {
+        title: "E67",
+        tags: ["dest-task"],
+        nowEpoch: 100,
+      }).id;
+      const cited = addTurn(1, 100, { type: ["design"] });
+      const citing = addTurn(2, 110, { type: ["design"] });
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [
+            { turnId: cited, tags: ["home-task", "legacy"] },
+            { turnId: citing, tags: ["home-task", "legacy"] },
+          ],
+          nowEpoch: 100,
+        }).ok,
+      ).toBe(true);
       writeMemoryEdges(
         db,
         [
@@ -933,7 +1017,7 @@ describe("segments and membership", () => {
       );
       // Never declared anywhere: stranded before, stranded after.
       expect(findMembershipLaneStrandings(db, [citing], destination)).toEqual([]);
-      expect(reassignSegmentMembers(db, [citing], destination, 200).ok).toBe(true);
+      expect(move(citing, ["dest-task", "legacy"], 200).ok).toBe(true);
     });
   });
 
