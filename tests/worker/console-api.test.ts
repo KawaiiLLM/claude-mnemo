@@ -2468,3 +2468,22 @@ describe("GET /api/console/graph — three classes, both coverages, all five att
     expect(asShipped).not.toEqual(byIds);
   });
 });
+
+describe("sortEdgesForDisplay (integrator pin, ticket 11)", () => {
+  // The route fixture's two `correct` edges happen to have coverage and citer
+  // id in the SAME order, so dropping the coverage key kept the route test
+  // green (integrator probe). This pin puts them in OPPOSITE order.
+  test("within one class, full precedes partial even when the partial edge has the lower ids", () => {
+    const { sortEdgesForDisplay } = require("../../src/worker/console-api");
+    const sorted = sortEdgesForDisplay([
+      { citingId: 1, citedId: 0, relationClass: "correct", relationCoverage: "partial" },
+      { citingId: 2, citedId: 0, relationClass: "correct", relationCoverage: "full" },
+      { citingId: 0, citedId: 0, relationClass: "use", relationCoverage: "" },
+    ]);
+    expect(sorted.map((e: any) => `${e.relationClass}/${e.relationCoverage}/${e.citingId}`)).toEqual([
+      "correct/full/2",
+      "correct/partial/1",
+      "use//0",
+    ]);
+  });
+});

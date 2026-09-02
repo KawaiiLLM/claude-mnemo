@@ -118,3 +118,26 @@ bound (10,000 edges against a 2,000-turn window) is not reachable in practice.
   `T4 —use→ T1 | var(--rel-use) | solid | {alpha(derived)}`. No blank canvas,
   no empty label. (The two `--draft` strokes are the pre-existing draft-grey
   rule for an edge unattributed on either side, untouched here.)
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `83231204` no-ff; `bun scripts/generate-console-shell.ts` re-run after the merge produced a
+byte-identical `console-shell.ts`; bundles rebuilt. `npx tsc --noEmit` 0; full `bun test` **4745 / 0 /
+268** against 4737/0/268 — exactly the eight new tests. Guards green. The worker's "pre-existing red"
+in the shape-numbers test was the 3 → 2 reconciliation already on main as `aac14341`; its base
+`8a7af023` predates it. Raw-word grep over the shell: 0 hits, re-run by me.
+
+My probes, on sites the worker's four did not touch:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `byCoverage = 0` (coverage sort key dropped) in `console-api.ts` | **GREEN** — the route fixture's two `correct` edges have coverage and citer id in the same order, so the "class, then coverage, then ids" test cannot fail on its middle key |
+| I2 | `HOW_LABEL.derived` → `"declared"` in `console-shell.html`, shell regenerated | RED ×2 (DOM rule + multi-lane label) |
+
+I1 is the pattern the peer named on ticket 02 (a test that reads as coverage but cannot fail).
+Fixed here rather than deferred: `sortEdgesForDisplay` is exported and a unit pin orders a
+partial-coverage edge with LOWER ids before a full one; the same mutation now drives that pin RED
+(verified), restored by `cp` with md5. Accepted with that addition. UNVERIFIED as the worker said:
+no browser render; legend layout and dark-mode `.bad` colour are helper-level only.

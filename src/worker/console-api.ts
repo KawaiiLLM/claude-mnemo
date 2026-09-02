@@ -981,7 +981,7 @@ function sortTurnsById(turns: readonly LaneTurnInput[]): LaneTurnInput[] {
  * ones. That is a strictly better casualty order for the same bound, and the
  * bound is not reachable by any real window.
  */
-function sortEdgesForDisplay<
+export function sortEdgesForDisplay<
   T extends {
     citingId: number;
     citedId: number;
