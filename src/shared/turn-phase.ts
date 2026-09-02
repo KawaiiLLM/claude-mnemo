@@ -297,20 +297,13 @@ export function isTurnEdgeRelation(value: unknown): value is TurnEdgeRelation {
  */
 export const TAGGABLE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(EDGE_RELATIONS);
 
-/**
- * The two relations that build a decision BRANCH — `narrows`/`extends`.
- * Relocated here (rubric-v10 ticket 04) from the retired `shared/flows.ts`
- * (the decision-flow derivation, whose read-side callers all retire with
- * this ticket): this module is the vocabulary's one stated home (see
- * `flows.ts`'s own former header note, "this module therefore does NOT
- * re-declare the relation vocabulary, whose one home is the write path"),
- * so a constant naming a subset of that vocabulary belongs here rather than
- * in a new file. The one surviving reader is `shared/lane-checker.ts`
- * (ticket 05's checker), which needs the same two words for its own
- * component/path reports — unrelated to flow derivation, which no longer
- * exists anywhere in the tree.
- */
-export const STANCE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(["narrows", "extends"]);
+// `STANCE_RELATIONS` (`narrows`/`extends`) IS DELETED (main-agent-edges spec
+// D2). Its last reader was `shared/lane-checker.ts`'s segment graph — a WORD
+// SUBSET of the storage vocabulary, five of seven, with `indexes` and
+// `verifies` silently outside the structural graph. Under three classes there
+// is no such subset to draw: every relation states that this output stands on
+// that one, so the checker's predicate is "carries a class" and the subset had
+// nothing left to name.
 
 /**
  * The ONE self-edge refusal (lane-model-v12 D2, ticket 04) — replaces four

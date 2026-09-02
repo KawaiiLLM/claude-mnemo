@@ -285,7 +285,7 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     expect(regraded).toBe(sOutput);
   });
 
-  test("R1 #7 — S-view: a citer of a rolled-back turn tiers ⑤ (corrector), winning a contested budget-1 seat its own zero degree could never win alone", () => {
+  test("the corrector channel is DELETED — S-view: a citer of a rolled-back turn earns nothing, and recency decides", () => {
     // T1 will be rolled back; T2 `verifies` it (any relation qualifies —
     // corrector detection is relation-agnostic). T3 is a later, edge-free
     // bystander. Without R1 #7, T2's citing edge to T1 is invisible (T1
@@ -317,12 +317,18 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     // `pagedMilestones` directly (see the "opposed significance_grade" test
     // above for why this is the more direct probe now that admission is
     // unbounded).
+    // INVERTED (main-agent-edges spec D2). The corrector TIER is deleted with
+    // the whole tier ladder, and with it the `getRolledBackCiterIds` channel
+    // that fed it: citing a rolled-back turn earns nothing. The citer's edge is
+    // not even in the live feed (both endpoints must be live), so T2 scores
+    // zero out-degree and the LATER turn leads on recency alone. That is the
+    // score's own answer, stated rather than special-cased.
     const view = buildTimelineView(db, { id: `S${sessionId}`, view: "milestones" });
     const [top] = [...view.pagedMilestones].sort((a, b) => b.score - a.score);
-    expect(top!.turn.promptNumber).toBe(2);
+    expect(top!.turn.promptNumber).toBe(3);
   });
 
-  test("R1 #7 — E-view: the same corrector-tier fact through the segment route", () => {
+  test("the corrector channel is DELETED — E-view: the same fact through the segment route", () => {
     // Same `["ops"]` override as the S-view test above, and for the same
     // reason — a `["design"]` T2/T3 would both seat at the new tier ③
     // regardless of the corrector fact this test exists to prove.
@@ -361,11 +367,13 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
     // reserves a fixed allowance for the header/pointer/legend this selector
     // does not itself render — see `selectSegmentMilestonesByEdgeSignals`'s
     // own doc comment).
+    // Same inversion through the segment route: with no corrector tier the
+    // later bystander takes the one seat this budget admits.
     const output = renderSegmentTimeline(
       buildSegmentTimelineView(db, { segmentId: segment.id, view: "milestones", pageBudget: 197 }),
     );
-    expect(output).toContain("T2 ");
-    expect(output).not.toContain("T3 ");
+    expect(output).toContain("T3 ");
+    expect(output).not.toContain("T2 ");
   });
 });
 
@@ -403,7 +411,7 @@ describe("R1 adapter wiring (pre-release repair)", () => {
     db.close();
   });
 
-  test("R1 #1(b) — S-view: an external node never becomes a candidate, and it does not cost a window member its own tier-2 seat (lane-state-retirement ticket 02)", () => {
+  test("R1 #1(b) — S-view: an external node never becomes a candidate, and it costs a window member nothing", () => {
     const anchor = insertTurn(1, "the target of the lane");
     const declarer = insertTurn(2, "declares the lane");
     // Same session, a LATER prompt number, but OUTSIDE the queried range
@@ -432,15 +440,13 @@ describe("R1 adapter wiring (pre-release repair)", () => {
 
     const view = buildTimelineView(db, { id: `S${sessionId}/T1..2`, view: "milestones" });
     const declarerRow = view.pagedMilestones.find((row) => row.turn.promptNumber === 2);
-    // Tier 2 is re-based on the NODE (lane-state-retirement ticket 02): there
-    // is no more "which declaration wins the lane" contest for an external
-    // redeclarer to win. `declarer` seats at tier 2 on its OWN account,
-    // regardless of what any other node — external or not, earlier or later —
-    // also declares. What R1's adapter wiring still proves here is the
-    // ELIGIBILITY half: the external redeclarer, fetched with its REAL order,
-    // never becomes a candidate at all, so it can never be "elected" either —
-    // it just cannot cost `declarer` its own seat, because nothing can.
-    expect(declarerRow?.tier).toBe(2);
+    // What survives of this test under main-agent-edges D2 is exactly the half
+    // R1's adapter wiring was ever about — ELIGIBILITY. There are no tiers left
+    // for an external node to contest, but there is still a boundary: the
+    // external redeclarer is fetched with its REAL order, prices every other
+    // node's score, and never becomes a candidate itself.
+    expect(declarerRow).toBeDefined();
+    expect(declarerRow!.score).toBeGreaterThan(0);
     // The external redeclarer itself never seats — outside the queried
     // window and never a candidate either way.
     expect(view.pagedMilestones.some((row) => row.turn.promptNumber === 5)).toBe(false);

@@ -7,6 +7,7 @@ import type {
 } from "../shared/lane-checker";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
+import { displayEdgeRelation } from "../shared/relation-class";
 
 import type { ConsoleReader } from "./console-reader";
 import { parseSessionsCursor } from "./console-reader";
@@ -120,25 +121,17 @@ export const WIDEN_NODE_MAX = 10_000;
  */
 export const RESPONSE_BYTE_SOFT_MAX = 8_000_000;
 /**
- * Election preview budget (ticket 03: "budget = ... the renderer's default
- * milestone budget 30 (DEFAULT_TIMELINE_PAGE_SIZE precedent)"). Redeclared
- * as a local literal rather than importing `DEFAULT_TIMELINE_PAGE_SIZE` from
- * `mcp/timeline.ts`: that module is the MCP surface's own large renderer,
- * and nothing else in `src/worker/` depends on `src/mcp/` — pulling one
- * constant across that boundary would be a real (if small) new coupling for
- * a value this file can just state directly, with the precedent recorded
- * here instead of in an import graph.
- */
-export const ELECTION_PREVIEW_BUDGET = 30;
-
-/**
  * Ticket 16 scope addition (peer review finding P2): the console's own
  * `pageBudget`/`turn` params were weaker than the shared public contract
  * (`mcp/definitions.ts`'s `recallInputShape`/`timelineInputShape` — positive,
  * capped) — page=0/pageBudget=0/turn=0 all parsed, and neither ceiling was
- * enforced at all. Redeclared as local literals rather than imported, same
- * reasoning as `ELECTION_PREVIEW_BUDGET` above (mirrors `MAX_PAGE_BUDGET`
- * (25,000) / `MAX_TURN_BUDGET` (5,000) in `mcp/definitions.ts` verbatim).
+ * enforced at all. Redeclared as local literals rather than imported, for the
+ * same reason `RESPONSE_BYTE_SOFT_MAX` is (mirrors `MAX_PAGE_BUDGET` (25,000)
+ * / `MAX_TURN_BUDGET` (5,000) in `mcp/definitions.ts` verbatim).
+ *
+ * The election preview no longer needs a budget constant of its own: the
+ * election takes none (main-agent-edges D2 — it scores and orders, it never
+ * cuts).
  */
 export const CONSOLE_MAX_PAGE_BUDGET = 25_000;
 export const CONSOLE_MAX_TURN_BUDGET = 5_000;
@@ -159,15 +152,15 @@ export interface ConsoleMeta {
   stateCoverage: "full" | "partial";
   appliedBounds: ConsoleAppliedBound[];
   /**
-   * Ticket R2 #11: election tiers (`ConsoleGraphTurn.electionTier`) are
+   * Ticket R2 #11: election ranks (`ConsoleGraphTurn.electionRank`) are
    * computed by `electMilestones` over the FULL projection (`run.turns`/
    * `run.edges`), strictly BEFORE any post-load turn/edge trimming — a
-   * visible turn's tier can be granted by a hidden (trimmed-out) turn or
-   * edge the response itself never ships. This field names that fact
+   * visible turn's rank is scored against hidden (trimmed-out) turns and
+   * edges the response itself never ships. This field names that fact
    * explicitly rather than leaving it implicit: always `"full-snapshot"`
    * today (there is no other election scope this worker computes yet).
    * Constant across every route, including the three that carry no
-   * election tiers at all (sessions/segments/segment) — one uniform field
+   * election ranks at all (sessions/segments/segment) — one uniform field
    * on the shared `ConsoleMeta` shape is simpler than a graph-route-only
    * one, and cheap since it never varies.
    */
@@ -219,8 +212,8 @@ export interface ConsoleGraphTurn {
   title: string | null;
   promptExcerpt: string;
   contentExcerpt: string;
-  /** `electMilestones`' per-turn tier over this same projection (`ELECTION_PREVIEW_BUDGET`); `null` for a turn that left candidacy entirely (excluded, not merely low-ranked). */
-  electionTier: number | null;
+  /** `electMilestones`' per-turn RANK over this same projection — 1 = the highest-scoring candidate; `null` for a turn that left candidacy entirely (excluded, or graph-only). */
+  electionRank: number | null;
   /** `LaneTurnInput.type` verbatim — already present on `run.turns`, no extra load. */
   type: readonly string[];
   /**
@@ -282,6 +275,14 @@ export interface ConsoleTurnLaneMembership {
 export interface ConsoleGraphEdge {
   citingId: number;
   citedId: number;
+  /**
+   * The edge's CLASS TOKEN — `correct(full)`, `correct(partial)`, `verify`,
+   * `use` (main-agent-edges ticket 02). It published the stored seven-word
+   * value until then; the shell's own filter list, arc-depth set and colour
+   * variables are keyed on these four instead, because the column that held
+   * the words is dropped at the cutover and a UI keyed on it would render
+   * every edge colourless the day that lands.
+   */
   relation: string;
   /**
    * lane-model-v12 ticket 07 (spec D1): the arc's TWO ENDS, one lane tag
@@ -615,7 +616,7 @@ export function handleSegmentCardRoute(
  * `mcp/memory-filter.ts`), named here only STRUCTURALLY: this module imports
  * nothing from `src/mcp/` (the same "handlers touch storage ONLY through
  * `ConsoleReader`" posture the module header states, and the same reasoning
- * `ELECTION_PREVIEW_BUDGET`'s own doc gives for not importing a constant
+ * `RESPONSE_BYTE_SOFT_MAX`'s own doc gives for not importing a constant
  * across that boundary) — the object literal below is checked against
  * `ConsoleRecallInput["filter"]`/`ConsoleTimelineInput["filter"]` purely by
  * shape at the call site. `undefined` when the request names none of the
@@ -1456,14 +1457,15 @@ export function handleGraphRoute(
   const laneAddresses = buildLaneAnchorAddresses(run.turns);
   const laneCheckText = renderLaneCheckerReports(run.result, laneAddresses);
 
-  // Election preview (ticket 03): per-turn tier from the pure election
-  // module, over the SAME projection inputs `checkLanes` just consumed.
-  const election = electMilestones(
-    run.turns as MilestoneTurnInput[],
-    run.edges,
-    ELECTION_PREVIEW_BUDGET,
+  // Election preview (ticket 03): per-turn RANK from the pure election
+  // module, over the SAME projection inputs `checkLanes` just consumed. The
+  // election has no tiers any more (main-agent-edges D2 — one heuristic score
+  // per node), so what a panel can show is the node's POSITION in that score
+  // order: 1 is the strongest candidate this projection produced.
+  const election = electMilestones(run.turns as MilestoneTurnInput[], run.edges);
+  const rankByTurnId = new Map(
+    election.candidates.map((candidate, index) => [candidate.id, index + 1]),
   );
-  const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
 
   const componentIdsByToken = indexLaneComponentIds(run.result.components);
   const laneMembershipsByTurnId = computePerTurnLaneMemberships(
@@ -1520,7 +1522,7 @@ export function handleGraphRoute(
       title: fields?.title ?? null,
       promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
-      electionTier: tierByTurnId.get(turn.id) ?? null,
+      electionRank: rankByTurnId.get(turn.id) ?? null,
       type: [...turn.type],
       tags: [...(fields?.tags ?? [])],
       laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? [],
@@ -1537,7 +1539,11 @@ export function handleGraphRoute(
   const edgesPayload: ConsoleGraphEdge[] = sortedEdges.map((edge) => ({
     citingId: edge.citingId,
     citedId: edge.citedId,
-    relation: edge.relation,
+    relation: displayEdgeRelation({
+      relation: edge.relation,
+      relationClass: edge.relationClass ?? "",
+      relationCoverage: edge.relationCoverage ?? "",
+    }),
     tailTag: edge.tailTag,
     headTag: edge.headTag,
     tailLaneToken: sideLaneToken(edge.citingId, edge.tailTag),

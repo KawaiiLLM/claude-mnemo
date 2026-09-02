@@ -171,10 +171,12 @@ describe("runLaneCheckCli end to end", () => {
     // the overridden-node cross before it — a member is a member.
     expect(out).toContain("●");
     expect(out).not.toContain("◎");
-    // Report 1's state line went with lane state too. `used[]` — the other
-    // half milestone-election ticket 04 brought to this surface — stays.
+    // Report 1's state line went with lane state, and its `cited from outside:`
+    // line went with the three citedness buckets (main-agent-edges spec D2 —
+    // `depends[]`/`used[]`/`testimony[]` were one bucket per retired relation
+    // word, and two of the three would now hold the same rows).
     expect(out).not.toContain("declaration:");
-    expect(out).toContain("used[-]");
+    expect(out).not.toContain("cited from outside");
   });
 
   test("--no-digraph suppresses the digraph section but keeps the four reports", () => {

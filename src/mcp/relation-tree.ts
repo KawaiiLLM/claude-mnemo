@@ -39,27 +39,34 @@ export function formatRelationArrow(words: readonly string[], crossLane: boolean
 }
 
 /**
- * D8's own tie-break order (moved here from `mcp/timeline.ts`'s
- * `laneChainRelationRank`, same body) — ONLY consulted between two
- * candidates of otherwise EQUAL coverage. `grounds`/`verifies`/`refutes`
- * fall through to the same defensive rank 4 as any relation this tie-break
- * never ranked explicitly.
+ * D8's own tie-break order — ONLY consulted between two candidates of
+ * otherwise EQUAL coverage, and a DISPLAY tie-break rather than a score.
  *
- * relation-vocabulary-v13 ticket 02: the three CLASS spellings are ranked
- * alongside the seven words, at their INTERIM equivalents' ranks
- * (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`), because this
- * function now sees whichever spelling the row rendered as. Ranking them
- * differently would make one chain's tie-break depend on when its edges were
- * written rather than on what they say. It is a display tie-break, not a score:
- * ticket 05a's weight remap does not touch it.
+ * main-agent-edges ticket 02 makes it EXPLICIT and class-keyed:
+ *
+ *   `correct(full)` > `correct(partial)` > `verify` > `use`
+ *
+ * i.e. the class precedence's own order, strongest claim first. The retired
+ * seven-word ladder it replaced was not that order — it ranked `extends` and
+ * `narrows` together at the bottom and put `indexes`/`consume` above them —
+ * because it had grown one word at a time around what a chain renderer
+ * happened to encounter. Three classes have one obvious order and no reason
+ * to disagree with the precedence every other surface teaches.
+ *
+ * Anything else — a legacy row still rendering its stored word, an
+ * out-of-vocabulary value — falls through to the same defensive last rank it
+ * always did.
  */
+const RELATION_RANK_ORDER: readonly string[] = [
+  "correct(full)",
+  "correct(partial)",
+  "verify",
+  "use",
+];
+
 export function defaultRelationRank(relation: string): number {
-  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
-  if (relation === "correct(partial)") return 0;
-  if (relation === "indexes") return 1;
-  if (relation === "consume") return 2;
-  if (relation === "override" || relation === "correct(full)") return 3;
-  return 4;
+  const at = RELATION_RANK_ORDER.indexOf(relation);
+  return at === -1 ? RELATION_RANK_ORDER.length : at;
 }
 
 /** One raw edge into/out of a hop's source node, side tags carried verbatim (`''` unsettled) — the common shape both `Lane.taggedEdges` (citing/cited ids) and `TurnRelationEdgeView` (pre-joined `otherTurnId`) reduce to once the caller has already picked "the other end" as `targetId`. */

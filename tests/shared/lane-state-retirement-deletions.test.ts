@@ -142,30 +142,30 @@ describe("lane-state-retirement ticket 01 — the retired symbols stay retired",
     expect(readCode("src/worker/console-shell.html")).not.toContain("terminusAddress");
   });
 
-  // ---- 5. tier ② seated nobody UNTIL ticket 02, which is now landed -------
+  // ---- 5. tier ② and the whole tier ladder ------------------------------
   //
-  // This section pinned ticket 01's deliberately empty tier as a guard
-  // against a silent fallback arriving before ticket 02's real ruling did.
-  // Ticket 02 IS that ruling ("this node declares an `index`", any tag
-  // state) — the emptiness these two tests pinned was always scoped to
-  // "until ticket 02", and it has arrived. What survives permanently is the
-  // RETIRED REASON WORD: `closed-terminus` names lane-terminus voting, which
-  // is gone for good and never comes back under any rule. The full positive
-  // pin for tier ②'s real behaviour lives at
-  // `tests/shared/milestone-election.test.ts`, which this ticket owns.
-  test("the `closed-terminus` reason is gone from the union for good — tier2 itself is now written by ticket 02's rule", () => {
+  // This section pinned ticket 01's deliberately empty tier ②, then ticket
+  // 02's real predicate for it. main-agent-edges ticket 02 deletes the LADDER:
+  // `indexes` — tier ②'s only feeder — has no successor under three classes,
+  // so there is no convergence declaration left to seat anyone on, and the
+  // election is one heuristic score per node.
+  //
+  // What survives permanently is the RETIRED REASON WORD, `closed-terminus`:
+  // it names lane-terminus voting, which is gone for good and never comes back
+  // under any rule. The positive pin for what the election DOES now lives at
+  // `tests/shared/milestone-election.test.ts`.
+  test("the `closed-terminus` reason is gone from the union for good — and so is every other tier reason", () => {
     const election = readCode("src/shared/milestone-election.ts");
     expect(election).not.toContain("closed-terminus");
-    // tier2 is no longer a declared-but-unwritten placeholder: ticket 02
-    // gives it a real predicate over `edges`.
-    expect(election).toContain('tier2.set(edge.citingId, "declares-index");');
+    expect(election).not.toContain("declares-index");
+    expect(election).not.toContain("MilestoneTier");
   });
 
-  // The runtime half of the same claim, over the fixture that seated at tier
-  // ② under EVERY rule this project has ever had, old and new alike: an index
-  // whose writer is the lane's newest member. It still seats — on its own
-  // account now (the writer, id 2), not on lane-terminus grounds.
-  test("the shape that always seated at tier 2 still seats at tier 2, now on the writer's own account", () => {
+  // The runtime half: the shape that seated at tier ② under every earlier rule
+  // — an `indexes` writer who is the lane's newest member — is still ranked
+  // FIRST here, but on the score's own terms (two out-edges plus the recency
+  // term) rather than on a declaration nobody can make any more.
+  test("the shape that always seated at tier 2 still leads, now on its own out-degree", () => {
     const result = electMilestones(
       [
         { id: 1, type: ["design"], laneTags: ["v"] },
@@ -175,11 +175,9 @@ describe("lane-state-retirement ticket 01 — the retired symbols stay retired",
         laneEdge({ citingId: 2, relation: "extends", citedId: 1, tags: ["v"] }),
         laneEdge({ citingId: 2, relation: "indexes", citedId: 1, tags: ["v"] }),
       ],
-      5,
     );
-    const tier2 = result.candidates.filter((candidate) => candidate.tier === 2);
-    expect(tier2.map((candidate) => candidate.id)).toEqual([2]);
-    expect(tier2[0]?.reason).toBe("declares-index");
+    expect(result.candidates.map((candidate) => candidate.id)).toEqual([2, 1]);
+    expect(result.candidates[0]!.outDegree).toBe(2);
   });
 
   // ---- 6. the rubric's own two halves -----------------------------------

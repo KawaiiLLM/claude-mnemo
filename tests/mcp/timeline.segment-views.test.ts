@@ -295,16 +295,18 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(keptIds).toContain(plain);
     });
 
-    test("in-degree ranks desc within a tier, filling pageSize with the most-cited turns first (milestone-election spec, ticket 03)", () => {
-      // Milestone-election spec: in-degree is counted only among the edges
-      // `electMilestones` is fed — for the segment route that is edges among
-      // this SEGMENT's own members plus real metadata for any external
-      // endpoint an OR-scoped edge reaches (`getRelationEdgesAmongTurns`,
-      // R1 #1's `fetchExternalElectionTurns`) — so every CITER counted here
-      // is itself a member; an external citer's edge still contributes to
-      // the CITED member's own in-degree, but the external citer never
-      // seats (unlike the retired `getTurnEdgeSignals`'s whole-DB scan,
-      // which had no such distinction at all).
+    test("OUT-degree and the class sum rank desc, filling the budget with the turns that BUILT the most first (main-agent-edges spec D2)", () => {
+      // INVERTED. The tier ladder ranked by IN-degree — how often a turn was
+      // cited — and the heuristic score has no in-degree term at all: its
+      // edge-derived terms are the node's OWN out-degree and the class weight
+      // of its OWN outgoing edges. The reading changed with it, deliberately:
+      // "this turn was built on" is a fact about the citers, and the score
+      // prices the turn that did the building.
+      //
+      // Edges are still counted only among what the route feeds the election
+      // — for the segment route, edges among this SEGMENT's own members plus
+      // real metadata for any external endpoint an OR-scoped edge reaches
+      // (`getRelationEdgesAmongTurns`, `fetchExternalElectionTurns`).
       const strong = makeTurn(1, { title: "strongly cited" });
       const weak = makeTurn(2, { title: "weakly cited" });
       const none = makeTurn(3, { title: "not cited" });
@@ -321,20 +323,22 @@ describe("timeline(id=\"E<n>\") segment views", () => {
         CUTOFF,
       );
 
-      // Page-budget-is-the-seat-count spec, decision 1/3: `pageSize` no
-      // longer bounds admission — a TOKEN budget does, cutting in
-      // election-rank order. The row-admission budget reserves a fixed
-      // allowance for the segment header, demoted-pointer line, and
-      // navigation legend that this function itself does not render (see
-      // `selectSegmentMilestonesByEdgeSignals`'s own doc comment) — 205
-      // tokens seats the top two ranked rows (strong, weak) but not a third
-      // (honest-token-pricing ticket 04 re-measured this fixture: 197 -> 1
-      // kept, 217 -> 3 kept, for this fixture's five rows).
+      // `pageSize` no longer bounds admission — a TOKEN budget does, cutting
+      // in score order. The row-admission budget reserves a fixed allowance
+      // for the segment header, demoted-pointer line, and navigation legend
+      // this function does not itself render.
       const view = buildSegmentTimelineView(db, { segmentId, view: "milestones", pageBudget: 205 });
-      // Ranking admits [strong (in-degree 2), weak (in-degree 1)]; DISPLAY
-      // stays event order (strong's member ordinal precedes weak's).
-      expect(view.keptMilestones.map((row) => row.member.turnId)).toEqual([strong, weak]);
-      expect(view.keptMilestones.map((row) => row.member.turnId)).not.toContain(none);
+      // Ranking admits the two CITERS first — `c1` writes two edges (2 out +
+      // 1.0 of class weight), `c2` one strong one (1 out + 1.0) — and then the
+      // newest remaining turn on the recency term. The two CITED turns, which
+      // the tier ladder put on top, are now last: they wrote nothing.
+      const keptIds = view.keptMilestones.map((row) => row.member.turnId);
+      expect(keptIds).toContain(c1);
+      expect(keptIds).toContain(c2);
+      expect(keptIds).not.toContain(strong);
+      expect(keptIds).not.toContain(weak);
+      // DISPLAY order stays event order whatever the ranking said.
+      expect([...keptIds].sort((a, b) => a - b)).toEqual(keptIds);
       expect(view.demotedCount).toBeGreaterThan(0);
     });
 

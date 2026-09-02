@@ -329,24 +329,35 @@ describe("a row written under the RETIRED vocabulary is unchanged for every read
     }
   });
 
-  test("election counts every old word exactly as before — one fixture per word", () => {
+  // main-agent-edges ticket 02: the election has no IN-degree term any more —
+  // its four terms are out-degree, the outgoing class sum, recency and type.
+  // What a legacy word still has to do is RESOLVE to its class, which is what
+  // the class sum prices; the assertion moves to that.
+  test("election prices every old word through its CLASS — one fixture per word", () => {
+    const expected: Record<string, number> = {
+      override: 2, // correct(full)
+      narrows: 1.5, // correct(partial)
+      verifies: 1, // verify
+      extends: 0.5,
+      consume: 0.5,
+      grounds: 0.5,
+      indexes: 0.5,
+    };
     for (const relation of EDGE_RELATIONS) {
       const { turns, edges } = legacyGraph(relation);
-      const elected = electMilestones(turns as never, edges as never, 10);
-      // Both turns are seated, and the CITED one carries the in-degree the
-      // word earns it: the six in-degree words score 1, `override` scores 0.
-      const cited = elected.candidates.find((entry) => entry.id === 1);
-      expect(cited, relation).toBeTruthy();
-      expect(cited!.inDegree, relation).toBe(relation === "override" ? 0 : 1);
+      const elected = electMilestones(turns as never, edges as never);
+      const citer = elected.candidates.find((entry) => entry.id === 2);
+      expect(citer, relation).toBeTruthy();
+      expect(citer!.outDegree, relation).toBe(1);
+      expect(citer!.classScore, relation).toBe(expected[relation]!);
     }
   });
 
-  // THE INTERIM EQUIVALENCE, AT THE ELECTION SEAM (relation-vocabulary-v13
-  // ticket 05a replaces this table and nothing else). A NEW three-class edge
-  // must score exactly as the old-vocabulary edge it replaces, because the
-  // frozen weights are still keyed on the seven words and re-keying them in
-  // the same release as a vocabulary change would leave the two effects
-  // inseparable in production.
+  // THE INTERIM EQUIVALENCE, AT THE ELECTION SEAM. A NEW three-class edge
+  // scores exactly as the old-vocabulary edge it replaces — which since
+  // main-agent-edges ticket 02 is true by CONSTRUCTION rather than by a frozen
+  // word table: both go through `edgeRelationClass`, so the only way they could
+  // differ is if the legacy bridge mapped the word to the wrong class.
   test("INTERIM: a new-class edge scores identically to its old-word equivalent", () => {
     for (const row of INTERIM_LEGACY_RELATION) {
       const legacy = legacyGraph(row.legacy);
@@ -362,13 +373,13 @@ describe("a row written under the RETIRED vocabulary is unchanged for every read
           },
         ],
       };
-      const before = electMilestones(legacy.turns as never, legacy.edges as never, 10);
-      const after = electMilestones(classified.turns as never, classified.edges as never, 10);
+      const before = electMilestones(legacy.turns as never, legacy.edges as never);
+      const after = electMilestones(classified.turns as never, classified.edges as never);
       expect(
-        after.candidates.map((entry) => [entry.id, entry.tier, entry.inDegree, entry.outDegree]),
+        after.candidates.map((entry) => [entry.id, entry.score, entry.classScore, entry.outDegree]),
         `${row.relationClass}/${row.relationCoverage}`,
       ).toEqual(
-        before.candidates.map((entry) => [entry.id, entry.tier, entry.inDegree, entry.outDegree]),
+        before.candidates.map((entry) => [entry.id, entry.score, entry.classScore, entry.outDegree]),
       );
     }
   });

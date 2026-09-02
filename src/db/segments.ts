@@ -8,7 +8,12 @@ import {
   rekeyImpressionDebtsToSegment,
   type StoredImpression,
 } from "./impressions";
+import { loadEndpointLaneFacts } from "./edge-side-resolution";
 import { reconcileCitedPairs } from "./memory-edges";
+import {
+  normalizeIncidentAttribution,
+  type NormalizeIncidentAttributionResult,
+} from "./normalize-incident-attribution";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import {
@@ -19,6 +24,7 @@ import {
   type TagNamespaceHolder,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
+import { relationClassBearingSql } from "../shared/relation-class";
 import { ANONYMOUS_WRITER, stampField } from "./write-gate";
 import { eraVisibleMemberSqlClause } from "../segment-era";
 import {
@@ -1212,6 +1218,8 @@ export type MembershipWriteResult =
       changedTurnIds: number[];
       /** Where each named turn ended up (`null` = unowned). */
       membership: Array<{ turnId: number; segmentId: number | null }>;
+      /** What the post-normalisation repaired (main-agent-edges P2) — `undefined` when the caller deferred it, or when no turn's tags actually moved. */
+      attribution?: NormalizeIncidentAttributionResult;
     }
   | {
       ok: false;
@@ -1241,6 +1249,23 @@ export interface WriteMembershipTagsInput {
    * that can convert frozen rows from being borrowed for anything else.
    */
   thawingSegmentId?: number;
+  /**
+   * OPT OUT of the post-normalisation this primitive otherwise performs
+   * (main-agent-edges pinned decision P2) — for a caller in the MIDDLE of a
+   * compound attribution change that will call
+   * `normalizeIncidentAttribution` itself once every part has landed.
+   *
+   * `mergeLaneTag` is the one such caller and shows why the switch has to
+   * exist: it moves member tags first and REWRITES the affected edge sides
+   * from the folded word to the survivor second. Normalising between the two
+   * would see every `from` declaration as invalid (its endpoint no longer
+   * carries the word), clear it, and — on an endpoint that is in several
+   * lanes — delete the edge outright, before the rewrite that was about to
+   * carry the attribution across had a chance to run.
+   */
+  callerNormalizesAttribution?: boolean;
+  /** The writer id the normalisation's own stamps and receipts carry — the acting VERB's id (`lane:clear`, …). Defaults to `input.writer`, then to the anonymous writer. */
+  normalizationWriter?: string;
 }
 
 /**
@@ -1279,6 +1304,14 @@ export function writeMembershipTags(
 
   const index = segmentTagIndex(db);
   const refusals: MembershipWriteRefusal[] = [];
+  // The PRE-state, captured before the first `UPDATE` — the OLD half of the
+  // old/new lane touch pair `normalizeIncidentAttribution` persists. Cheap
+  // enough to take unconditionally: this is the same batched read the
+  // normalisation itself does, and taking it here is the only moment it is
+  // still true.
+  const previousLaneFacts = input.callerNormalizesAttribution
+    ? undefined
+    : loadEndpointLaneFacts(db, writes.map((write) => write.turnId));
 
   for (const write of writes) {
     const target = derivedTarget(index, write.tags);
@@ -1372,7 +1405,21 @@ export function writeMembershipTags(
     }
   }
 
-  return { ok: true, operation, changedTurnIds, membership };
+  if (input.callerNormalizesAttribution === true || changedTurnIds.length === 0) {
+    return { ok: true, operation, changedTurnIds, membership };
+  }
+  // THE SEAM (main-agent-edges pinned decision P2). Every path that moves
+  // membership reaches this primitive, so putting the re-resolution here is
+  // what makes "a stored side means the endpoint is in several lanes" an
+  // INVARIANT rather than a write-time convention — the caller's transaction
+  // either lands the tag move together with the attribution repair or lands
+  // neither.
+  const attribution = normalizeIncidentAttribution(db, changedTurnIds, {
+    writer: input.normalizationWriter ?? input.writer ?? ANONYMOUS_WRITER,
+    nowEpoch,
+    previousLaneFacts,
+  });
+  return { ok: true, operation, changedTurnIds, membership, attribution };
 }
 
 /**
@@ -1669,6 +1716,16 @@ function turnAddress(db: Database, turnId: number): string {
 /**
  * Every (edge, tag, endpoint) this move would leave undeclared and that is
  * declared TODAY. Empty means the move strands nothing.
+ *
+ * `(tail_tag <> '' OR head_tag <> '')` STAYS, unlike in every other edge
+ * loader this batch touched (main-agent-edges ticket 02). This veto is the one
+ * reader whose subject genuinely IS the stored declaration: it asks "would this
+ * move make a written-down side untrue", and a side nobody wrote down has
+ * nothing to be made untrue. A DERIVED side simply re-derives in the target
+ * task, or stops resolving — neither is a stranding, and admitting them here
+ * would refuse ordinary moves for a fact the resolver already answers. The
+ * relation filter itself moves onto the class accessor's SQL form like
+ * everywhere else, so no word is named.
  */
 export function findMembershipLaneStrandings(
   db: Database,
@@ -1687,7 +1744,7 @@ export function findMembershipLaneStrandings(
               tail_tag AS tailTag, head_tag AS headTag
          FROM memory_edges
         WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-          AND relation IS NOT NULL
+          AND ${relationClassBearingSql("memory_edges")}
           AND (tail_tag <> '' OR head_tag <> '')
           AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`,
     )

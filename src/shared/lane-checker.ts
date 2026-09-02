@@ -284,7 +284,8 @@
  * touching it IS an E4 violation.
  */
 
-import { EDGE_RELATIONS, STANCE_RELATIONS, type EdgeSideName } from "./turn-phase";
+import { type EdgeSideName } from "./turn-phase";
+import { edgeRelationClass, formatRelationClass, RELATION_CLASSES } from "./relation-class";
 import { isMemoryType } from "./type-vocabulary";
 import {
   canonicalTagSet,
@@ -304,8 +305,36 @@ import {
 } from "./lane-interpretation";
 import { phasesForTypes } from "./turn-phase";
 
-/** `EDGE_RELATIONS` (the seven-word write vocabulary) widened to `ReadonlySet<string>` — the ONE gate `checkLanes` partitions its raw `edges` argument through before any graph computation ever sees it (module header, "Vocabulary conformance"). */
-const EDGE_RELATION_WORDS: ReadonlySet<string> = new Set(EDGE_RELATIONS);
+/**
+ * Does this edge carry a relation CLASS? The ONE gate `checkLanes` partitions
+ * its raw `edges` argument through before any graph computation ever sees it
+ * (module header, "Vocabulary conformance").
+ *
+ * main-agent-edges ticket 02: the gate used to be membership in the
+ * seven-word write vocabulary. It is the CLASS accessor now
+ * (`shared/relation-class.ts`), which answers for a row written under either
+ * vocabulary and is the only place in the tree that still consults a stored
+ * word — so the checker itself names none.
+ */
+function carriesRelationClass(edge: LaneEdgeInput): boolean {
+  return edgeRelationClass({
+    relation: edge.relation ?? null,
+    relationClass: edge.relationClass ?? "",
+    relationCoverage: edge.relationCoverage ?? "",
+  }) !== null;
+}
+
+/** How one edge reads as a class token (`correct(full)`, `verify`, …) — `null` for a row that carries no class at all. */
+function relationClassToken(edge: LaneEdgeInput): string | null {
+  const resolved = edgeRelationClass({
+    relation: edge.relation ?? null,
+    relationClass: edge.relationClass ?? "",
+    relationCoverage: edge.relationCoverage ?? "",
+  });
+  return resolved === null
+    ? null
+    : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
+}
 
 /** Capped-list bound for `vocabularyConformance`'s two fact lists and D9's cluster list — `count` on each is always the true total even when `entries` is capped. */
 const MAX_VOCABULARY_REPORT_ENTRIES = 20;
@@ -320,38 +349,38 @@ export type {
 export { DEFAULT_SEGMENT } from "./lane-interpretation";
 
 /**
- * The SEGMENT's tag-agnostic structural graph — stance (narrows/extends) +
- * consume + grounds. Report 4b's transitive reduction is its ONE consumer
- * (module header, "Report domains"); it is deliberately NOT a lane-scoped
- * domain, because a bypass is a fact about the segment's whole shape and the
- * detour that makes a direct edge redundant routinely leaves the lane.
+ * The SEGMENT's tag-agnostic structural graph. Report 4b's transitive
+ * reduction is its ONE consumer (module header, "Report domains"); it is
+ * deliberately NOT a lane-scoped domain, because a bypass is a fact about the
+ * segment's whole shape and the detour that makes a direct edge redundant
+ * routinely leaves the lane.
  *
- * It was called `LANE_COMPONENT_RELATIONS` while reports 2/3 shared a global
- * union-find over it. Ticket 11 retargeted connectivity onto each lane's OWN
- * edges, so the name would now point at a domain no component report reads.
- * Undirected for nobody: report 4b walks it DIRECTED (citing -> cited).
+ * main-agent-edges ticket 02: it used to be a WORD SUBSET — stance
+ * (`narrows`/`extends`) plus `consume` and `grounds`, i.e. five of seven,
+ * with `indexes` and `verifies` silently outside the structural graph. Under
+ * three classes there is no such subset to draw: every relation states that
+ * this turn's output stands on that one, which is exactly what a structural
+ * bypass is about. So ANY relation counts (spec D2), and the predicate is
+ * simply "carries a class".
  */
-export const SEGMENT_GRAPH_RELATIONS: ReadonlySet<string> = new Set([
-  ...STANCE_RELATIONS,
-  "consume",
-  "grounds",
-]);
+export function isSegmentGraphEdge(edge: LaneEdgeInput): boolean {
+  return carriesRelationClass(edge);
+}
 
 /**
- * Report 3's three coupling groups, in the ticket's own order and spelling
- * (verify/override/narrow/extend | ground | consume/index) — the seven-word
- * vocabulary partitioned exactly once, so a reader can see at a glance that
- * every word is counted somewhere and none is counted twice.
+ * Report 3's coupling groups: THE THREE CLASSES, most specific first.
  *
- * The grouping is the ticket's, not a derivation: the first group is the four
- * words that take a POSITION on the cited node's result, the second is the
- * single dependency word, the third is use and aggregation.
+ * The retired grouping partitioned the seven words into three hand-made
+ * buckets (position-taking | dependency | use-and-aggregation). Three classes
+ * ARE that partition, drawn by the write vocabulary itself rather than by a
+ * report — so the report stops carrying a second, independently-maintained
+ * taxonomy of the same edges. A `correct` group counts both coverages: the
+ * question report 3 asks is "how tightly do these two lanes argue with each
+ * other", and full versus partial is a detail of one such argument.
  */
-export const LANE_COUPLING_GROUPS: readonly (readonly string[])[] = [
-  ["verifies", "override", "narrows", "extends"],
-  ["grounds"],
-  ["consume", "indexes"],
-];
+export const LANE_COUPLING_GROUPS: readonly (readonly string[])[] = RELATION_CLASSES.map(
+  (relationClass) => [relationClass],
+);
 
 /**
  * The cluster-size boundary (D9): 4+ warns, 3 or fewer is silence — "a short
@@ -381,15 +410,6 @@ const MAX_CLUSTER_TURN_ENTRIES = 20;
 export const MIN_REPORTED_LANE_MEMBERS = 2;
 
 // ---------------------------------------------------------------- Report 1
-
-export interface LaneCitedFact {
-  citingId: number;
-  citedId: number;
-}
-
-export interface LaneTestimonyFact extends LaneCitedFact {
-  relation: "verifies" | "refutes";
-}
 
 /**
  * The whole-lane membership count a caller measured OUTSIDE this projection —
@@ -445,13 +465,8 @@ export interface LaneStatsReport {
   /** Union of `phasesForTypes` over every member. Normally one entry; more than one is itself a finding (a lane's members should share a phase). */
   phases: TurnPhase[];
   members: readonly LaneMember[];
-  /** Tally of this lane's OWN tagged edges by relation word. */
+/** Tally of this lane's OWN attributed edges by CLASS token (`correct(full)`, `correct(partial)`, `verify`, `use`) — main-agent-edges ticket 02; it counted stored words until then. */
   edgeCountsByRelation: Record<string, number>;
-  citedness: {
-    groundsFromNonMembers: LaneCitedFact[];
-    usedFromNonMembers: LaneCitedFact[];
-    testimonyFromNonMembers: LaneTestimonyFact[];
-  };
   coverage: LaneCoverage;
 }
 
@@ -633,36 +648,6 @@ export interface LaneSegmentFacts {
   emptyLaneTags?: readonly string[];
 }
 
-/**
- * One TOO-FINE INDEX (lane-state-retirement ticket 01, decision 4): a turn
- * whose `indexes` edges reach exactly ONE distinct node.
- *
- * `index` means 阶段性收敛 — it cites the batch of nodes that genuinely
- * contributed to ONE phase result (the user's own calibration: one `/to-spec`
- * run, one release). A single cited node is the diagnosis "说明太细了": the
- * phase was cut at step granularity.
- *
- * IT IS A WARNING AND NEVER AN ERROR, which is a decision and not an
- * oversight. The quantity is a PER-TURN AGGREGATE — "how many nodes did this
- * turn index" — while the rows are written ONE AT A TIME, so a write-time
- * refusal would reject the first row of a batch that was about to become
- * legal. It is also a diagnosis in the ruling's own words, not a prohibition.
- * Nothing in `errors` classes it, and no write path may.
- *
- * EVERY `indexes` ROW COUNTS, whatever its two sides carry. The granularity
- * question is about the PHASE the turn converged, which is a fact about the
- * batch and not about where either end was placed — so a DRAFT `indexes` (a
- * side still unsettled) is counted exactly like a placed one, and a turn that
- * indexes one node from lane A and one from lane B reads as a two-node batch
- * rather than as two one-node ones.
- */
-export interface LaneTooFineIndex {
-  /** The turn that wrote the index. Its own address is where a reader goes to widen or drop the declaration. */
-  citingId: number;
-  /** The ONE node it indexed — a single element by construction (that is what makes it too fine). */
-  citedId: number;
-}
-
 // ------------------------------------------------------ Errors (E3-E4)
 
 /**
@@ -800,13 +785,6 @@ export interface LaneCheckerResult {
    * facts, no verdict.
    */
   laneProliferation: readonly LaneProliferationWarning[];
-  /**
-   * The granularity warning — turns whose whole `indexes` batch is ONE node
-   * (`LaneTooFineIndex`). Capped for display like every other fact list here;
-   * `count` is the true total. A WARNING: no gate reads it, and no write path
-   * refuses on it.
-   */
-  tooFineIndexes: { count: number; entries: readonly LaneTooFineIndex[] };
   /**
    * States the grammar forbids, E3/E4/E6, sorted by `anchorId` then class then
    * endpoints. UNCAPPED on purpose (module header, "The ANCHOR"): the
@@ -946,13 +924,19 @@ function computeCoupling(
   allEdges: readonly LaneEdgeInput[],
   segmentFor: (id: number) => string,
 ): LaneCouplingReport[] {
-  const crossings: Array<{ tail: LaneKey; head: LaneKey; relation: string }> = [];
+  const crossings: Array<{ tail: LaneKey; head: LaneKey; relationClass: string }> = [];
   for (const edge of allEdges) {
     const tail = laneKeyOfSide(edge, "tail", segmentFor);
     const head = laneKeyOfSide(edge, "head", segmentFor);
     if (tail === null || head === null) continue;
     if (sameLaneKey(tail, head)) continue; // internal to one lane, never a crossing
-    crossings.push({ tail, head, relation: edge.relation });
+    const resolved = edgeRelationClass({
+      relation: edge.relation ?? null,
+      relationClass: edge.relationClass ?? "",
+      relationCoverage: edge.relationCoverage ?? "",
+    });
+    if (resolved === null) continue;
+    crossings.push({ tail, head, relationClass: resolved.relationClass });
   }
   return lanes.map((lane) => ({
     key: lane.key,
@@ -960,7 +944,7 @@ function computeCoupling(
       relations,
       count: crossings.filter(
         (crossing) =>
-          relations.includes(crossing.relation) &&
+          relations.includes(crossing.relationClass) &&
           (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key)),
       ).length,
     })),
@@ -1046,7 +1030,7 @@ function computeBypassCandidates(
   const graphs = new Map<string, Map<number, Set<number>>>();
   const directs = new Map<string, { segment: string; citingId: number; citedId: number; relations: Set<string> }>();
   for (const edge of allEdges) {
-    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
+    if (!isSegmentGraphEdge(edge)) continue;
     if (edge.citingId === edge.citedId) continue;
     if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
     const segment = segmentFor(edge.citingId);
@@ -1194,7 +1178,7 @@ function partitionEdgesByVocabulary(
   const inVocabulary: LaneEdgeInput[] = [];
   const outOfVocabulary: LaneOutOfVocabularyEdge[] = [];
   for (const edge of edges) {
-    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+    if (carriesRelationClass(edge)) {
       inVocabulary.push(edge);
     } else {
       outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
@@ -1251,6 +1235,23 @@ function mergeOutOfVocabularyEdges(
  */
 function subsetObligations(edge: LaneEdgeInput): LaneSubsetInvariantMiss[] {
   const obligations: LaneSubsetInvariantMiss[] = [];
+  // A LOADER-RESOLVED edge states its own verdict per side (main-agent-edges
+  // D2): `invalid` IS E4 — a declaration that is not among its endpoint's
+  // current tags — and the tag to NAME is the stored one, which the resolved
+  // `tailTag`/`headTag` no longer carry. Every other outcome is either a live
+  // declaration (which by construction is in the endpoint's tags) or no
+  // declaration at all, and neither owes anything here.
+  if (edge.tailOutcome !== undefined || edge.headOutcome !== undefined) {
+    if (edge.tailOutcome === "invalid") {
+      obligations.push({ tag: edge.storedTailTag ?? edge.tailTag, endpoint: "citing" });
+    }
+    if (edge.headOutcome === "invalid") {
+      obligations.push({ tag: edge.storedHeadTag ?? edge.headTag, endpoint: "cited" });
+    }
+    return obligations;
+  }
+  // A pure fixture supplies no outcome: its sides ARE its stored declarations,
+  // and the check is the endpoint-tag comparison it always was.
   if (edge.tailTag !== UNSETTLED_LANE_TAG && edge.tailTag !== undefined) {
     obligations.push({ tag: edge.tailTag, endpoint: "citing" });
   }
@@ -1324,6 +1325,32 @@ function computeDraftEdgeErrors(edges: readonly LaneEdgeInput[]): LaneDraftEdgeE
   const errors: LaneDraftEdgeError[] = [];
   for (const edge of edges) {
     const unsettledSides: EdgeSideName[] = [];
+    if (edge.tailOutcome !== undefined || edge.headOutcome !== undefined) {
+      // THE PREDICATE NARROWED (main-agent-edges spec D6): E6 is "a blank side
+      // whose endpoint has ≥ 2 lanes" — the `ambiguous` outcome, and only
+      // that. A blank side on a UNIQUE endpoint now derives its lane and is
+      // not a finding at all; a blank side on a LANE-LESS endpoint is legal
+      // and is never a finding. Reporting either would hand settlement a
+      // backlog of edges no writer can act on: there is nothing to declare
+      // when there is nothing to choose between.
+      if (edge.tailOutcome === "ambiguous") {
+        unsettledSides.push("tail");
+      }
+      if (edge.headOutcome === "ambiguous") {
+        unsettledSides.push("head");
+      }
+      if (unsettledSides.length === 0) continue;
+      errors.push({
+        class: "E6",
+        anchorId: edge.citingId,
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: laneEdgeTags(edge),
+        unsettledSides,
+      });
+      continue;
+    }
     // `undefined` is coerced the same way `laneKeyOfSide` coerces it — an
     // un-migrated fixture literal can still hand this an absent side, and an
     // absent side is not a lane.
@@ -1400,38 +1427,6 @@ function computeUnattributedClusters(
     .filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS)
     .map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length }))
     .sort((a, b) => a.turnIds[0]! - b.turnIds[0]!);
-}
-
-/**
- * The too-fine-index warning (`LaneTooFineIndex`): every turn whose `indexes`
- * edges reach exactly ONE distinct cited node.
- *
- * DISTINCT is load-bearing. One turn may carry several `indexes` rows at the
- * same pair (two lane placements of one claim), and those are ONE indexed
- * node, not two — counting rows instead of nodes would silence the warning on
- * exactly the shape it exists to catch.
- *
- * THE MUTATION for this function is `=== 1` -> `<= 0` (or returning `[]`):
- * `tests/shared/lane-checker.test.ts`'s "a single-target index warns, two
- * targets are silent" block goes red in the FIRES direction.
- */
-function computeTooFineIndexes(edges: readonly LaneEdgeInput[]): LaneTooFineIndex[] {
-  const indexedByCitingId = new Map<number, Set<number>>();
-  for (const edge of edges) {
-    if (edge.relation !== "indexes") continue;
-    let bucket = indexedByCitingId.get(edge.citingId);
-    if (bucket === undefined) {
-      bucket = new Set();
-      indexedByCitingId.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-  }
-  const warnings: LaneTooFineIndex[] = [];
-  for (const [citingId, citedIds] of indexedByCitingId) {
-    if (citedIds.size !== 1) continue;
-    warnings.push({ citingId, citedId: [...citedIds][0]! });
-  }
-  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
 }
 
 /**
@@ -1580,9 +1575,11 @@ export function checkLanes(
   // gate reads either. ----
   const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
   const laneProliferation = computeLaneProliferation(segmentFacts);
-  // The granularity warning, and deliberately NOT an error class (see
-  // `LaneTooFineIndex`): a per-turn aggregate cannot refuse a per-row write.
-  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
+  // THE TOO-FINE-INDEX WARNING IS DELETED (spec D2). Its whole input was the
+  // `indexes` word — "this turn declared a phase convergence over exactly one
+  // node" — and `indexes` has no successor: three classes do not declare a
+  // convergence at all, so the warning had nothing left to be computed from
+  // and no proxy for it may be invented (spec, Out of scope).
 
   // ---- ERRORS (module header). E3 is the SAME uncapped fact list
   // `vocabularyConformance` caps for display, classed rather than recomputed;
@@ -1615,7 +1612,6 @@ export function checkLanes(
     },
     unattributedClusters: cappedFactList(unattributedClusters),
     laneProliferation,
-    tooFineIndexes: cappedFactList(tooFineIndexes),
     errors,
   };
 }
@@ -1639,26 +1635,23 @@ function buildLaneStats(
     }
   }
 
+  // BY CLASS (main-agent-edges ticket 02), not by stored word: `correct(full)`,
+  // `correct(partial)`, `verify`, `use`. A row carrying no class at all is not
+  // counted — it never reached a graph computation either.
   const edgeCountsByRelation: Record<string, number> = {};
   for (const edge of lane.taggedEdges) {
-    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
+    const token = relationClassToken(edge);
+    if (token === null) continue;
+    edgeCountsByRelation[token] = (edgeCountsByRelation[token] ?? 0) + 1;
   }
 
-  const groundsFromNonMembers: LaneCitedFact[] = [];
-  const usedFromNonMembers: LaneCitedFact[] = [];
-  const testimonyFromNonMembers: LaneTestimonyFact[] = [];
-  for (const edge of allEdges) {
-    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
-      continue; // lane-wide over the WHOLE input, "from non-members" excludes self-cite for free
-    }
-    if (edge.relation === "grounds") {
-      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "consume") {
-      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
-      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
-  }
+  // THE THREE CITEDNESS BUCKETS ARE DELETED (spec D2). They split incoming
+  // citations from outside the lane into `grounds` / `consume` /
+  // `verifies|refutes`, and that split does not survive three classes: the
+  // grounds-vs-consume distinction has no successor at all, and no report the
+  // buckets fed still exists to ask for one. Nothing replaces them — the
+  // question "who outside this lane built on it" is answered by the lane's own
+  // edge set, which every consumer already has.
 
   const edgeEndpointIds = new Set<number>();
   for (const edge of lane.taggedEdges) {
@@ -1692,7 +1685,6 @@ function buildLaneStats(
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
-    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage,
   };
 }

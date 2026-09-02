@@ -104,13 +104,13 @@ function seedClassFixture(db: Database): ClassFixture {
   // judgment anchors touch plus ONE boundary witness, so exactly one of these
   // two islands is emitted and the other is not — which is what makes the
   // lane's whole membership (6) and this projection's view of it (4) differ.
-  const far1 = insertTurn(10, '["design"]', ["class-task", "gamma"]);
-  const far2 = insertTurn(11, '["design"]', ["class-task", "gamma"]);
-  const far3 = insertTurn(12, '["design"]', ["class-task", "gamma"]);
-  const far4 = insertTurn(13, '["design"]', ["class-task", "gamma"]);
-  const near = insertTurn(999, '["design"]', ["class-task", "gamma"]);
-  const dirtyTurn = insertTurn(1000, "[]", ["class-task", "gamma"]);
-  const windowTail = insertTurn(1001, '["design"]', ["class-task", "gamma"]);
+  const far1 = insertTurn(10, '["design"]', ["class-task", "gamma", "delta"]);
+  const far2 = insertTurn(11, '["design"]', ["class-task", "gamma", "delta"]);
+  const far3 = insertTurn(12, '["design"]', ["class-task", "gamma", "delta"]);
+  const far4 = insertTurn(13, '["design"]', ["class-task", "gamma", "delta"]);
+  const near = insertTurn(999, '["design"]', ["class-task", "gamma", "delta"]);
+  const dirtyTurn = insertTurn(1000, "[]", ["class-task", "gamma", "delta"]);
+  const windowTail = insertTurn(1001, '["design"]', ["class-task", "gamma", "delta"]);
 
   const segmentId = createSegment(db, {
     title: "finding class fixture",
@@ -124,6 +124,11 @@ function seedClassFixture(db: Database): ClassFixture {
     NOW,
   );
   insertLane(db, segmentId, "gamma", NOW);
+  // A SECOND declared lane, carried by every member (main-agent-edges spec
+  // D6): E6 is "a blank side whose endpoint has ≥2 lanes" now, so a fixture
+  // whose members sit in one lane raises no draft finding at all and this
+  // test's E3/E6 split would have nothing to split.
+  insertLane(db, segmentId, "delta", NOW);
 
   writeMemoryEdges(
     db,

@@ -22,7 +22,6 @@ import {
   type ConsoleTurnDisplayFields,
 } from "../../src/worker/console-reader";
 import {
-  ELECTION_PREVIEW_BUDGET,
   EXCERPT_CONTENT_CP,
   EXCERPT_PROMPT_CP,
   GRAPH_EDGE_MAX,
@@ -176,7 +175,6 @@ function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): Consol
       laneProliferation: [],
       // lane-state-retirement ticket 01 — the third attribution warning, read
       // unconditionally by the render this route calls.
-      tooFineIndexes: { count: 0, entries: [] },
       // tag-mandate ticket 03 — same reason as the field above: the renderer
       // reads `errors` unconditionally, so every hand-built result needs it.
       errors: [],
@@ -766,7 +764,6 @@ describe("GET /api/console/graph — lane nullable semantics", () => {
                 phases: [],
                 members: [{ id: 1 }],
                 edgeCountsByRelation: {},
-                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
             ],
@@ -831,7 +828,6 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
               { id: 2 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
         ],
@@ -944,7 +940,6 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
                 phases: [],
                 members: turns.map((t) => ({ id: t.id })),
                 edgeCountsByRelation: {},
-                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
             ],
@@ -1043,7 +1038,6 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
                 { id: 2 },
               ],
               edgeCountsByRelation: { indexes: 1 },
-              citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
               coverage: { status: "whole", missingTurnIds: [] },
             },
           ],
@@ -1122,7 +1116,6 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
               { id: 20 },
             ],
             edgeCountsByRelation: { indexes: 2, override: 1 },
-            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
           {
@@ -1133,7 +1126,6 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
               { id: 10 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
           {
@@ -1144,7 +1136,6 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
               { id: 10 },
             ],
             edgeCountsByRelation: { indexes: 1 },
-            citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
             coverage: { status: "whole", missingTurnIds: [] },
           },
         ],
@@ -1486,7 +1477,6 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
                 phases: [],
                 members: [],
                 edgeCountsByRelation: {},
-                citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
                 coverage: { status: "whole", missingTurnIds: [] },
               },
             ],
@@ -1616,7 +1606,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     for (const t of narrowed) {
       const same = full.find((f: any) => f.id === t.id);
       expect(same).toBeDefined();
-      expect(t.electionTier).toBe(same.electionTier);
+      expect(t.electionRank).toBe(same.electionRank);
     }
   });
 
@@ -1898,7 +1888,7 @@ describe("single-source pin — T900-1001 fixture", () => {
 
     // Election preview: at least one turn in the response has a non-null tier
     // (the election module has real candidates over this fixture).
-    expect(body.turns.some((t: any) => t.electionTier !== null)).toBe(true);
+    expect(body.turns.some((t: any) => t.electionRank !== null)).toBe(true);
   });
 
   test("additive fields hold real, non-trivial values over this fixture: at least one declared terminus, every edge's laneToken null-iff-untagged, every lane token distinct, and no membership entry carries anything beyond token/isTerminus", () => {
@@ -2148,7 +2138,9 @@ describe("bound constants (verbatim)", () => {
     expect(GRAPH_EDGE_MAX).toBe(10_000);
     expect(WIDEN_NODE_MAX).toBe(10_000);
     expect(RESPONSE_BYTE_SOFT_MAX).toBe(8_000_000);
-    expect(ELECTION_PREVIEW_BUDGET).toBe(30);
+    // `ELECTION_PREVIEW_BUDGET` retired with the election's own budget
+    // argument (main-agent-edges spec D2: the election scores and orders, it
+    // never cuts).
   });
 });
 

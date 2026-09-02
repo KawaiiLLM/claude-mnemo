@@ -580,7 +580,10 @@ describe("remember tool (ticket 02)", () => {
           "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
         )
         .all();
-      expect(sides).toEqual([{ tailTag: "new-name", headTag: "new-name" }]);
+      // The ATTRIBUTION moved to `new-name`; the DECLARATIONS then went, as
+      // redundant — each endpoint is in exactly one lane, so the side derives
+      // it (main-agent-edges spec D2, "stored means several lanes").
+      expect(sides).toEqual([{ tailTag: "", headTag: "" }]);
     });
 
     test("refuses when the destination name is already declared in this segment, naming it", () => {
@@ -927,7 +930,9 @@ describe("remember tool (ticket 02)", () => {
             "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
           )
           .all();
-        expect(sides).toEqual([{ tailTag: "parent-lane", headTag: "parent-lane" }]);
+        // Same disposition as the retag sibling: the fold carries the
+        // attribution across and the now-redundant declarations are cleared.
+        expect(sides).toEqual([{ tailTag: "", headTag: "" }]);
       });
 
       test("a member already carrying the survivor keeps ONE copy, and says so", () => {
@@ -1626,7 +1631,7 @@ describe("remember tool (ticket 02)", () => {
     }
 
     describe("lane tier", () => {
-      test("un-homes members and deletes the lane's own internal edges, leaving the registry row for delete", () => {
+      test("un-homes members and KEEPS the lane's own internal edges as node facts, leaving the registry row for delete", () => {
         const segmentId = createViaTool("clear me");
         seedSegmentTag(segmentId, "clear-me-seg");
         declareLane(segmentId, "child-lane");
@@ -1651,11 +1656,16 @@ describe("remember tool (ticket 02)", () => {
         );
         expect(text).toContain(`Cleared E${segmentId}'s lane "child-lane"`);
         expect(text).toContain("2 member turn(s) released");
-        expect(text).toContain("1 edge(s) deleted");
+        // INVERTED (main-agent-edges spec D2): the edge is a fact about two
+        // NODES, and un-homing a turn does not unmake it. What the clear
+        // removes is the ATTRIBUTION — both declarations go, and the row
+        // survives naming no lane.
+        expect(text).not.toContain("edge(s) deleted");
+        expect(text).toContain("2 edge side(s) no longer declare it");
 
         expect(tagsOf(t1)).toEqual(["clear-me-seg"]);
         expect(tagsOf(t2)).toEqual(["clear-me-seg"]);
-        expect(edgeCount()).toBe(0);
+        expect(edgeCount()).toBe(1);
         // The lane row itself SURVIVES clear — delete removes it next, and
         // now can, since no member carries the tag any more.
         expect(getLane(db, segmentId, "child-lane")).not.toBeNull();
@@ -1711,7 +1721,7 @@ describe("remember tool (ticket 02)", () => {
       // the WITHOUT-force refusal first — the one place the two predicates
       // actually disagree — before it ever touches `force`.
       describe("side resolution — two segments declaring the SAME tag (spec D5 peer #4)", () => {
-        test("without force: refuses, names the OTHER lane, and leaves the edge row untouched", () => {
+        test("the crossing edge is untouched, and no `force` is asked for: clear destroys nothing to gate", () => {
           const seg1 = createViaTool("clear side e1");
           seedSegmentTag(seg1, "side-e1-seg");
           declareLane(seg1, "alpha");
@@ -1740,39 +1750,28 @@ describe("remember tool (ticket 02)", () => {
           );
           expect(edgeCount()).toBe(1);
 
-          const refused = resultText(
+          // INVERTED (main-agent-edges spec D2). The `force` gate existed to
+          // warn before DELETING a crossing row; clear deletes no relation row
+          // any more, so there is nothing to warn about and nothing to force.
+          const cleared = resultText(
             rememberTool(db, { verb: "clear", id: `E${seg1}/#alpha` }),
           );
-          expect(refused).toStartWith("Parameter error:");
-          expect(refused).toContain("cross-lane");
-          expect(refused).toContain(`E${seg2}/#alpha`);
-          // Nothing moved: the edge, E1's member, E2's lane and E2's member
-          // all stand exactly as they did.
+          expect(cleared).toContain(`Cleared E${seg1}'s lane "alpha"`);
+          expect(cleared).not.toContain("cross-lane");
+          // The crossing SURVIVES. E1's member is released, so its tail
+          // attributes to nothing; E2's lane, member and head side all stand
+          // exactly as they did.
           expect(edgeCount()).toBe(1);
-          expect(tagsOf(t1)).toEqual(["side-e1-seg", "alpha"]);
-          expect(getLane(db, seg2, "alpha")).not.toBeNull();
-          expect(tagsOf(t2)).toEqual(["side-e2-seg", "alpha"]);
-
-          const forced = resultText(
-            rememberTool(db, { verb: "clear", id: `E${seg1}/#alpha`, force: true }),
-          );
-          expect(forced).toContain(`Cleared E${seg1}'s lane "alpha"`);
-          expect(forced).toContain("1 edge(s) deleted");
-          expect(edgeCount()).toBe(0);
-          // E1's own member released...
           expect(tagsOf(t1)).toEqual(["side-e1-seg"]);
-          // ...but E2's lane and its member are UNTOUCHED — only the
-          // crossing edge (which belonged to neither lane's own
-          // membership) is gone.
           expect(getLane(db, seg2, "alpha")).not.toBeNull();
           expect(tagsOf(t2)).toEqual(["side-e2-seg", "alpha"]);
         });
       });
 
-      // The second `force` class (spec D5, peer #6): the OTHER side is the
-      // unsettled sentinel, not another lane — a cross-lane-only warning
-      // would miss it, leaving a stranded side after clear.
-      test("half-settled edges (one side never settled) also need force, named as their own class", () => {
+      // The second retired `force` class (spec D5, peer #6): the OTHER side was
+      // the unsettled sentinel. Under resolution a blank side simply resolves
+      // to whatever its endpoint says, so there is no stranding to warn about.
+      test("a half-declared edge needs no force either — the blank side just resolves", () => {
         const segmentId = createViaTool("clear half-settled");
         seedSegmentTag(segmentId, "half-seg");
         declareLane(segmentId, "alpha");
@@ -1793,26 +1792,22 @@ describe("remember tool (ticket 02)", () => {
           100,
         );
 
-        const refused = resultText(
+        const cleared = resultText(
           rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
         );
-        expect(refused).toStartWith("Parameter error:");
-        expect(refused).toContain("half-settled");
+        expect(cleared).toContain(`Cleared E${segmentId}'s lane "alpha"`);
+        expect(cleared).not.toContain("half-settled");
         expect(edgeCount()).toBe(1);
-
-        const forced = resultText(
-          rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha`, force: true }),
-        );
-        expect(forced).toContain(`Cleared E${segmentId}'s lane "alpha"`);
-        expect(edgeCount()).toBe(0);
       });
 
-      // D5b (Rev 3's own correction of a Rev 2 mistake): deleting a pair's
-      // LAST relation row must not make a citation the citing prose still
-      // asserts disappear — `restoreBareRowsForEmptiedPairs` puts a bare
-      // `text-ref` row back. `clear` is a new bulk retraction path and has
-      // to reuse that repair rather than reintroduce the defect it fixed.
-      test("D5b: deleting the lane's last relation on a pair the prose still names restores a bare row", () => {
+      // D5b's bare-row RESTORATION is retired with the deletion that needed it
+      // (main-agent-edges spec D2). It existed because clearing a lane deleted
+      // the pair's last relation row, which could make a citation the citing
+      // prose still asserts disappear; clear deletes no row now, so there is
+      // nothing to put back. What the two fixtures below assert instead is
+      // exactly that: the relation row is still there, and no bare row is
+      // invented beside it.
+      test("D5b retired: the pair's relation row survives, so nothing is restored", () => {
         const segmentId = createViaTool("clear d5b");
         seedSegmentTag(segmentId, "d5b-seg");
         declareLane(segmentId, "alpha");
@@ -1838,19 +1833,19 @@ describe("remember tool (ticket 02)", () => {
         const text = resultText(
           rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
         );
-        expect(text).toContain("1 bare row(s) restored");
+        expect(text).not.toContain("bare row(s) restored");
 
         const outgoing = getOutgoingEdges(db, { kind: "turn", id: a });
         expect(outgoing).toHaveLength(1);
-        expect(outgoing[0]?.relation).toBeNull();
-        expect(outgoing[0]?.provenance).toBe("text-ref");
+        expect(outgoing[0]?.relation).toBe("extends");
+        expect(outgoing[0]?.provenance).toBe("asserted");
         expect(outgoing[0]?.cited).toEqual({ kind: "turn", id: b });
       });
 
-      // The negative of the D5b fixture above: when the prose does NOT name
-      // the target any more, nothing is restored — clear must not invent a
-      // citation the body never asserts.
-      test("D5b: no prose naming the target means no bare row comes back", () => {
+      // The negative of the fixture above: with no prose naming the target the
+      // outcome is identical, which is the point — the row's survival has
+      // nothing to do with what the body says any more.
+      test("D5b retired: with no prose either, the same relation row simply survives", () => {
         const segmentId = createViaTool("clear d5b negative");
         seedSegmentTag(segmentId, "d5b-neg-seg");
         declareLane(segmentId, "alpha");
@@ -1875,7 +1870,7 @@ describe("remember tool (ticket 02)", () => {
           rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
         );
         expect(text).not.toContain("bare row(s) restored");
-        expect(getOutgoingEdges(db, { kind: "turn", id: a })).toEqual([]);
+        expect(getOutgoingEdges(db, { kind: "turn", id: a })).toHaveLength(1);
       });
     });
 

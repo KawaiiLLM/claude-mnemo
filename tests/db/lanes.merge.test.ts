@@ -9,6 +9,7 @@ import {
   LaneMergeInvariantError,
   mergeLaneTag,
 } from "../../src/db/lanes";
+import { loadEndpointLaneFacts, resolveEdgeSides } from "../../src/db/edge-side-resolution";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
@@ -38,6 +39,31 @@ import { upsertSession } from "../../src/db/sessions";
  */
 describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   const NOW = 1_800_000_000;
+
+  /**
+   * WHAT A SIDE ATTRIBUTES TO (main-agent-edges spec D2) — the question every
+   * assertion in this file is really asking.
+   *
+   * It used to be answerable by reading `tail_tag`/`head_tag` straight, because
+   * a side WAS its stored word. It is not any more: after the fold the seam
+   * (`normalizeIncidentAttribution`) CLEARS a declaration whose endpoint is
+   * down to one lane, because "stored means several lanes" is an invariant
+   * now. So a correctly-folded intra-lane edge reads `''` on both sides and
+   * resolves to the survivor — the attribution moved, the declaration became
+   * unnecessary, and only the second half is visible in the columns.
+   */
+  const attributedSides = (edgeId: number): { tail: string | null; head: string | null } => {
+    const row = db
+      .query<{ citingId: number; citedId: number; tailTag: string; headTag: string }, [number]>(
+        `SELECT citing_id AS citingId, cited_id AS citedId,
+                tail_tag AS tailTag, head_tag AS headTag
+           FROM memory_edges WHERE id = ?`,
+      )
+      .get(edgeId)!;
+    const facts = loadEndpointLaneFacts(db, [row.citingId, row.citedId]);
+    const sides = resolveEdgeSides(row, facts);
+    return { tail: sides.tail.lane?.tag ?? null, head: sides.head.lane?.tag ?? null };
+  };
 
   let db: Database;
   let sessionId: number;
@@ -178,15 +204,18 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
 
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
 
-    expect(edgeSides(edge)).toEqual({ tailTag: "lane-b", headTag: "lane-b" });
+    // The ATTRIBUTION moved to the survivor. Both DECLARATIONS then went, as
+    // redundant: each endpoint is in exactly one lane now, and the side derives
+    // it (see `attributedSides`).
+    expect(attributedSides(edge)).toEqual({ tail: "lane-b", head: "lane-b" });
+    expect(edgeSides(edge)).toEqual({ tailTag: "", headTag: "" });
     // An edge tagged on both sides counts TWICE: the side is the unit the
     // identity key is made of, and a per-row count would hide a one-sided
     // rewrite that should have been two.
     expect(receipt.edgeSidesRewritten).toBe(2);
-    expect(sideIndexRows()).toEqual([
-      { edgeRowId: edge, side: "head", tag: "lane-b" },
-      { edgeRowId: edge, side: "tail", tag: "lane-b" },
-    ]);
+    // The side index holds DECLARATIONS only, so a derived side leaves nothing
+    // in it — the index shrank with the declarations, not with the lanes.
+    expect(sideIndexRows()).toEqual([]);
   });
 
   test("a CROSSING edge has exactly the folded side rewritten", () => {
@@ -197,7 +226,10 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
 
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
 
-    expect(edgeSides(edge)).toEqual({ tailTag: "lane-b", headTag: "other" });
+    expect(attributedSides(edge)).toEqual({ tail: "lane-b", head: "other" });
+    // The TAIL's declaration is cleared (its endpoint is uniquely laned after
+    // the fold); the HEAD's endpoint never moved, so nothing re-judged it.
+    expect(edgeSides(edge)).toEqual({ tailTag: "", headTag: "other" });
     expect(receipt.edgeSidesRewritten).toBe(1);
   });
 
@@ -237,7 +269,8 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     expect(getLane(db, other, "lane-a")).not.toBeNull();
     // The tail belongs to the OTHER segment's lane-a and stays; only the head,
     // whose endpoint this segment owns, moves.
-    expect(edgeSides(crossEdge)).toEqual({ tailTag: "lane-a", headTag: "lane-b" });
+    expect(attributedSides(crossEdge)).toEqual({ tail: "lane-a", head: "lane-b" });
+    expect(edgeSides(crossEdge)).toEqual({ tailTag: "lane-a", headTag: "" });
     expect(edgeSides(theirEdge)).not.toBeNull();
   });
 
@@ -273,7 +306,7 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     expect(collision.keptProvenance).toBe("asserted");
     expect(collision.droppedProvenance).toBe("judged");
     expect(edgeSides(viaA)).toBeNull();
-    expect(edgeSides(viaB)).toEqual({ tailTag: "lane-b", headTag: "lane-b" });
+    expect(attributedSides(viaB)).toEqual({ tail: "lane-b", head: "lane-b" });
     // The casualty's side-index rows go with it — a lookup row pointing at a
     // deleted edge would attribute a lane through a row nobody can read.
     expect(sideIndexRows().every((row) => row.edgeRowId !== viaA)).toBe(true);
@@ -316,8 +349,8 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
 
     expect(receipt.collisions).toEqual([]);
-    expect(edgeSides(extendsEdge)).toEqual({ tailTag: "lane-b", headTag: "lane-b" });
-    expect(edgeSides(groundsEdge)).toEqual({ tailTag: "lane-b", headTag: "lane-b" });
+    expect(attributedSides(extendsEdge)).toEqual({ tail: "lane-b", head: "lane-b" });
+    expect(attributedSides(groundsEdge)).toEqual({ tail: "lane-b", head: "lane-b" });
   });
 
   // -------------------------------------------------------------------------
@@ -362,7 +395,7 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
 
     expect(tagsOf(t1)).toEqual(["home", "lane-b"]);
     expect(tagsOf(t2)).toEqual(["home", "lane-b"]);
-    expect(edgeSides(edge)).toEqual({ tailTag: "lane-b", headTag: "lane-b" });
+    expect(attributedSides(edge)).toEqual({ tail: "lane-b", head: "lane-b" });
     expect(getLane(db, segmentId, "lane-a")).toBeNull();
   });
 

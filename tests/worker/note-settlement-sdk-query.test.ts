@@ -94,6 +94,36 @@ import { retainAllImpressions } from "../support/impression-payload";
  * container of its own here. A turn carrying one becomes that container's
  * member, which is the model rather than a side effect of the fixture.
  */
+/**
+ * Put `turnIds` in a task declaring TWO lanes, so a blank edge side on any of
+ * them resolves AMBIGUOUS.
+ *
+ * main-agent-edges spec D6 narrows E6 to exactly that: "a blank side whose
+ * endpoint has ≥2 lanes". A blank side on a uniquely-laned endpoint DERIVES
+ * its lane and a blank side on a lane-less one names none — neither is a
+ * finding, because in both cases there is nothing for a writer to choose
+ * between. A fixture whose subject is the GATE (which errors block, where they
+ * anchor, what the refusal says) therefore has to make its draft edges
+ * genuinely undeclarable, which is what this does.
+ */
+function seedAmbiguousLaneHome(db: Database, turnIds: readonly number[]): number {
+  const segmentId = createSegment(db, {
+    title: "ambiguous lane home",
+    tags: ["ambiguous-home"],
+    nowEpoch: 100,
+  }).id;
+  insertLane(db, segmentId, "amb-one", 100);
+  insertLane(db, segmentId, "amb-two", 100);
+  addSegmentMembers(db, segmentId, [...turnIds], 100);
+  for (const turnId of turnIds) {
+    db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+      JSON.stringify(["ambiguous-home", "amb-one", "amb-two"]),
+      turnId,
+    );
+  }
+  return segmentId;
+}
+
 function seedTagContainers(db: Database): void {
   for (const tag of ["lease", "lane"]) {
     // Idempotent: some of these tests re-initialise the same database.
@@ -1100,9 +1130,14 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           // heading plus its citedness line below.
           expect(text).not.toContain("declaration:");
           expect(text).toContain("Lane E");
-          // floor-and-render-fidelity ticket 03: every projection turn's own
-          // citedness reference is an address now, not a bare `T<dbid>`.
-          expect(text).toContain("used[S");
+          // The `cited from outside:` line is DELETED with the three citedness
+          // buckets (main-agent-edges spec D2) — `depends[]`/`used[]`/
+          // `testimony[]` were one bucket per retired relation word. What this
+          // test is about is that the REAL registered handler renders report 1
+          // at all, which the lane heading above already pins; the addressing
+          // discipline it also checked lives on the lines that survive.
+          expect(text).not.toContain("cited from outside");
+          expect(text).toContain(`island@S${sessionDbId}/T1`);
           expect(text).not.toContain("digraph");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -1256,10 +1291,10 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           expect(text).toContain(
             `[E4] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --extends--> S${sessionDbId}/T1 {vocab-fixture}`,
           );
-          // Never admitted: the lane's own edge tally in report 1 is exactly
-          // the extends+indexes pair.
-          expect(text).toContain("extends=1");
-          expect(text).toContain("indexes=1");
+          // Never admitted: the lane's own tally counts by CLASS since
+          // main-agent-edges ticket 02, and `supersedes` resolves to none, so
+          // it appears in no tally at all.
+          expect(text).not.toContain("supersedes=");
           expect(text).not.toContain("supersedes=");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -2548,7 +2583,10 @@ describe("settlement-gate-taxonomy ticket 03 — lane_check has ONE scope and no
           // quietly stopped loading the row.
           expect(defaultCall.content[0]!.text).toContain("(none)");
           expect(defaultCall.content[0]!.text).not.toContain("[E6]");
-          expect(defaultCall.content[0]!.text).toContain(`used[S${sessionDbId}/T4->S${sessionDbId}/T1]`);
+          // The `used[]` bucket is deleted (spec D2); what this test needs is
+          // proof the suppressed row was still LOADED, which report 1's own
+          // membership line carries.
+          expect(defaultCall.content[0]!.text).toContain(`island@S${sessionDbId}/T1`);
           expect(defaultCall.content[0]!.text).toContain("Lane E");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
@@ -3198,6 +3236,9 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
       // out-of-set turn T9, whose address is deliberately not one this test
       // asserts absent from any section.
       const citedOutside = insertTypedTurn(db, sessionDbId, 9);
+      // Every citer goes into a task declaring TWO lanes, so its blank tail is
+      // genuinely undeclarable and E6 fires — see `seedAmbiguousLaneHome`.
+      seedAmbiguousLaneHome(db, [closureTurn, lookbackTurn, windowTurn, citedOutside]);
       writeMemoryEdges(
         db,
         [closureTurn, lookbackTurn, windowTurn].map((citing) => ({
@@ -4462,6 +4503,10 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
     const sessionDbId = seedPullSession(db, contentSessionId);
     const t1 = insertTypedTurn(db, sessionDbId, 1);
     const t2 = insertTypedTurn(db, sessionDbId, 2);
+    // Both endpoints in a task declaring TWO lanes: E6 is the AMBIGUOUS side
+    // now (main-agent-edges spec D6), so a blank side has to have something to
+    // be ambiguous between.
+    seedAmbiguousLaneHome(db, [t1, t2]);
     writeMemoryEdges(
       db,
       [
@@ -4751,6 +4796,9 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
       seedTagContainers(db);
       const { cited, citer, job } = seedRemovedSideFixture(db);
       db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
+      // Both endpoints go into a task declaring TWO lanes, so the draft below
+      // is genuinely undeclarable — see `seedAmbiguousLaneHome`.
+      seedAmbiguousLaneHome(db, [cited, citer]);
       // Clear the manufactured E4 so E6 is the only relation-grammar defect
       // left, then plant a DRAFT edge: both sides unplaced. It is relation
       // grammar, repairable with exactly the authority the debt granted.
@@ -5357,10 +5405,19 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       const [a1, a2, a3] = alpha;
 
       await runStageTwo(db, fixture, async (handlers) => {
-        // ---- The gate, BEFORE any work: E6 blocks, the citer's E3 does not --
+        // ---- The gate, BEFORE any work --------------------------------------
+        //
+        // E6 NO LONGER FIRES ON THIS FIXTURE, and that is the change rather
+        // than a weakening: main-agent-edges spec D6 narrows E6 to "a blank
+        // side whose endpoint has ≥2 lanes". Every draft here sits on an
+        // endpoint in exactly ONE lane (the alpha members) or in NONE (the two
+        // homeless rows), so each blank side either derives its lane or names
+        // none — there is nothing for this run to declare, and reporting it
+        // would hand settlement a backlog it cannot act on. The commit still
+        // refuses, on the impression debt it genuinely owes.
         const early = await callText(handlers, "commit", { report: "early" });
         expect(early).toContain("Commit refused");
-        expect(early).toContain("[E6]");
+        expect(early).not.toContain("[E6]");
         // The citer is in the writable set ONLY through the frozen snapshot —
         // the request never named it — and its E3 was exempt by AUTHORITY
         // (ticket 17), which showed up as an "N further error(s) … turn-TYPE
@@ -5382,9 +5439,8 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         // THE CITER IS STILL LOADED — it is EVIDENCE, not a judgment anchor.
         // The removed-side debt this same run discharges below is its edge's,
         // so a projection that had simply stopped loading the row would fail
-        // that step rather than this assertion. Suppression of the FINDING is
-        // what ticket 02 does; the row itself stays readable.
-        expect(early).toContain("[E6]");
+        // that step rather than this run.
+        expect(await callText(handlers, "lane_check", {})).toContain("Lane E");
 
         // ---- Draft reconciliation: retract the unsettled row, place the row -
         await handlers.get("recall")!({
@@ -5466,10 +5522,10 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(committed).toContain("SHAPE NUMBERS");
         expect(committed).toContain(`E${taskId}/#alpha — 3 member(s), 1 weak component(s)`);
         expect(committed).toContain(`E${taskId}/#beta — 1 member(s), 1 weak component(s)`);
-        // INTERIM storage word (relation-vocabulary-v13 ticket 02, replaced by
-        // ticket 05a): the crossing was written as `use` and the shape numbers
-        // group by the STORED relation word, which is `extends`.
-        expect(committed).toContain(`E${taskId}/#alpha <-> E${taskId}/#beta: extends 1`);
+        // BY CLASS (main-agent-edges ticket 02): the crossing was written as
+        // `use` and the shape numbers group by CLASS now, not by the interim
+        // storage word the write happened to land under.
+        expect(committed).toContain(`E${taskId}/#alpha <-> E${taskId}/#beta: use 1`);
         // The homeless retractions, each with its cause.
         expect(committed).toContain("HOMELESS-MOTIVATED RETRACTIONS (2)");
         expect(committed).toContain('"an orphan line"');
@@ -5629,9 +5685,10 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
           // Two crossings, two different words — grouped, not summed into one.
           { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a1 }, relation: "consume", provenance: "judged", tailTag: "beta", headTag: "alpha" },
           { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a3 }, relation: "grounds", provenance: "judged", tailTag: "beta", headTag: "alpha" },
-          // NOT induced: a placed row whose sides name the lane but whose
-          // endpoints are the same pair under a DIFFERENT word is fine — this
-          // one is excluded because its head side is unsettled.
+          // INDUCED SINCE main-agent-edges D2: its head side is undeclared,
+          // and `a2` is in exactly one lane, so the side DERIVES `alpha`. The
+          // stored-side model dropped this row for want of a word nobody had
+          // written; the resolver reads the endpoint instead.
           { citing: { kind: "turn", id: a3 }, cited: { kind: "turn", id: a2 }, relation: "narrows", provenance: "judged", tailTag: "alpha", headTag: "" },
         ],
         NOW + 1,
@@ -5640,16 +5697,19 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       const before = computeSettlementShapeNumbers(db, fixture.job.id);
       const alphaShape = before.lanes.find((lane) => lane.laneTag === "alpha")!;
       expect(alphaShape.memberCount).toBe(3);
-      expect(alphaShape.edgeCount).toBe(1);
-      // {a1,a2} joined, a3 alone — the edgeless member is its OWN component.
-      expect(alphaShape.componentCount).toBe(2);
+      // THREE in-lane rows now: the declared `a2 -> a1`, the fixture's own
+      // undeclared draft on the same pair, and the half-declared `a3 -> a2`.
+      // All three derive `alpha` on every blank side.
+      expect(alphaShape.edgeCount).toBe(3);
+      // …so every member is connected: `a3 -> a2 -> a1`. The edgeless-member
+      // property is asserted on `beta` below, which genuinely has one.
+      expect(alphaShape.componentCount).toBe(1);
       expect(before.lanes.find((lane) => lane.laneTag === "beta")!.componentCount).toBe(1);
 
       expect(before.pairs).toHaveLength(1);
-      expect(before.pairs[0]!.byRelation).toEqual([
-        { relation: "consume", count: 1 },
-        { relation: "grounds", count: 1 },
-      ]);
+      // BY CLASS (main-agent-edges ticket 02): `consume` and `grounds` are one
+      // class, so the two crossings are two `use` rows, not two words.
+      expect(before.pairs[0]!.byRelation).toEqual([{ relation: "use", count: 2 }]);
 
       // A CONCURRENTLY ADDED MEMBER: laned, owned by the same task, edged into
       // the lane — and invisible, because the transition froze the vertices.
@@ -5892,14 +5952,17 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
       const sessionDbId = seedPullSession(db, "settlement-terminal-gate-toctou");
       const t1 = insertTypedTurn(db, sessionDbId, 1);
       const t2 = insertTypedTurn(db, sessionDbId, 2);
+      // Both turns sit in a task declaring TWO lanes, so the draft minted below
+      // is genuinely undeclarable and E6 fires (main-agent-edges spec D6).
+      seedAmbiguousLaneHome(db, [t1, t2]);
       const job = claimWindow(db, sessionDbId, 1, 2);
       const capturedDb = db;
       const writableTurnIds = new Set([t1, t2]);
 
-      // THE PREFLIGHT IS CLEAN. Both turns are typed, nothing is tagged, and
-      // there is no edge at all — so the refusal below cannot be a property of
-      // the fixture, and an evaluation made at any point before the lock would
-      // return exactly this.
+      // THE PREFLIGHT IS CLEAN. Both turns are typed and there is no edge at
+      // all — so the refusal below cannot be a property of the fixture, and an
+      // evaluation made at any point before the lock would return exactly
+      // this.
       expect(evaluateSettlementCommitGate(db, { writableTurnIds })).toBeNull();
       expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(0);
 

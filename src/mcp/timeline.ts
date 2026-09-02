@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { parseInlineCitations } from "../db/citations";
 import { loadLaneTagsForTurns } from "../db/lane-checker-load";
 import { checkCanonicalLaneTag, listLanesForSegment, type LaneRecord } from "../db/lanes";
-import { getRelationEdgesAmongTurns, getRolledBackCiterIds } from "../db/memory-edges";
+import { getRelationEdgesAmongTurns } from "../db/memory-edges";
 import {
   getSegmentMembershipForTurns,
   listOrphanAnchorTurns,
@@ -19,19 +19,11 @@ import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
-import {
-  type ElectionRelationParameters,
-  electionInEdgeWeight,
-  electionOutEdgeWeight,
-  FROZEN_ELECTION_RELATION_PARAMETERS,
-} from "../shared/election-relation-weights";
 import { type LaneKey } from "../shared/lane-interpretation";
 import {
-  DECISION_TIER_SHARE_WARN_THRESHOLD,
   electMilestones,
   type LaneEdgeInput,
   type MilestoneCandidate,
-  type MilestoneTier,
   type MilestoneTurnInput,
 } from "../shared/milestone-election";
 import { createLogger } from "../shared/logger";
@@ -58,9 +50,16 @@ import {
   displayEdgeRelation,
   NO_RELATION_CLASS,
   NO_RELATION_COVERAGE,
+  relationClassBearingSql,
   type RelationClassValue,
   type RelationCoverageValue,
 } from "../shared/relation-class";
+import {
+  frontierInEdgeWeight,
+  frontierOutEdgeWeight,
+  isFullCorrectionEdge,
+} from "../shared/election-weights";
+import { loadEndpointLaneFacts, resolveEdgeSides } from "../db/edge-side-resolution";
 import { formatRelationArrow } from "./relation-tree";
 import { buildTurnRelationView } from "./relations-view";
 
@@ -524,16 +523,13 @@ export interface MilestoneAntecedentRef {
 export interface KeptMilestone {
   turn: TurnRecord;
   /**
-   * Strict election-rank ordinal, higher is better (milestone-election spec,
-   * ticket 03): monotonically decreasing with `electMilestones`'s own
-   * tier/in-degree/out-degree/order rank, so ties never occur among a
-   * selection's own rows. Degradation order only (`compareMilestoneRank`,
-   * `milestoneDegradationOrder`) — DISPLAY order is always chronological
-   * (spec step 5), never this.
+   * Strict election-rank ordinal, higher is better: monotonically decreasing
+   * with `electMilestones`'s own heuristic score (main-agent-edges spec D2),
+   * so ties never occur among a selection's own rows. Degradation order only
+   * (`compareMilestoneRank`, `milestoneDegradationOrder`) — DISPLAY order is
+   * always chronological (spec step 5), never this.
    */
   score: number;
-  /** The election tier `electMilestones` assigned this row (1 highest .. 5 lowest) — informational, never rendered as a badge (no grade/tier label survives on any surface). */
-  tier: MilestoneTier;
   marker: MilestoneMarker;
   /**
    * `↳` addresses (spec step 5): this row's OWN cited turns that are
@@ -1537,22 +1533,19 @@ function fetchExternalElectionTurns(
  *
  *   ① candidacy: `windowTurns`, minus every ticket-06-excluded (rolled-back/
  *     skipped) and `compact`-typed turn — unchanged from before this ticket.
- *   ② election: `electMilestones(electionTurns, laneEdges, budget)` ranks the
- *     candidates; the top `budget` (by rank) become `kept`, re-sorted to TIME
- *     order (spec step 5) — `budget` is the caller's OWN election-budget
- *     knob (see `buildTimelineView`'s call site for how it is derived from
- *     `pageSize`), decoupled from any later PAGINATION of `kept`.
+ *   ② election: `electMilestones(electionTurns, laneEdges)` SCORES the
+ *     candidates (main-agent-edges spec D2's heuristic — one number per node,
+ *     no tiers, no budget) and returns them in score order; `kept` is every
+ *     one of them, re-sorted to TIME order (spec step 5). How many actually
+ *     render is decided downstream by the token fitter, in exactly this
+ *     score order.
  *   ③ `↳`: `buildElectedCitations` restricted to the `kept` set — a cited
  *     turn survives on a row's `↳` line only if it ALSO made the cut.
  *
- * R1 #1/#7 (pre-release repair): `externalTurns` and `rolledBackCiterIds`
- * are the caller's own two DB-backed facts this function stays free of —
- * real `order`/`createdAtEpoch`/`wasRolledBack` for an edge endpoint outside
- * `windowTurns` (`eligible: false` graph-only entries `electMilestones`
- * folds into its reduction/degree passes but never seats), and the set of
- * window ids that cite a rolled-back turn `laneEdges` itself cannot carry.
- * Both default to empty, so a caller that predates R1 (still just
- * `windowTurns`/`laneEdges`/`budget`) gets exactly the old behavior.
+ * `externalTurns` is the caller's own DB-backed fact this function stays free
+ * of — real `order`/`createdAtEpoch`/`wasRolledBack` for an edge endpoint
+ * outside `windowTurns` (`eligible: false` graph-only entries `electMilestones`
+ * prices every other node against but never seats). It defaults to empty.
  */
 export function selectMilestoneTurns(view: {
   windowTurns: TurnRecord[];
@@ -1571,10 +1564,6 @@ export function selectMilestoneTurns(view: {
    * lane memberships known, which is what a caller with no database gets.
    */
   laneTagsByTurnId?: ReadonlyMap<number, readonly string[]>;
-  /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
-  rolledBackCiterIds?: readonly number[];
-  /** relation-vocabulary-v13 ticket 05a — the two unforced election keys; default = today. */
-  electionParameters?: ElectionRelationParameters;
 }): MilestoneSelection {
   // Main-row candidates: ticket 06's exclusion (rolled-back/skipped) plus a
   // compact marker, structural noise the arc view spends no row on.
@@ -1593,24 +1582,13 @@ export function selectMilestoneTurns(view: {
     order: [turn.sessionId, turn.promptNumber] as const,
     createdAtEpoch: turn.createdAtEpoch,
   }));
-  // Page-budget-is-the-seat-count spec, decision 1: `electMilestones`'s own
-  // `budget` argument feeds ONLY its internal tier-③ two-stage-fill boundary
-  // (that function's own doc comment — never a truncation of its return). It
-  // is no longer derived from any caller-supplied admission number: nothing
-  // here truncates `kept` any more, so there is no "admission cut" left to
-  // align it with. `DEFAULT_TIMELINE_PAGE_SIZE` is a fixed internal constant
-  // now, decoupled from `pageSize`/`pageBudget` — for a caller that used to
-  // pass the default `pageSize` (the common case pre-ticket), this is the
-  // exact same number tier ③ always saw, so its population is unchanged; only
-  // a caller that used to force a SMALL election via a small `pageSize` (the
-  // golden-nine fixture) sees tier ③ computed against a wider boundary than
-  // its old small budget — see this ticket's own test rewrite (decision 8).
+  // The election takes no budget any more (main-agent-edges spec D2): K is
+  // whatever this route's own token fitter admits in score order, and the
+  // number that used to be passed here fed the retired tier-④ two-stage fill
+  // and nothing else.
   const { candidates } = electMilestones(
     [...electionTurns, ...(view.externalTurns ?? [])],
     laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    view.rolledBackCiterIds ?? [],
-    view.electionParameters ?? FROZEN_ELECTION_RELATION_PARAMETERS,
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
   // The election's own return spans every node its `laneEdges` touched; a
@@ -1657,7 +1635,6 @@ export function selectMilestoneTurns(view: {
     return {
       turn,
       score: 0,
-      tier: candidate.tier,
       marker: markerForSelection(turn),
       antecedents: antecedentsOf(turn.id),
     };
@@ -1874,15 +1851,13 @@ export function buildTimelineView(
   // many of these candidates actually render — see `renderTimeline`.
   const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
   const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
-  // R1 #1/#7 (pre-release repair): the two DB-backed facts `selectMilestoneTurns`
-  // itself stays free of — see that function's own doc comment.
+  // The DB-backed fact `selectMilestoneTurns` itself stays free of — see that
+  // function's own doc comment.
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
   const milestoneSelection = selectMilestoneTurns({
     windowTurns: legacyWindowTurns,
     laneEdges,
     externalTurns: externalElectionTurns,
-    rolledBackCiterIds,
     // Ticket 10: the election's lanes come from the turns' own tags now.
     laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds]),
   });
@@ -3804,9 +3779,10 @@ function fetchUserPrompts(
 //
 // "Edge-free graphs degrade to flat chronological" still holds, now for the
 // same structural reason `selectMilestoneTurns` documents: with zero edges
-// every candidate is tier ⑤ at zero degree, so only the LATER-turn tiebreak
-// (election rank) discriminates — pure recency — and the KEPT set renders in
-// EVENT order regardless (ranking decides membership, never display order).
+// and no typed turn every candidate's score is exactly the recency term,
+// which is strictly decreasing in age — pure recency out of the same formula
+// — and the KEPT set renders in EVENT order regardless (ranking decides
+// membership, never display order).
 // ---------------------------------------------------------------------------
 
 export interface SegmentMilestoneEdgeSelection {
@@ -3827,12 +3803,10 @@ export interface SegmentMilestoneEdgeSelection {
  * so this fitter has exactly one degradation step — whole rows, in rank
  * order — rather than the S-view's desc-then-unit ladder.
  *
- * `electMilestones`'s own `budget` argument (its internal tier-③
- * two-stage-fill boundary — a different question, that function's own doc
- * comment) now reads a fixed constant, `DEFAULT_TIMELINE_PAGE_SIZE`,
- * decoupled from `pageBudget` — the same choice `selectMilestoneTurns` makes
- * for the S-view sibling, and for the same reason: there is no longer an
- * "admission number" to align it with.
+ * The election takes no budget of its own any more (main-agent-edges spec
+ * D2): it hands back every candidate in score order and `pageBudget` alone
+ * decides K — the same shape `selectMilestoneTurns` has for the S-view
+ * sibling, cut by a different fitter.
  */
 export function selectSegmentMilestonesByEdgeSignals(
   db: Database,
@@ -3840,8 +3814,6 @@ export function selectSegmentMilestonesByEdgeSignals(
   pageBudget: number,
   /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
   _taskCausalityEraCutoffEpoch?: number,
-  /** relation-vocabulary-v13 ticket 05a — the two unforced election keys; default = today. */
-  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): SegmentMilestoneEdgeSelection {
   // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
   // skipped member is dropped before ordinal numbering or election ever sees
@@ -3863,29 +3835,19 @@ export function selectSegmentMilestonesByEdgeSignals(
     order: [member.sessionId, member.promptNumber] as const,
     createdAtEpoch: member.createdAtEpoch,
   }));
-  // R1 #1/#7 (pre-release repair): the same two DB-backed facts the S-view
-  // call site supplies — see `fetchExternalElectionTurns`'s own doc comment.
+  // The same DB-backed fact the S-view call site supplies — see
+  // `fetchExternalElectionTurns`'s own doc comment.
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates, decisionTierShare } = electMilestones(
+  const { candidates } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    rolledBackCiterIds,
-    parameters,
   );
-  // Share sentinel (phase-connectivity ticket 03, decision 2): one call to
-  // this function IS one segment side (old/recent split, or the plain
-  // single-election views that pass their whole member list through once) —
-  // `electMilestones` stays pure and never logs itself, so the WARN lives
-  // here, at the DB-touching call site.
-  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
-    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
-      share: decisionTierShare,
-      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
-      memberCount: memberIds.size,
-    });
-  }
+  // The decision-tier share sentinel retired with the tiers themselves: the
+  // type signal is a WEIGHTED TERM now (`shared/election-weights.ts`), so a
+  // window where most turns are design-typed no longer collapses a
+  // discriminating tier into "almost everything" — it just moves every one of
+  // those turns by the same 1.5, and the other three terms still separate
+  // them.
   // The correctness guarantee (not an optimization) — see the identical
   // filter in `selectMilestoneTurns`.
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
@@ -4683,20 +4645,11 @@ const FRONTIER_TYPE_WEIGHTS: Record<string, number> = {
 };
 
 /**
- * FROZEN lane-local OUT/IN edge weights — RE-KEYED onto `(class, coverage)` by
- * relation-vocabulary-v13 ticket 05a and moved to
- * `shared/election-relation-weights.ts`, where the milestone election's own
- * word-keyed reads went too. Same numbers, same seam: an edge counts on the OUT
- * side only where its qualified TAIL lane is the scoring lane, on the IN side
- * only where its qualified HEAD lane is, and `override`'s successor
- * (`correct`/`full`) is deliberately weightless on the IN side — the overrider
- * signal lives in out-degree.
- *
- * The one number the re-key could not force is what a `use` edge weighs: the
- * four words it absorbed scored 0/0 (`extends`, `consume`), 1/2 (`grounds`) and
- * 2/1 (`indexes`). It is a PARAMETER
- * (`ElectionRelationParameters`), and its default reproduces today exactly by
- * reading each retired word's own frozen pair.
+ * The lane-local OUT/IN edge weights live in `shared/election-weights.ts`
+ * (`FRONTIER_EDGE_WEIGHTS`) with the milestone score's own table, keyed on
+ * `(class, coverage)`. An edge counts on the OUT side only where its resolved
+ * TAIL lane is the scoring lane, on the IN side only where its resolved HEAD
+ * lane is.
  */
 
 /** Event-step recency: the lane's newest settled member gets +3, then +2, +1, 0 — `max(0, 3 − steps_from_lane_end)`. */
@@ -4706,19 +4659,28 @@ const FRONTIER_RECENCY_WINDOW = 3;
 const COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
 
 /**
- * One valid lane-relevant relation edge, endpoints resolved. "Valid" here is
- * the two-sided lane model's completed edge: `relation` non-null, BOTH side
- * tags settled (non-empty), both endpoint turns canonical (live per
- * `liveTurnSql` and not compact-synthetic). Qualification is ALWAYS the pair
- * `(owning segment, side tag)` — the same tag word under two tasks is two
- * lanes, so no comparison below ever reads a bare tag string alone.
+ * One lane-relevant relation edge, endpoints and ATTRIBUTIONS resolved.
+ *
+ * `tailTag`/`headTag` are no longer the row's stored words: main-agent-edges
+ * D2 makes a lane side an ATTRIBUTION, so each one here is the RESOLVED lane
+ * (`db/edge-side-resolution.ts` — declared when the row declares, derived when
+ * the endpoint is in exactly one lane) and `''` when the side attributes to no
+ * lane at all (ambiguous, invalid, or lane-less). `tailSegmentId`/
+ * `headSegmentId` stay the endpoint's owning task, which is also where a
+ * resolved lane is qualified — the same tag word under two tasks is two lanes,
+ * so no comparison below ever reads a bare tag string alone.
  */
 interface FrontierEdge {
-  /** The STORED word. Since ticket 05a it is no longer the scoring key — it is read only as the retired-word residue inside `use` (`shared/election-relation-weights.ts`) and by the latest-override pointer. Never rendered; see `relationLabel`. */
-  relation: string;
-  /** relation-vocabulary-v13 ticket 02: what a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older. Split from `relation` so the vocabulary change cannot move a frozen weight. */
+  /**
+   * The stored word, carried for ONE consumer: `edgeRelationClass`'s legacy
+   * bridge, which is how a row written before the class columns still answers
+   * "which class is this". Nothing here compares it, switches on it or renders
+   * it — the cutover drops the column and this field goes with it.
+   */
+  relation: string | null;
+  /** What a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older (`displayEdgeRelation`). A LABEL only: nothing scores or filters on it except the same-weight determinism tiebreak. */
   relationLabel: string;
-  /** relation-vocabulary-v13 ticket 05a: the two stored class columns, the SCORING key. Read through `edgeRelationClass`, never directly — a database opened before ticket 03's sweep still answers from the word. */
+  /** The SCORING key — the two stored class columns, read through `edgeRelationClass` (main-agent-edges ticket 02: no frontier reader keys on a stored word any more). */
   relationClass: RelationClassValue;
   relationCoverage: RelationCoverageValue;
   tailTurnId: number;
@@ -4807,12 +4769,18 @@ function loadRawTurnTags(
 }
 
 /**
- * Every CANDIDATE relation edge touching any of `laneTags` by side-tag
- * STRING, endpoints joined and post-qualified in JS
- * (`getSegmentMembershipForTurns` batches the owning-segment resolution; a
- * same-word lane in another segment is separated there, never here).
- * Compact-synthetic endpoints are dropped — both endpoints must be canonical
- * for the edge to count anywhere.
+ * Every CANDIDATE relation edge INCIDENT to one of `memberTurnIds`, endpoints
+ * joined and both sides RESOLVED to their lanes
+ * (`db/edge-side-resolution.ts`). Compact-synthetic endpoints are dropped —
+ * both endpoints must be canonical for the edge to count anywhere.
+ *
+ * THE PREDICATE CHANGED (main-agent-edges D2). It used to be "the row STORES
+ * one of these lane words on a side, and both sides are settled": an edge
+ * nobody had declared was invisible to its own lane, which on production was
+ * 69% of them. It is now "the row touches a MEMBER of the lane" — membership
+ * is a node fact, so the candidate set is addressable without any writer
+ * having said anything — and attribution is decided afterwards by the
+ * resolver, per side.
  *
  * CANDIDATE, not visible: this is the raw load only. Edge VISIBILITY — what
  * may enter any digest count, pointer, score, forward multiset or mirror —
@@ -4822,14 +4790,15 @@ function loadRawTurnTags(
  */
 function loadFrontierEdges(
   db: Database,
-  laneTags: readonly string[],
+  memberTurnIds: readonly number[],
 ): FrontierEdge[] {
-  if (laneTags.length === 0) {
+  const ids = [...new Set(memberTurnIds)];
+  if (ids.length === 0) {
     return [];
   }
-  const placeholders = laneTags.map(() => "?").join(",");
+  const placeholders = ids.map(() => "?").join(",");
   interface Row {
-    relation: string;
+    relation: string | null;
     relationClass: RelationClassValue | null;
     relationCoverage: RelationCoverageValue | null;
     tailTurnId: number;
@@ -4846,7 +4815,7 @@ function loadFrontierEdges(
     headTags: string | null;
   }
   const rows = db
-    .query<Row, string[]>(
+    .query<Row, number[]>(
       `SELECT e.relation AS relation,
               e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
@@ -4859,27 +4828,35 @@ function loadFrontierEdges(
          JOIN turns tc ON tc.id = e.citing_id
          JOIN turns td ON td.id = e.cited_id
         WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-          AND e.relation IS NOT NULL
-          AND e.tail_tag != '' AND e.head_tag != ''
-          AND (e.tail_tag IN (${placeholders}) OR e.head_tag IN (${placeholders}))
+          AND ${relationClassBearingSql("e")}
+          AND (e.citing_id IN (${placeholders}) OR e.cited_id IN (${placeholders}))
           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
         ORDER BY e.id ASC`,
     )
-    .all(...laneTags, ...laneTags);
+    .all(...ids, ...ids);
   const canonicalRows = rows.filter(
     (row) =>
       !isCompactSyntheticTagList(parseRawTagList(row.tailTags)) &&
       !isCompactSyntheticTagList(parseRawTagList(row.headTags)),
   );
-  const owning = getSegmentMembershipForTurns(db, [
+  const endpointIds = [
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId])),
-  ]);
-  return canonicalRows.map((row) => ({
-    // `relation` stays the STORED word, but since ticket 05a it is no longer
-    // the scoring key: the two class columns below are, and the word survives
-    // here only as the retired-word residue inside `use` and as the
-    // latest-override pointer's own filter. What renders is `relationLabel` —
-    // kept apart from both on purpose.
+  ];
+  const owning = getSegmentMembershipForTurns(db, endpointIds);
+  // THE resolution (main-agent-edges D2): one batched endpoint-facts load for
+  // the whole candidate set, then a pure per-side projection.
+  const laneFacts = loadEndpointLaneFacts(db, endpointIds);
+  return canonicalRows.map((row) => {
+    const sides = resolveEdgeSides(
+      {
+        citingId: row.tailTurnId,
+        citedId: row.headTurnId,
+        tailTag: row.tailTag,
+        headTag: row.headTag,
+      },
+      laneFacts,
+    );
+    return {
     relation: row.relation,
     relationLabel: displayEdgeRelation({
       relation: row.relation,
@@ -4890,8 +4867,11 @@ function loadFrontierEdges(
     relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
-    tailTag: row.tailTag,
-    headTag: row.headTag,
+    // The RESOLVED attribution, never the stored word — `''` for a side that
+    // attributes to no lane, which every consumer below already treats as
+    // "no lane placement".
+    tailTag: sides.tail.lane?.tag ?? "",
+    headTag: sides.head.lane?.tag ?? "",
     tailSegmentId: owning.get(row.tailTurnId) ?? null,
     headSegmentId: owning.get(row.headTurnId) ?? null,
     tailSessionId: row.tailSessionId,
@@ -4900,7 +4880,8 @@ function loadFrontierEdges(
     headSessionId: row.headSessionId,
     headPromptNumber: row.headPromptNumber,
     headCreatedAtEpoch: row.headCreatedAtEpoch,
-  }));
+    };
+  });
 }
 
 /** The spec's ONE total order (`created_at_epoch desc, id desc`) — every "newer" tie in this section resolves through it. */
@@ -5288,7 +5269,6 @@ function assembleFrontierLanes(
   db: Database,
   segment: SegmentRecord,
   eraCutoffEpoch: number | null,
-  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): FrontierLane[] {
   const segmentId = segment.id;
 
@@ -5303,9 +5283,17 @@ function assembleFrontierLanes(
     eraCutoffEpoch,
     universe,
   );
-  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag)).filter(
-    isVisibleEdge,
-  );
+  // The candidate scope is now the lanes' MEMBERS (main-agent-edges D2 —
+  // "incident to a member", not "stores this word"), so an edge no writer ever
+  // declared still reaches its own lane through the resolver.
+  const memberTurnIds = [
+    ...new Set(
+      laneRecords.flatMap((lane) =>
+        (universe.membersByTag.get(lane.tag) ?? []).map((member) => member.turnId),
+      ),
+    ),
+  ];
+  const edges = loadFrontierEdges(db, memberTurnIds).filter(isVisibleEdge);
 
   // 2-3. Per-lane denominators, pointer and candidate ranking.
   return laneRecords.map((laneRecord) => {
@@ -5329,14 +5317,17 @@ function assembleFrontierLanes(
     );
     const { islands, singletons } = countFrontierIslands(settled, islandEdges);
 
-    // Latest override: newest-by-TAIL-event-order VISIBLE override edge whose
-    // qualified HEAD is in this lane — same-lane or cross-lane tail; a
+    // Latest override: newest-by-TAIL-event-order VISIBLE FULL-CORRECTION edge
+    // whose resolved HEAD is in this lane — same-lane or cross-lane tail; a
     // cross-lane tail renders its own qualified lane `(E<n>/#tag)`. The
     // shared predicate already guarantees the tail is settled in its own
     // declared lane (ticket 07 P1-3 — an unsettled or unqualifiable tail can
-    // no longer become the pointer).
+    // no longer become the pointer). "Override" is the POINTER'S name, kept
+    // because it is what the line has always said; the edge it selects is
+    // `correct`/`full`, that word's exact successor (main-agent-edges ticket
+    // 02 — no reader keys on the retired word any more).
     const overrideEdges = edges
-      .filter((edge) => edge.relation === "override" && headQualifies(edge))
+      .filter((edge) => isFullCorrectionEdge(edge) && headQualifies(edge))
       .sort((left, right) => {
         if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
           return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
@@ -5372,10 +5363,10 @@ function assembleFrontierLanes(
       }
       for (const edge of edges) {
         if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-          score += electionOutEdgeWeight(edge, parameters);
+          score += frontierOutEdgeWeight(edge);
         }
         if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-          score += electionInEdgeWeight(edge, parameters);
+          score += frontierInEdgeWeight(edge);
         }
       }
       scores.set(member.turnId, score);
@@ -5486,7 +5477,6 @@ export function buildSegmentFrontierSection(
   readerId?: string | null,
   now?: () => number,
   hostCharLimit?: number | null,
-  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): string {
   const sequence = snapshotWriteGateSequence(db);
   try {
@@ -5494,7 +5484,7 @@ export function buildSegmentFrontierSection(
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters);
+    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
     const displayLanes = [...lanes].sort(compareFrontierDisplayOrder);
 
     const taskTag = segmentTagOf(segment);
@@ -5823,16 +5813,17 @@ const LANE_ARROW_LEGEND =
   "arrows: -> in-lane · => cross-lane out · <= cross-lane in · <- cross-page in";
 
 /**
- * Branch ordering (USER RULED T2218): the election's OUT-edge weight
- * (`electionOutEdgeWeight` — correct/full and the retired `indexes` 2 >
- * the retired `grounds`, verify, correct/partial 1 > `use` 0), then newer
- * TARGET under the pinned total order (`created_at_epoch desc, id desc` over the head). The trailing
- * relation-word compare only ever fires on a same-weight multi-relation pair
- * over one (tail, head) — determinism, not a ranking claim.
+ * Branch ordering (USER RULED T2218): the frontier's OUT-edge weight
+ * (`frontierOutEdgeWeight` — `correct(full)` 2 > `correct(partial)`/`verify`
+ * 1 > `use` 0), then newer TARGET under the pinned total order
+ * (`created_at_epoch desc, id desc` over the head). The trailing LABEL compare
+ * only ever fires on a same-weight multi-relation pair over one (tail, head) —
+ * determinism, not a ranking claim, which is why it may read the display
+ * spelling rather than a scoring key.
  */
 function compareLaneBranchEdges(left: FrontierEdge, right: FrontierEdge): number {
-  const weightLeft = electionOutEdgeWeight(left);
-  const weightRight = electionOutEdgeWeight(right);
+  const weightLeft = frontierOutEdgeWeight(left);
+  const weightRight = frontierOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -5842,13 +5833,17 @@ function compareLaneBranchEdges(left: FrontierEdge, right: FrontierEdge): number
   if (left.headTurnId !== right.headTurnId) {
     return right.headTurnId - left.headTurnId;
   }
-  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
+  return left.relationLabel < right.relationLabel
+    ? -1
+    : left.relationLabel > right.relationLabel
+      ? 1
+      : 0;
 }
 
 /** Mirror ordering: the SAME weight table, newer SOURCE first (spec: "mirrors after all branches, same sort" — honestly named a reuse of the OUT-edge table, not the incoming scorer). */
 function compareLaneMirrorEdges(left: FrontierEdge, right: FrontierEdge): number {
-  const weightLeft = electionOutEdgeWeight(left);
-  const weightRight = electionOutEdgeWeight(right);
+  const weightLeft = frontierOutEdgeWeight(left);
+  const weightRight = frontierOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -5858,7 +5853,11 @@ function compareLaneMirrorEdges(left: FrontierEdge, right: FrontierEdge): number
   if (left.tailTurnId !== right.tailTurnId) {
     return right.tailTurnId - left.tailTurnId;
   }
-  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
+  return left.relationLabel < right.relationLabel
+    ? -1
+    : left.relationLabel > right.relationLabel
+      ? 1
+      : 0;
 }
 
 /** One inbound mirror on a lane page: the edge plus its arrow kind — `<-` (same-lane, tail on a newer PAGE) or `<=` (cross-lane). Sorted together, folded per (kind, relation). */

@@ -46,10 +46,9 @@ const NO_ATTRIBUTION_WARNINGS = {
   laneProliferation: [],
   // lane-state-retirement ticket 01 adds a third attribution warning, read
   // unconditionally by both renders — same role as the two above.
-  tooFineIndexes: { count: 0, entries: [] },
 } satisfies Pick<
   LaneCheckerResult,
-  "unattributedClusters" | "laneProliferation" | "tooFineIndexes"
+  "unattributedClusters" | "laneProliferation"
 >;
 
 
@@ -93,11 +92,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
             { id: 2 },
           ],
           edgeCountsByRelation: { extends: 1, indexes: 1 },
-          citedness: {
-            groundsFromNonMembers: [{ citingId: 9, citedId: 1 }],
-            usedFromNonMembers: [{ citingId: 6, citedId: 1 }],
-            testimonyFromNonMembers: [{ citingId: 8, citedId: 1, relation: "verifies" }],
-          },
           coverage: { status: "partial", missingTurnIds: [7] },
         },
       ],
@@ -124,9 +118,10 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).not.toContain("declaration:");
     expect(text).not.toContain("terminus");
     expect(text).not.toContain("last event");
-    expect(text).toContain("T9->T1");
-    expect(text).toContain("used[T6->T1]");
-    expect(text).toContain("T8 verifies T1");
+    // THE `cited from outside:` LINE IS GONE with the three buckets it read
+    // (main-agent-edges spec D2) — `depends[]` / `used[]` / `testimony[]` were
+    // one bucket per retired relation word.
+    expect(text).not.toContain("cited from outside");
     expect(text).toContain("partial");
     // floor-and-render-fidelity ticket 03: EVERY turn id this file prints
     // routes through the same formatter, coverage's missing-id list included
@@ -146,7 +141,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       phases: [],
       members: [{ id: 31 }],
       edgeCountsByRelation: { indexes: 1 },
-      citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
     const result: LaneCheckerResult = {
@@ -177,7 +171,6 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           phases: [],
           members: [],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -603,7 +596,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: ["decision"],
           members: [{ id: 1 }, { id: 2 }, { id: 3 }],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -630,7 +622,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
       phases: ["decision"],
       members: [{ id: 1 }, { id: 2 }],
       edgeCountsByRelation: {},
-      citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
       coverage: { status: "whole", missingTurnIds: [] },
     };
 
@@ -675,7 +666,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
         {
@@ -683,7 +673,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 5 }],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -713,7 +702,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: ["decision"],
           members: manyMembers,
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -747,7 +735,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           phases: [],
           members: [{ id: 1 }],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -773,7 +760,6 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
             { id: 2 },
           ],
           edgeCountsByRelation: {},
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],
@@ -1089,7 +1075,6 @@ describe("renderLaneCheckerReportsPaged -- settlement paging (ticket 05)", () =>
           phases: ["decision"],
           members: [{ id: 1 }, { id: 2 }],
           edgeCountsByRelation: { extends: 1 },
-          citedness: { groundsFromNonMembers: [], usedFromNonMembers: [], testimonyFromNonMembers: [] },
           coverage: { status: "whole", missingTurnIds: [] },
         },
       ],

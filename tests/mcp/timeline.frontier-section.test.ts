@@ -742,29 +742,27 @@ describe("frontier section: frozen scorer arithmetic (one property per fixture)"
   });
 
   // -- lane-local OUT-edge weights (targets cross-lane: no in-score bleed) --
-  test("out override (2) ties out grounds (1) + newer", () => {
+  // main-agent-edges ticket 02: the four `use` sources (`extends`, `consume`,
+  // `grounds`, `indexes`) no longer keep four different weights — the retired
+  // per-word residue is deleted with the parameter table, and every `use` row
+  // weighs what its CLASS weighs, 0/0. The partner in this tie is therefore a
+  // `narrows` (`correct(partial)`, out 1), the weight `grounds` used to hold.
+  test("out override (2) ties out narrows (1) + newer", () => {
     expect(
       firstSeatProbe(
         { edges: [{ direction: "out", relation: "override" }] },
-        { edges: [{ direction: "out", relation: "grounds" }] },
+        { edges: [{ direction: "out", relation: "narrows" }] },
       ),
     ).toBe("B");
   });
   test("out override is worth 2: override+2 beats bare +3", () => {
     expect(firstSeatProbe({ edges: [{ direction: "out", relation: "override" }] }, {})).toBe("A");
   });
-  test("out indexes (2) ties out verifies (1) + newer", () => {
-    expect(
-      firstSeatProbe(
-        { edges: [{ direction: "out", relation: "indexes" }] },
-        { edges: [{ direction: "out", relation: "verifies" }] },
-      ),
-    ).toBe("B");
-  });
-  test("out indexes is worth 2: indexes+2 beats bare +3", () => {
-    expect(firstSeatProbe({ edges: [{ direction: "out", relation: "indexes" }] }, {})).toBe("A");
-  });
-  test("out grounds is worth exactly 1: grounds+2 ties bare +3; two grounds beat it", () => {
+  // Every `use` row is worth 0 on the OUT side, whichever retired word it was
+  // stored under. `indexes` used to be worth 2 and `grounds` 1; both are `use`
+  // now, and the class carries one number.
+  test("out use is worth 0, whichever retired word stored it: neither `indexes` nor `grounds` moves the seat", () => {
+    expect(firstSeatProbe({ edges: [{ direction: "out", relation: "indexes" }] }, {})).toBe("B");
     expect(firstSeatProbe({ edges: [{ direction: "out", relation: "grounds" }] }, {})).toBe("B");
     expect(
       firstSeatProbe(
@@ -776,7 +774,7 @@ describe("frontier section: frozen scorer arithmetic (one property per fixture)"
         },
         {},
       ),
-    ).toBe("A");
+    ).toBe("B");
   });
   test("out verifies is worth exactly 1", () => {
     expect(firstSeatProbe({ edges: [{ direction: "out", relation: "verifies" }] }, {})).toBe("B");
@@ -831,16 +829,10 @@ describe("frontier section: frozen scorer arithmetic (one property per fixture)"
     ).toBe("B");
     expect(firstSeatProbe({ edges: [{ direction: "in", relation: "verifies" }] }, {})).toBe("A");
   });
-  test("in grounds (2) ties in narrows (1) + newer; beats bare", () => {
-    expect(
-      firstSeatProbe(
-        { edges: [{ direction: "in", relation: "grounds" }] },
-        { edges: [{ direction: "in", relation: "narrows" }] },
-      ),
-    ).toBe("B");
-    expect(firstSeatProbe({ edges: [{ direction: "in", relation: "grounds" }] }, {})).toBe("A");
-  });
-  test("in indexes is worth exactly 1", () => {
+  // Same collapse on the IN side: `grounds` was 2 and `indexes` 1; both are
+  // `use` now, worth 0, so neither can carry a seat on its own.
+  test("in use is worth 0, whichever retired word stored it", () => {
+    expect(firstSeatProbe({ edges: [{ direction: "in", relation: "grounds" }] }, {})).toBe("B");
     expect(firstSeatProbe({ edges: [{ direction: "in", relation: "indexes" }] }, {})).toBe("B");
     expect(
       firstSeatProbe(
@@ -852,7 +844,7 @@ describe("frontier section: frozen scorer arithmetic (one property per fixture)"
         },
         {},
       ),
-    ).toBe("A");
+    ).toBe("B");
   });
   test("in narrows is worth exactly 1", () => {
     expect(firstSeatProbe({ edges: [{ direction: "in", relation: "narrows" }] }, {})).toBe("B");
@@ -1052,21 +1044,24 @@ describe("frontier section: shared visible-edge predicate (ticket 07 P1-3)", () 
     db.close();
   });
 
-  test("unsettled-tail score exclusion: an in-`grounds` from a FRONTIER tail scores nothing (the settled control proves the same edge would have decided the seat)", () => {
+  test("unsettled-tail score exclusion: an in-`verify` from a FRONTIER tail scores nothing (the settled control proves the same edge would have decided the seat)", () => {
     const seed = (settleTail: boolean) => {
       const db = makeDb();
       const s1 = makeSession(db, "score-probe");
       const task = makeTask(db, "Score", "sc-task");
       insertLane(db, task.id, "probe", BASE_EPOCH);
       insertLane(db, task.id, "other", BASE_EPOCH);
-      // A older (+2 recency), B newer (+3): bare, B wins. An in-`grounds`
+      // A older (+2 recency), B newer (+3): bare, B wins. An in-`verify`
       // (+2) onto A flips the seat to A — iff the tail edge is VISIBLE.
+      // (It was an in-`grounds` until main-agent-edges ticket 02 collapsed
+      // that word into `use`, worth 0 on both sides; `verify` carries the 2
+      // this probe needs.)
       const a = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, tags: ["probe"] });
       const b = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, tags: ["probe"] });
       const tail = makeTurn(db, s1, { prompt: 3, epoch: BASE_EPOCH + 300, tags: ["other"] });
       addSegmentMembers(db, task.id, [a, b, tail], BASE_EPOCH);
       settleWindow(db, s1, 1, settleTail ? 3 : 2);
-      makeEdge(db, tail, a, "grounds", "other", "probe");
+      makeEdge(db, tail, a, "verifies", "other", "probe");
       return { db, task };
     };
 

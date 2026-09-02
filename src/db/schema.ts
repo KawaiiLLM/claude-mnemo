@@ -1778,6 +1778,43 @@ const MEMORY_EDGE_SIDE_TAGS_DDL = `
     ON memory_edge_side_tags(side, tag, edge_row_id);
 `;
 
+/**
+ * THE ATTRIBUTION RECEIPT (main-agent-edges spec D2, pinned decision P2).
+ *
+ * `db/normalize-incident-attribution.ts` runs inside every lane lifecycle and
+ * membership verb and can do two subtractive things: clear a declaration that
+ * stopped being true, and DELETE an edge nobody can attribute any more
+ * (T2421 — "no debt, no later repair branch: the postcondition is one row per
+ * pair"). Both are irreversible from the row itself, so both leave a row here.
+ *
+ * NOT a rollback mechanism and deliberately not shaped like one: the cutover's
+ * own receipt (ticket 1) copies every old column of every touched row because
+ * it must be able to REBUILD the old state. This table answers a smaller
+ * question — "which verb removed this attribution, when, and what did the row
+ * say at the time" — which is what a reader looking at a lane that lost edges
+ * actually needs. `ON DELETE` is absent on purpose: the receipt outlives the
+ * edge row it describes, which is the entire point.
+ */
+const EDGE_ATTRIBUTION_RECEIPTS_DDL = `
+  CREATE TABLE IF NOT EXISTS edge_attribution_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    edge_row_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('clear-declaration', 'delete-edge')),
+    side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
+    citing_id INTEGER NOT NULL,
+    cited_id INTEGER NOT NULL,
+    relation_class TEXT NOT NULL DEFAULT '',
+    relation_coverage TEXT NOT NULL DEFAULT '',
+    tail_tag TEXT NOT NULL DEFAULT '',
+    head_tag TEXT NOT NULL DEFAULT '',
+    writer TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_edge_attribution_receipts_citing
+    ON edge_attribution_receipts(citing_id, created_at_epoch);
+`;
+
 // Spec C15: the retired `turn_citations` table carried `ON DELETE CASCADE`;
 // `memory_edges` cannot, because citing_id/cited_id are shared across three
 // id spaces and a single REFERENCES clause would validate against the wrong
@@ -4523,6 +4560,10 @@ function ensureMemoryEdgesSchema(db: Database): void {
   // this point — M-A (the last phase of `runLaneModelV12EdgeMigration`) fills
   // it, and an empty table is the honest state until then.
   db.exec(MEMORY_EDGE_SIDE_TAGS_DDL);
+  // main-agent-edges ticket 02: the attribution receipt every lane lifecycle
+  // and membership verb writes into. Unconditional and independent of the
+  // edge table's shape — it holds no foreign key at all (see its own DDL).
+  db.exec(EDGE_ATTRIBUTION_RECEIPTS_DDL);
 
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);

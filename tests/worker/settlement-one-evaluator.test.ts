@@ -142,7 +142,7 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
     nowEpoch: NOW,
   }).id;
 
-  const outsideTags = ["one-evaluator-task", "outside-lane"];
+  const outsideTags = ["one-evaluator-task", "outside-lane", "spare-lane"];
   const o1 = insertTurn(1, outsideTags);
   const o2 = insertTurn(2, outsideTags);
   const o3 = insertTurn(3, outsideTags);
@@ -150,12 +150,16 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
   const o5 = insertTurn(5, outsideTags);
   const o6 = insertTurn(6, outsideTags);
 
-  const w1 = insertTurn(7, ["one-evaluator-task", "window-lane"]);
-  const w2 = insertTurn(8, ["one-evaluator-task", "window-lane"]);
+  const w1 = insertTurn(7, ["one-evaluator-task", "window-lane", "spare-lane"]);
+  const w2 = insertTurn(8, ["one-evaluator-task", "window-lane", "spare-lane"]);
 
   addSegmentMembers(db, laneSegmentId, [o1, o2, o3, o4, o5, o6, w1, w2], NOW);
   insertLane(db, laneSegmentId, "outside-lane", NOW);
   insertLane(db, laneSegmentId, "window-lane", NOW);
+  // A SECOND lane on every member (main-agent-edges spec D6): E6 is the
+  // AMBIGUOUS side now, so a blank side needs something to be ambiguous
+  // between for this fixture's draft edges to be findings at all.
+  insertLane(db, laneSegmentId, "spare-lane", NOW);
 
   const outsideClaim = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },
