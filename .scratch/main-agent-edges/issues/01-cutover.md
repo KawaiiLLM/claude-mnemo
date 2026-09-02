@@ -413,3 +413,36 @@ word is translated.
   edit was one context sentence in `cli/lane-controls-cli.ts` — the C2 control
   no longer promises an unparseable-tags escape hatch, since the trigger makes
   that state unstorable — pinned by `tests/cli/lane-controls-cli.test.ts`.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `52f86715` no-ff, clean at the git level, but ticket 06's read-deltas fixture (landed on main
+after this branch's base) inserted a `relation` column that no longer exists — 7 red in
+`tests/db/settlement-read-deltas.test.ts`, fixed by dropping the column from its two raw inserts.
+Bundles rebuilt. `npx tsc --noEmit` 0; guards green; control-byte sweep over the new modules and the
+gate test: none; the P3 gate passes on main with ticket 06's teaching in scope (the worker's note that
+`note-settlement-edge-pass-teaching.ts` "does not exist" was true at its base `34294dc1` and is false
+on main — the gate sweeps all of `src/`, so it is covered). Full `bun test` **4785 / 0 / 274**.
+Accounting: the branch tip runs 4767/272; main adds ticket 06's +17/+2 files = 4784/274; the remaining
+**+1 is the same unlocated test seen at tickets 07 and 06** — it is on main, not in any branch.
+
+My probes, on sites the worker's five did not use, in `src/db/schema.ts`:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | transform 5's ambiguity threshold raised from ≥2 lanes to ≥3 | RED ×3 (fold ambiguity, transforms 3/4/5, fold predicate) |
+| I2 | rollback's written-since refusal forced false | RED — "ROLLBACK refusal, three shapes" |
+| I3 | `tags` dropped from the receipt-owned domains the refusal checks | RED — same test, the tags-stamp shape |
+
+Restored by `cp`, md5 verified. Accepted. Findings the worker stated, carried as-is: fold population on
+`copy.db` is 241 = 147 word-differing + 94 side-differing under the same predicate (the 248 was a newer
+production snapshot); the lane view's "gains derived edges" is a contemporaneous ratio (3,905 incident
+rows vs 499 stored-side rows on the post-cutover clone), not before/after growth; `mergeLaneTag`'s
+identity key lost its `relation` component, so in the deferral window two class-differing rows of one
+pair collide at merge by provenance/earlier rather than by class specificity — recorded divergence;
+two prune triggers are now unreachable (both endpoint kinds forced to `turn`) — a follow-up subtraction,
+not a defect; the fold survivors' `-use->` token being cheaper than `-extends->` moved three measured
+budgets, re-measured. Follow-ups worth one later ticket: delete the two dead prune triggers; decide the
+deferral-window merge tie-break.

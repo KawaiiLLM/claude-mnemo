@@ -78,9 +78,9 @@ describe("the finalize read deltas — set differences against what stage 1 read
     db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', '', ?, 'use', '', ?)
+         VALUES ('turn', ?, 'turn', ?, 'judged', '', ?, 'use', '', ?)
          RETURNING id`,
       )
       .get(citingId, citedId, headTag, NOW)!.id;
@@ -411,9 +411,9 @@ describe("the deltas are a pure function of the persisted snapshot", () => {
   const addEdge = (citingId: number, citedId: number): void => {
     db.query<unknown, [number, number, number]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
           tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', '', '', 'use', '', ?)`,
+       VALUES ('turn', ?, 'turn', ?, 'judged', '', '', 'use', '', ?)`,
     ).run(citingId, citedId, NOW);
   };
 
