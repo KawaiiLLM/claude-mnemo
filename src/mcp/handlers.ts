@@ -243,6 +243,11 @@ export function createDatabaseBackedHandlers(
           // `depth` mapping and the `truncate`/`truncateCap` forwarding
           // below it are both gone).
           filter: args.filter as RecallInput["filter"],
+          // Settlement-read-once ticket 01 (spec D1): the intent half of the
+          // read contract — a top-level input beside `filter`, never inside
+          // it (the filter object is shared with `timeline`, which refuses
+          // this key by name).
+          boundedFields: args.boundedFields as string[] | undefined,
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
           pageBudget: args.pageBudget as number | undefined,

@@ -62,6 +62,7 @@ import {
 import { renderLaneImpressionPreface } from "./impression-display";
 import {
   hasFilterCriteria,
+  parseBoundedFields,
   parseMemoryFilter,
   turnMatchesFilter,
   type MemoryFilterInput,
@@ -290,6 +291,25 @@ export interface RecallInput {
    * kept as a deprecated alias.
    */
   filter?: MemoryFilterInput;
+  /**
+   * Settlement-read-once ticket 01 (spec D1): the budgeted fields this call
+   * reads INTENTIONALLY short. A field named here reaching its
+   * `filter.fieldBudgets` cap is the contract, not a loss — the rendered
+   * turn reports it `bounded` and its `truncated:` footer stays silent about
+   * it. Every other budgeted field is REQUIRED whole: its cap is a ceiling
+   * meant to hold the p95, and reaching it is a `cut` the reader is told to
+   * act on.
+   *
+   * A TOP-LEVEL `recall` input, deliberately not a `filter` member: the
+   * filter object is shared with `timeline`, which refuses this by name.
+   * `boundedFields ⊆ filter.fields ∩ keys(filter.fieldBudgets)`, and
+   * `relations` is refused inside it (see `parseBoundedFields`).
+   *
+   * Intent never reaches the write gate: a bounded GATED field that was
+   * actually shortened still records `complete=false`, so a bounded read of
+   * `metadata` grants no `type`/`tags` write.
+   */
+  boundedFields?: string[];
   page?: number;
   pageSize?: number;
   /**
@@ -1198,6 +1218,8 @@ function renderSession(
   // Ticket 11 (per-field recall budgets): forwarded into every previewed
   // turn's own `renderNode` call below.
   fieldBudgets?: Partial<Record<RecallTurnField, number>>,
+  // Settlement-read-once ticket 01: forwarded the same way.
+  boundedFields?: TurnRenderFields,
 ): RenderedSession {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
@@ -1228,6 +1250,7 @@ function renderSession(
         turnBudget,
         signal,
         fieldBudgets,
+        boundedFields,
       },
     );
     lines.push(turnLines);
@@ -1238,6 +1261,15 @@ function renderSession(
   }
 
   return { text: lines.join("\n") };
+}
+
+/**
+ * Settlement-read-once ticket 01: the parsed filter's `boundedFields` list as
+ * the SET the renderer asks `.has()` of, or `undefined` when the call declared
+ * none — one conversion per route instead of one per rendered turn.
+ */
+function boundedFieldsOf(filter: ParsedMemoryFilter): TurnRenderFields | undefined {
+  return filter.boundedFields ? new Set(filter.boundedFields) : undefined;
 }
 
 function renderTurnScope(
@@ -1255,6 +1287,10 @@ function renderTurnScope(
   // Ticket 11 (per-field recall budgets): forwarded into every turn's own
   // `renderNode` call below.
   fieldBudgets?: Partial<Record<RecallTurnField, number>>,
+  // Settlement-read-once ticket 01 (spec D1/D2): forwarded the same way — it
+  // changes nothing this function decides, only how the renderer NAMES a
+  // field its own cap shortened.
+  boundedFields?: TurnRenderFields,
 ): string {
   const lines: string[] = [];
   // Character position of the END of `lines` so far, in the joined result.
@@ -1312,6 +1348,7 @@ function renderTurnScope(
             signal,
             turnBudget,
             fieldBudgets,
+            boundedFields,
           },
         ),
       );
@@ -1505,6 +1542,7 @@ function renderSessionDetail(
   signal: TruncationSignal | undefined,
   turnBudget: number | undefined,
   fieldBudgets?: Partial<Record<RecallTurnField, number>>,
+  boundedFields?: TurnRenderFields,
 ): RenderedSession {
   const session = getSession(db, sessionId);
   return session
@@ -1517,6 +1555,7 @@ function renderSessionDetail(
         signal,
         turnBudget,
         fieldBudgets,
+        boundedFields,
       )
     : { text: "Session not found." };
 }
@@ -2226,6 +2265,24 @@ function renderGroupedSearchResults(
  * caller) and render the chosen page. Extracted so address resolution
  * (`RoutedRecallId`-kind-specific) and pagination/rendering (identical
  * either way) do not drift into two independently-maintained copies.
+ *
+ * SETTLEMENT-READ-ONCE TICKET 01 (spec D1) — the ONE read contract reaches
+ * this route, which is the one the settlement prompt teaches as primary and
+ * which behaved unlike the plain session range in three ways:
+ *
+ *   1. it paginated by `pageSize` ALONE, so a page could silently overrun the
+ *      100K-character envelope and lose its grants wholesale. It now packs by
+ *      RENDERED COST (`paginateByRenderedPageCost`), like the `turns` route;
+ *   2. it forwarded no `fieldBudgets`, so `prompt:50` — the exact budget the
+ *      teaching dictates — was accepted by the parser and then ignored here;
+ *   3. it granted ALL-OR-NOTHING at page end. The member renderer now marks
+ *      the ledger per member, at the offset where THAT member's block ends,
+ *      so a page the envelope cuts keeps the grants of the members whose
+ *      blocks survived — the rule `renderTurnScope` has always applied.
+ *
+ * The SEGMENT's own grant stays at page end: the `[E<n>]` header is the only
+ * thing this route renders of it, and crediting a read of the task from a
+ * header line would be the over-grant P1-6 removed everywhere else.
  */
 function renderSegmentMemberOrdinals(
   db: Database,
@@ -2237,7 +2294,10 @@ function renderSegmentMemberOrdinals(
   pageSize: number,
   eraCutoffEpoch: number | null,
   signal: TruncationSignal | undefined,
+  pageBudget: number | undefined,
   turnBudget: number | undefined,
+  fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
+  boundedFields: TurnRenderFields | undefined,
   routeCheckpoint: number,
   ledger?: DeliveryLedger,
   // Ticket 07 (phase-connectivity), decision 2: the lane route's receipt
@@ -2245,10 +2305,36 @@ function renderSegmentMemberOrdinals(
   // other route leaves it undefined — only a lane owes a read receipt.
   emittedTurnIds?: number[],
 ): string {
-  // Paginate by MEMBER (never mid-turn by line): page the ordinal list
-  // itself, so a large range (`E31/S1/T1..S1/T80`) still respects `pageSize`
-  // the same way `S<n>/T*` does.
-  const paged = paginateItems(wantedOrdinals, page, pageSize);
+  // Paginate by MEMBER (never mid-turn by line) AND by rendered cost: the
+  // ordinal list is what gets packed, so a large range
+  // (`E31/S1/T1..S1/T80`) respects `pageSize` as before AND stops before the
+  // page budget. Trial renders run with no `signal`, no ledger and no receipt
+  // collector — the same suppression `renderTurnAddressPage` uses, for the
+  // same reason: a page that is only being PRICED must not record anything.
+  const renderOrdinalPage = (
+    ordinals: number[],
+    trial: boolean,
+    precedingSessionId: number | null,
+  ): string =>
+    renderSegmentMembersByOrdinal(db, segment.id, ordinals, {
+      fields,
+      turnBudget,
+      eraCutoffEpoch,
+      fieldBudgets,
+      boundedFields,
+      precedingSessionId,
+      ...(trial ? {} : { signal }),
+      ...(trial || !ledger ? {} : { ledger }),
+      ...(trial || !emittedTurnIds ? {} : { emittedTurnIds }),
+    });
+
+  const paged = paginateByRenderedPageCost(
+    wantedOrdinals,
+    page,
+    pageSize,
+    pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+    (pageItems) => renderOrdinalPage(pageItems, true, null),
+  );
 
   // The member one slot BEFORE this page's first — what tells the renderer
   // whether the page opens mid-session-run (spec 补充裁决 "跨页引用自足").
@@ -2258,29 +2344,11 @@ function renderSegmentMemberOrdinals(
       ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null
       : null;
 
-  const body = renderSegmentMembersByOrdinal(db, segment.id, paged.items, {
-    fields,
-    turnBudget,
-    eraCutoffEpoch,
-    signal,
-    precedingSessionId,
-    ...(emittedTurnIds ? { emittedTurnIds } : {}),
-  });
-  // The segment itself, plus the specific member turns THIS page actually
-  // shows — a reader can address those members individually via
-  // `S<n>/T<m>` from here on. Marked at the END of the whole page: the
-  // member renderer (`segment-card.ts`) composes its own page in one call
-  // and reports no per-member boundary, so this route grants all-or-nothing
-  // rather than guessing where one member's block stops (peer round P1-6 —
-  // under-granting costs a re-read, over-granting licenses an unseen write).
+  const body = renderOrdinalPage(paged.items, false, precedingSessionId);
+  // The SEGMENT only (its members were marked one by one, inside the render
+  // above): the task is delivered once the page it heads is.
   if (paged.items.length > 0) {
-    ledger?.mark(body.length, [
-      { entityType: "segment", entityId: segment.id },
-      ...paged.items
-        .map((ordinal) => chronologicalMembers[ordinal - 1])
-        .filter((member): member is NonNullable<typeof member> => member !== undefined)
-        .map((member) => ({ entityType: "turn" as const, entityId: member.turnId })),
-    ]);
+    ledger?.mark(body.length, [{ entityType: "segment", entityId: segment.id }]);
   }
 
   const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
@@ -2418,6 +2486,7 @@ function renderTurnAddressPage(
   pageBudget: number | undefined,
   turnBudget: number | undefined,
   fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
+  boundedFields: TurnRenderFields | undefined,
   routeCheckpoint: number,
   ledger?: DeliveryLedger,
 ): string {
@@ -2436,6 +2505,7 @@ function renderTurnAddressPage(
         turnBudget,
         undefined,
         fieldBudgets,
+        boundedFields,
       ),
   );
   const body = renderTurnScope(
@@ -2447,6 +2517,7 @@ function renderTurnAddressPage(
     turnBudget,
     ledger,
     fieldBudgets,
+    boundedFields,
   );
   const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -2511,6 +2582,7 @@ function renderRoutedId(
         signal,
         turnBudget,
         filter.fieldBudgets,
+        boundedFieldsOf(filter),
       );
       if (texts.length > 0) {
         cursor += 1; // the "\n" this join will insert
@@ -2603,7 +2675,10 @@ function renderRoutedId(
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger,
     );
@@ -2646,7 +2721,10 @@ function renderRoutedId(
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger,
       emittedLaneMemberIds,
@@ -2723,7 +2801,10 @@ function renderRoutedId(
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger,
     );
@@ -2741,6 +2822,7 @@ function renderRoutedId(
       pageBudget,
       turnBudget,
       filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger,
     );
@@ -2760,6 +2842,7 @@ function renderRoutedId(
       turnBudget,
       ledger,
       filter.fieldBudgets,
+      boundedFieldsOf(filter),
     );
   }
 
@@ -3751,6 +3834,23 @@ function recallMemoryBody(
     return formatParameterError(filterError);
   }
 
+  // Settlement-read-once ticket 01 (spec D1): `boundedFields` is validated
+  // against THIS call — the fields it selected and the caps it named — so it
+  // has to land after both are known, and it rides on the parsed filter from
+  // here on because that is the one object every route already receives (see
+  // `ParsedMemoryFilter.boundedFields`).
+  const { parsed: boundedFields, error: boundedError } = parseBoundedFields(
+    input.boundedFields,
+    fields,
+    filter.fieldBudgets,
+  );
+  if (boundedError) {
+    return formatParameterError(boundedError);
+  }
+  if (boundedFields) {
+    filter.boundedFields = boundedFields;
+  }
+
   if (input.id) {
     // Ticket 14 (spec "选择器多选"): `id="E31, E32"` — a comma-separated
     // list, each item parsed by the EXISTING grammar above, rendered in
@@ -3917,6 +4017,7 @@ function recallMemoryBody(
         pageBudget,
         turnBudget,
         filter.fieldBudgets,
+        boundedFieldsOf(filter),
         listCheckpoint,
         ledger,
       );

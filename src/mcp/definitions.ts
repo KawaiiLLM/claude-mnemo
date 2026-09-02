@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-import { FIELD_BUDGET_ELIGIBLE_FIELD_NAMES, RECALL_TURN_FIELD_NAMES } from "./memory-filter";
+import {
+  BOUNDED_FIELD_NAMES,
+  FIELD_BUDGET_ELIGIBLE_FIELD_NAMES,
+  RECALL_TURN_FIELD_NAMES,
+} from "./memory-filter";
 import { NOTE_TOKEN_BUDGET } from "../shared/note-budget";
 import {
   SEGMENT_EDITABLE_FIELDS,
@@ -267,6 +271,23 @@ export const recallInputShape = {
     .enum(["collapsed", "expanded"])
     .optional()
     .describe("Retired — select which turn fields to show via `filter.fields` instead."),
+  // Settlement-read-once ticket 01 (spec D1): the INTENT half of the read
+  // contract, beside `filter.fieldBudgets`' numbers. Numeric budgets stay
+  // numeric; one extra list carries the bit.
+  //
+  // A TOP-LEVEL recall input on purpose, NOT a `filter` member: the filter
+  // object is shared verbatim with `timeline`, which refuses this by name
+  // (see `timelineInputShape`), and a shared wire shape must not grow a key
+  // one of its two tools rejects. `relations` is absent from the enum —
+  // delivery-gated, so a cut set already grants and there is nothing to
+  // declare intentional — and `parseBoundedFields` (mcp/memory-filter.ts)
+  // refuses it BY NAME with that reason before the enum's grammar echo.
+  boundedFields: z
+    .array(z.enum(BOUNDED_FIELD_NAMES))
+    .optional()
+    .describe(
+      "Which of `filter.fieldBudgets`' capped fields you are reading INTENTIONALLY short — e.g. boundedFields:[\"prompt\"] with fieldBudgets:{prompt:50}. A field named here reaching its cap is the contract: the turn reports it `bounded` and its `truncated:` footer stays silent. Every other budgeted field is required WHOLE — reaching its cap is a `cut` the footer names, and you re-read that field alone. Must be a subset of `filter.fields` ∩ the fields `filter.fieldBudgets` caps; `relations` is refused (a cut relations set still licenses the edge write). Intent is not a grant: a bounded read of `metadata` still refuses a `type`/`tags` write.",
+    ),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
@@ -941,6 +962,16 @@ export const timelineInputShape = {
   filter: memoryFilterSchema.optional().describe(
     "Structured scoping, shared with recall's `filter`: {type, tag, session, time, file}, AND-composed with the id selector's range.",
   ),
+  // Settlement-read-once ticket 01 (spec D1): DEFINED only so the superRefine
+  // below can refuse it BY NAME — the `truncate`/`view` precedent
+  // `recallInputSchema` already set, and the reason `boundedFields` is not a
+  // member of the SHARED `memoryFilterShape`. `.strict()` alone would reject
+  // it with zod's generic unrecognised-key text, which names no replacement
+  // and leaves a caller to guess whether the key is misspelt or unsupported.
+  boundedFields: z
+    .array(z.string())
+    .optional()
+    .describe("Not a timeline parameter — `boundedFields` is a `recall` input."),
 };
 
 // Ticket 07 (ADR-0007, semantic-container): the settlement subagent's
@@ -1086,7 +1117,21 @@ export const recallInputSchema = z
       });
     }
   });
-export const timelineInputSchema = z.object(timelineInputShape).strict();
+export const timelineInputSchema = z
+  .object(timelineInputShape)
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.boundedFields !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "`boundedFields` is a `recall` input, not a timeline one — it declares which of recall's " +
+          "own per-field budgets were read intentionally short. This tool renders no per-turn " +
+          "`truncated:` report for it to speak to.",
+        path: ["boundedFields"],
+      });
+    }
+  });
 // `.omit({ segment: true })` is what actually retires that field from the note
 // tool's WIRE schema — see `noteInputShape.segment`'s own doc comment for why
 // the field object still exists (its describe is the pointer at where the
