@@ -28,27 +28,27 @@
     --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;
     --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;
     --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;
-    /* THE FOUR RELATION CLASSES (main-agent-edges ticket 02). Seven word hues
-       collapse into four: the two corrections keep the retired `override` /
-       `narrows` reds and ambers they absorbed, `verify` keeps `verifies`' teal,
-       and `use` takes `extends`' blue — the four hues a reader had already
-       learned, minus the three that no longer name anything. */
-    --rel-correct-full:#d64541; --rel-correct-partial:#d98e04;
-    --rel-verify:#16a3a3; --rel-use:#3b82c4;
+    /* THE THREE RELATION CLASSES (main-agent-edges ticket 11). ONE hue per
+       CLASS, and the correction's coverage bit is no longer a hue of its own:
+       `correct` keeps the red the full correction wore, `verify` the teal and
+       `use` the blue. Coverage moved to LINE STYLE (solid = full, dashed =
+       partial — `path.edge.partial` below), because it is a property of the
+       correction's reach, not a fourth relation. A reader steering by colour
+       now reads exactly the three words the rubric asks a writer to choose
+       between. */
+    --rel-correct:#d64541; --rel-verify:#16a3a3; --rel-use:#3b82c4;
     /* [S15069/T1760, revised by console-focus-encoding ticket 01] GREY'S
        RESERVATION IS RELEASED. It used to say ONE thing only — this edge has
-       no lane attribution yet, so nothing else may claim it — and `consume`
-       moved off grey to protect that. The exclusivity cost nothing to keep
-       because the tenant never moved in: an unattributed edge does not
+       no lane attribution yet, so nothing else may claim it — and one relation
+       word moved off grey to protect that. The exclusivity cost nothing to
+       keep because the tenant never moved in: an unattributed edge does not
        render in the graph at all, so `--draft` below has never actually
        painted a pixel. Focus dimming claims grey now instead (`--edge-gray`,
        `path.edge.gray` below) — colour and width both carry focus, not
        opacity alone. Consequence: grey is spoken for again, by a different
        claimant — once draft edges start rendering, an unattributed edge and
        a merely-unfocused one will both read grey, indistinguishable by
-       colour alone. `consume` still carries the muted taupe this ruling gave
-       it, and `refutes` is still gone with the word itself, folded into
-       `override` in v12. */
+       colour alone. */
     --draft:#b9bec4;
     --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;
     --lane:#6b4d8f; --lane-bg:#f3eefa;
@@ -62,7 +62,7 @@
     --sel-ring:#1a1d20;
   }
 
-  /* NIGHT. One override block, no duplication of the light one — the resolver
+  /* NIGHT. One block, no duplication of the light one — the resolver
      in <head> puts `data-theme` on <html> before first paint, so the cascade
      does all the switching and nothing re-renders.
 
@@ -77,8 +77,7 @@
     --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;
     --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;
     --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;
-    --rel-correct-full:#e86b67; --rel-correct-partial:#e8a838;
-    --rel-verify:#3cc0c0; --rel-use:#63a3e0;
+    --rel-correct:#e86b67; --rel-verify:#3cc0c0; --rel-use:#63a3e0;
     --draft:#5a626b;
     --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;
     --lane:#b394d6; --lane-bg:#2a2135;
@@ -128,11 +127,25 @@
   header { padding:14px 24px 8px; flex:none; }
   h1 { font-size:15px; font-weight:600; }
   h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }
-  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }
+  /* No border of its own: #relLegend sits directly under it and carries the
+     closing rule, so the checkboxes and the words that explain them read as
+     ONE block rather than two stacked bands. */
+  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 4px; flex:none; }
   #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }
   #bar input[type=checkbox]{ accent-color:var(--accent); }
   .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }
   .sw.dash { border-top-style:dashed; }
+  /* The class legend (main-agent-edges ticket 11) — the rubric's own two
+     questions, in the rubric's own words, on one quiet row under the filter
+     bar. It is not a second filter: the checkboxes above carry the colour
+     swatch and the toggle, this carries the MEANING a writer is asked to
+     decide by, which is the part a reader cannot recover from the graph. */
+  #relLegend { display:flex; flex-wrap:wrap; gap:2px 18px; padding:0 24px 7px;
+    font-size:11.5px; color:var(--faint); border-bottom:1px solid var(--line); flex:none; }
+  #relLegend b { font-family:"SF Mono",Menlo,monospace; font-weight:600; }
+  #relLegend .c { color:var(--rel-correct); }
+  #relLegend .v { color:var(--rel-verify); }
+  #relLegend .u { color:var(--rel-use); }
   .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }
   #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }
 
@@ -178,7 +191,7 @@
   #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
   #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }
   /* an edge the shell could not place — loud on purpose, never a silent drop */
-  #rangeBar .rangeWarn { color:var(--rel-correct-full); font-weight:600; }
+  #rangeBar .rangeWarn { color:var(--rel-correct); font-weight:600; }
 
   #lanes { padding:8px 24px 4px; flex:none; }
   #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }
@@ -216,6 +229,18 @@
      THIN; path.edge.inc is the only rule that thickens anything, and it is
      driven by `touchesSel` in paintFilters, not by `.gray`/`.hot`. */
   path.edge { stroke-width:1.1; opacity:.78; }
+  /* COVERAGE, the second channel (main-agent-edges ticket 11). Solid is the
+     default every edge draws at — `verify`, `use`, and a `correct` whose
+     coverage is `full`; only a PARTIAL correction dashes. One class, set at
+     draw time from `relationCoverage` alone, so the mark says the same thing
+     on every edge that carries it.
+
+     The dash used to mean "this edge does not stay inside one lane". That
+     reading is retired here rather than doubled up: two meanings on one
+     channel cannot be told apart on any given line, and lane crossing is
+     already legible from the arc's own endpoints and from the lane label the
+     tooltip and the panel both print. */
+  path.edge.partial { stroke-dasharray:5 3; }
   path.edge.off { opacity:.04; }
   /* The node's own channel: thick iff one of this edge's two ends is the
      clicked/panel node (`sel`), direction irrelevant — in-edges and
@@ -281,6 +306,13 @@
   #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }
   #panel .erow:hover { text-decoration:underline; }
   #panel .erow .etags { color:var(--lane); font-size:11px; }
+  /* An attribution the model cannot answer: `ambiguous` (the endpoint is in
+     several lanes and nobody picked one) or `invalid` (a stored declaration
+     that is no longer one of the endpoint's lanes). Both are DEBT — work a
+     settlement owes — so they read in the correction hue rather than the
+     lane purple, and neither may be mistaken for a lane word. */
+  #panel .erow .etags .bad { color:var(--rel-correct); font-weight:600; }
+  #tip .lg .bad { color:var(--rel-correct); font-weight:600; }
   #panel .flowline { font-size:12.5px; color:var(--faint); }
   #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }
   #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }
@@ -305,6 +337,12 @@
     <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span><button id="timelineBtn" type="button" title="查看当前会话/任务(或聚焦泳道)的时间线">⏱ 时间线</button></h1></header>
     <div id="rangeBar"></div>
     <div id="bar"></div>
+    <div id="relLegend">
+      <span><b class="c">correct</b> 改变了被引结果的接受度 / 可靠性 / 适用范围 — 实线 = full(被引结果已无可作前提的实质部分),虚线 = partial(仍有确定的实质部分成立)</span>
+      <span><b class="v">verify</b> 确认或支持了被引结果</span>
+      <span><b class="u">use</b> 被引结果是本次输出的直接输入</span>
+      <span>取最具体的一类:correct &gt; verify &gt; use;一对节点只有一条边</span>
+    </div>
     <div id="lanes"></div>
     <div id="phases">
       <span class="clu"><b>取证</b>
@@ -332,38 +370,31 @@
 <div id="panel"><button id="close">✕</button><div id="tlbar"><input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; ⏎" title="timelineQuery 接受的任意合法地址"><select id="timelineViewSelect" title="view — 视图"><option value="">turns</option><option value="milestones">milestones</option></select><input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="预算" title="pageBudget（1–25000，默认 1000）"><input id="timelinePageInput" type="number" min="1" placeholder="页" title="page（默认 1）"><button id="timelinePrev" type="button" title="上一页">‹</button><button id="timelineNext" type="button" title="下一页">›</button></div><div id="pbody"></div></div>
 <div id="toast"></div>
 <script>
-// THE FOUR CLASSES (main-agent-edges ticket 02) — what `ConsoleGraphEdge.relation`
-// now carries. The seven-word list this replaces was already drawing filter
-// checkboxes for words the write surfaces had stopped producing.
-const WORDS = ["correct(full)","correct(partial)","verify","use"];
-// CSS custom properties cannot carry parentheses, so each token maps to its own
-// variable name here rather than being interpolated into `--${relation}`.
-const REL_VAR = {
-  "correct(full)":"--rel-correct-full",
-  "correct(partial)":"--rel-correct-partial",
-  "verify":"--rel-verify",
-  "use":"--rel-use",
-};
-// Short arcs: the two corrections and `use`. It was `narrows`/`extends`/
-// `override` — three of the four sources of exactly these three tokens, with
-// `extends`' three absorbed siblings joining it, which is what one class means.
-const STRUCT = new Set(["correct(full)","correct(partial)","use"]);
-// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.
-// Cross-phase words never carry lane tags (lanes are phase-local), so the
-// dash axis and the tag axis can never collide on one edge.
-// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation
-// words. lane-model-v12 deleted the phase axis outright — "相位" appears zero
-// times in the concepts document — and one of those three words (`refutes`)
-// no longer exists at all, having folded into `override`. So the mark was
-// keyed on a retired axis through a stale word list.
+// THE THREE CLASSES (main-agent-edges ticket 11) — what
+// `ConsoleGraphEdge.relationClass` carries. The four-token list this replaces
+// spent two of its four slots on ONE class's coverage bit, which is a
+// property of the correction's reach, not a relation a writer chooses
+// between; coverage is a line style now (`edgeCoverageClass` below) and the
+// filter offers exactly the three choices the rubric asks for.
+const CLASSES = ["correct","verify","use"];
+// Each class names its own CSS variable rather than being interpolated into
+// `--${cls}`: the variables are namespaced `--rel-*`, so a bare interpolation
+// would resolve to a property that does not exist and paint nothing.
+const REL_VAR = { correct:"--rel-correct", verify:"--rel-verify", use:"--rel-use" };
+// Short arcs: `correct` and `use`. A verification reaches for the batch it
+// confirms, so it keeps the wide band; the other two are local moves.
+const STRUCT = new Set(["correct","use"]);
+// COVERAGE, as a line style (ticket 11): only a PARTIAL correction dashes.
+// `verify`/`use` carry no coverage at all and so are always solid, and so is
+// a FULL correction — the ONE edge whose cited result has nothing left to
+// stand on reads as the unbroken line.
 //
-// It now says what the model actually distinguishes: SOLID = internal to one
-// lane (both sides resolve to the SAME lane), DASHED = everything else — a
-// crossing between two lanes, a half-settled edge, or an unattributed one.
-// That is the same predicate the focus domain uses, so the two agree by
-// construction instead of by coincidence.
-const isInternalEdge = (e) =>
-  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;
+// [S15069/T1754] The dash used to mean CROSS-PHASE, then (v12) "internal to
+// one lane". Both readings are retired rather than stacked: one channel can
+// only carry one meaning, and lane crossing is already legible from the lane
+// label both the tooltip and the panel print, while coverage was legible
+// nowhere.
+const edgeCoverageClass = (e) => e.relationCoverage === "partial" ? " partial" : "";
 const TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];
 // Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" —
 // db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot
@@ -383,26 +414,44 @@ const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).
 const typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";
 const sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});
 const esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };
-// lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE
-// (`tailTag` = citing end, `headTag` = cited end; "" = unsettled, i.e. nobody
-// has attributed that end yet — not a lane named ""). The payload no longer
-// ships a merged `tags` set, because a merged set cannot say WHICH END named
-// which lane: `{a,b}` read equally as "in both lanes at once".
-const edgeSettled = e => e.tailTag!=="" || e.headTag!=="";
-// The label a reader sees. Same-lane (the ordinary case) renders exactly the
-// `{tag}` the merged set used to render for a one-tag edge; a CROSS-LANE edge
-// renders `{tail→head}`, which is the crossing itself.
-const edgeLaneLabel = e => {
-  if (!edgeSettled(e)) return "";
+// main-agent-edges ticket 11: an edge carries a RESOLVED ATTRIBUTION per side
+// — `e.tail` (citing end) and `e.head` (cited end), each `{lane, tag, how}`.
+// `lane`/`tag` are null together for a side that attributes to nothing, and
+// `how` says WHY: `declared` (a writer picked it), `derived` (the endpoint is
+// in exactly one lane), `none` (in no lane), `ambiguous` (in several, nobody
+// picked), `invalid` (a declaration that stopped being one of the endpoint's
+// lanes). The four flat fields this replaces could say the first two facts
+// and never the third: every non-attributing side read as the same `""`.
+const edgeSettled = e => e.tail.lane!==null || e.head.lane!==null;
+// `how` is a closed, server-authored set. It reaches the DOM through this
+// lookup and never by interpolation, the same discipline SEGMENT_STATUS_DOT
+// follows for a status word — an unexpected value renders `?`, never markup.
+const HOW_LABEL = { declared:"declared", derived:"derived", ambiguous:"ambiguous", invalid:"invalid" };
+// ONE side, as a reader sees it: the lane it attributes to plus how it got
+// there; `·` for a side attributing to nothing with nothing owed; and the two
+// DEBT outcomes named outright and marked, because "no lane" and "the writer
+// contradicted the turn" are not the same finding.
+const edgeSideLabel = s => {
+  if (s.how==="ambiguous" || s.how==="invalid") return '<span class="bad">'+(HOW_LABEL[s.how]||"?")+"</span>";
+  if (s.lane===null) return "·";
   // ONE escape site per side, deliberately: both sinks below render through
-  // this helper, so this pair of calls IS the DOM-rule boundary for a lane tag
-  // on an edge (tests/worker/console-shell.test.ts's field-sink table).
-  const tail = esc(e.tailTag), head = esc(e.headTag);
-  return e.tailTag===e.headTag ? "{"+tail+"}" : "{"+tail+"→"+head+"}";
+  // this helper, so this call IS the DOM-rule boundary for a lane tag on an
+  // edge (tests/worker/console-shell.test.ts's field-sink table).
+  return esc(s.tag)+"("+(HOW_LABEL[s.how]||"?")+")";
 };
-// Both sides' lane tokens, unsettled sides dropped and the same-lane case
-// collapsed to one — what focus/highlight tests set membership against.
-const edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];
+// The label a reader sees. Two sides that agree exactly (same lane, same how)
+// collapse to `{alpha(derived)}`; anything else — a CROSS-LANE edge, a side
+// with debt on it, two different marks on one lane — renders `{tail→head}`,
+// which is the asymmetry itself. An edge with nothing to say on either side
+// (both `none`) renders no label at all.
+const edgeLaneLabel = e => {
+  if (e.tail.how==="none" && e.head.how==="none") return "";
+  const tail = edgeSideLabel(e.tail), head = edgeSideLabel(e.head);
+  return tail===head ? "{"+tail+"}" : "{"+tail+"→"+head+"}";
+};
+// Both sides' lane tokens, non-attributing sides dropped and the same-lane
+// case collapsed to one — what focus/highlight tests set membership against.
+const edgeLaneTokens = e => [...new Set([e.tail.lane, e.head.lane].filter(t => t !== null))];
 // Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an
 // edge whose two sides settle to the SAME lane is internal to anything — that
 // is the connectivity definition itself, so a cross-lane or half-settled edge
@@ -411,20 +460,29 @@ const edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filte
 // of an internal edge are in the same component by construction, so either
 // answers identically.
 const edgeComponentId = e => {
-  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;
+  if (e.tail.lane === null || e.tail.lane !== e.head.lane) return null;
   for (const endpoint of [e.citingId, e.citedId]) {
     const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;
-    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);
+    const m = t && t.laneMemberships.find(x => x.token === e.tail.lane);
     if (m) return m.componentId;
   }
   return null;
 };
-// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a
-// style-attribute sink is still built from it below (turn-panel edge rows) —
-// this is the same closed-set-lookup discipline the DOM rule asks for,
-// applied so the sink can never resolve to anything outside WORDS even if a
-// future schema value slips past the CHECK constraint in production data.
-const relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";
+// `class(coverage)` — the ONE spelling of an edge's relation, shared by the
+// tooltip and the panel's edge rows. Both halves resolve through a closed set
+// before reaching the DOM (the same discipline SEGMENT_STATUS_DOT follows),
+// so neither payload field can arrive as markup and an unexpected value reads
+// `?` instead of vanishing.
+const COVERAGE_LABEL = { full:"full", partial:"partial" };
+const edgeClassLabel = e => {
+  const cls = CLASSES.includes(e.relationClass) ? e.relationClass : "?";
+  const cov = COVERAGE_LABEL[e.relationCoverage];
+  return cov ? cls+"("+cov+")" : cls;
+};
+// The class also feeds a style-attribute sink (the panel's edge rows), so it
+// resolves through REL_VAR's own closed set — nothing outside CLASSES can
+// reach a `var()` name, and an unknown class simply inherits the row colour.
+const relationVar = cls => REL_VAR[cls] ? `var(${REL_VAR[cls]})` : "inherit";
 // Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-
 // fidelity ticket 03, user ruling S15069/T1482) — internal `turns.id` stays
 // a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.
@@ -645,16 +703,17 @@ function renderSidebar(){
   }
 }
 
-/* ---- filter bar: built once — WORDS is a closed, app-authored set, never graph data ---- */
-// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a
-// property of the relation word — it says whether one EDGE stayed inside a
-// lane — so a per-word swatch cannot honestly carry it: the same word draws
-// solid on one edge and dashed on the next. The legend states the rule; the
-// swatch states only the colour, which IS per-word.
-const on = Object.fromEntries(WORDS.map(w=>[w,true]));
-for (const w of WORDS) {
+/* ---- filter bar: built once — CLASSES is a closed, app-authored set, never graph data ---- */
+// THREE checkboxes, one per class (main-agent-edges ticket 11). The swatch is
+// SOLID on every one of them, `correct` included: dashing is COVERAGE now,
+// which is a per-EDGE fact — the same class draws solid on a full correction
+// and dashed on a partial one — so a per-class swatch cannot honestly carry
+// it. #relLegend states the rule; the swatch states only the colour, which IS
+// per-class.
+const on = Object.fromEntries(CLASSES.map(c=>[c,true]));
+for (const c of CLASSES) {
   const l = document.createElement("label");
-  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;
+  l.innerHTML = `<input type="checkbox" checked data-w="${c}"><span class="sw" style="border-color:var(${REL_VAR[c]})"></span>${c}`;
   bar.appendChild(l);
 }
 bar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="跳转:地址或标题关键词 ⏎">`);
@@ -802,7 +861,7 @@ function laneChip(l){
   // state this class list branched on.
   c.className = "lchip";
   // What the chip says beside the tag is the lane's SIZE — a fact the payload
-  // carries whole-snapshot and that stays true however the interval narrows.
+  // carries whole-snapshot and that stays true however the interval shrinks.
   // It replaces the terminus address (`◎S…/T…` / `…◎S…/T…` / `无宣告`), which
   // named a latest-wins seat the model no longer computes; a lane that
   // converged five times never had one.
@@ -870,7 +929,7 @@ function renderGraphSvg(){
     // two citations from one node came out as one stroke (T1527). At span*12
     // the same band separates them by 60px and saturates only past span 15,
     // where the endpoints are already far enough apart to tell the arcs apart.
-    const depth = STRUCT.has(e.relation)
+    const depth = STRUCT.has(e.relationClass)
       ? Math.min(120, 16 + span*2.4)
       : Math.min(330, 150 + span*12);
     // [S15069/T1760, revised by console-focus-encoding ticket 01, revised
@@ -879,28 +938,27 @@ function renderGraphSvg(){
     // paintFilters, from whether the edge touches the CLICKED node
     // (`touchesSel`, path.edge.inc), never from this edge's own attribution
     // or from which focused subgraph it may or may not sit inside.
-    //   colour — attributed at all (grey = draft), else which relation word
-    //   dash   — did the edge stay inside one lane
-    // Width is never a relation channel: an earlier encoding rendered a
-    // convergence-declaring edge thin for fanning out to the batch it cited,
-    // and that reading collided with the one channel a reader is actually
-    // steering by. Relation reads by HUE alone.
-    // A DRAFT is an edge missing a tag on EITHER side, which is v12's own
-    // definition, so a half-settled edge greys out with a fully unsettled one.
-    // That deliberately drops the distinction between E6 (blocks commit) and
-    // the ordinary backlog: the console is a reading surface and the commit
+    //   colour — attributed at all (grey = draft), else which relation CLASS
+    //   dash   — the correction's COVERAGE (ticket 11: partial dashes)
+    // Width is never a relation channel: an earlier encoding rendered one
+    // relation thin for fanning out to the batch it cited, and that reading
+    // collided with the one channel a reader is actually steering by. Class
+    // reads by HUE alone.
+    // A DRAFT is an edge attributing to no lane on EITHER side, so a
+    // half-attributed edge greys out with a fully unattributed one. That
+    // deliberately drops the distinction between E6 (blocks commit) and the
+    // ordinary backlog: the console is a reading surface and the commit
     // refusal names E6 by address, which is where it is actionable.
     //
     // `style`, never `stroke:css(...)`: `css()` resolves through
     // getComputedStyle and BAKES the literal in force when the edge was drawn,
     // so a theme toggle would leave every edge at its old colour. The node
     // dots were fixed for this; the edge strokes were missed.
-    const isDraft = e.tailTag === "" || e.headTag === "";
-    const p = mk("path",{class:"edge",
+    const isDraft = e.tail.lane === null || e.head.lane === null;
+    const p = mk("path",{class:"edge"+edgeCoverageClass(e),
       d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,
-      style:`stroke:${isDraft?"var(--draft)":`var(${REL_VAR[e.relation]||"--draft"})`}`});
-    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");
-    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
+      style:`stroke:${isDraft?"var(--draft)":`var(${REL_VAR[e.relationClass]||"--draft"})`}`});
+    p.dataset.r=e.relationClass; p.dataset.s=e.citingId; p.dataset.t=e.citedId;
     // An edge reaches AT MOST two lanes — one per side (ticket 07), which for
     // a cross-lane edge are two genuinely different lanes. `dataset` only
     // holds strings, and `laneToken()` is itself a JSON-stringified pair
@@ -912,8 +970,8 @@ function renderGraphSvg(){
     p.laneTokens = edgeLaneTokens(e);
     p.componentId = edgeComponentId(e);
     p.addEventListener("mousemove", ev=>tip(ev,
-      `${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}` +
-      (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));
+      `${addrOf(e.citingId)} —${edgeClassLabel(e)}→ ${addrOf(e.citedId)}` +
+      (edgeLaneLabel(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));
     p.addEventListener("mouseleave", hideTip);
     eg.appendChild(p); edgeEls.push(p);
   }
@@ -963,9 +1021,9 @@ function renderGraphSvg(){
     // deleted: the cross over a node dead in every lane (ticket 04 — node
     // death does not exist) and the terminus ring (lane-state-retirement
     // ticket 01 — a lane has no terminus). The payload carries neither flag,
-    // so neither glyph has anything to read; an index declaration shows only
-    // as an `indexes`-coloured EDGE now (console-focus-encoding ticket 01 —
-    // the fan no longer thins itself to stand out; see path.edge above).
+    // so neither glyph has anything to read. Nothing replaced them: a node
+    // carries no relation fact at all — every relation is an EDGE, drawn and
+    // coloured by its class (see path.edge above).
     g.addEventListener("click", ()=>select(t.id));
     ng.appendChild(g); nodeEls.set(t.id,g);
 
@@ -1033,7 +1091,7 @@ function paintFilters(){
     // Width's WHOLE rule, independent of colour/focus below: user ruling
     // 2026-08-28 [S15069/T1859], revising console-focus-encoding ticket 01
     // (cf32918) — that ticket thickened the whole focused SUBGRAPH; this
-    // narrows thickness to the clicked node's own neighbourhood. `touchesSel`
+    // restricts thickness to the clicked node's own neighbourhood. `touchesSel`
     // is true for an edge's in- or out-direction alike (direction does not
     // matter — 出边或入边都算), and is checked with no `anyFocus` gate: with
     // no node clicked (`sel===null`) it is always false, which is how "no
@@ -1116,7 +1174,11 @@ function select(id){
 function renderTurnPanel(id){
   const t = turns[idx.get(id)];
   const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);
-  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`—${esc(e.relation)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${esc(e.relation)}→`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;
+  // One incident edge, as `class(coverage)` plus BOTH sides' attribution
+  // (main-agent-edges ticket 11) — the lane each end resolves to and whether a
+  // writer declared it or the model derived it, `·` where an end attributes to
+  // nothing, and `ambiguous`/`invalid` named and marked where it owes work.
+  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relationClass)}">${dir==="out"?`—${edgeClassLabel(e)}→ ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} —${edgeClassLabel(e)}→`}${edgeLaneLabel(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;
   // One chip per lane this turn belongs to, and MEMBERSHIP is now all a chip
   // says. Both marks it used to carry are deleted: the dead-in-this-lane flag
   // (ticket 04) and the per-lane terminus ◎ (lane-state-retirement ticket 01).

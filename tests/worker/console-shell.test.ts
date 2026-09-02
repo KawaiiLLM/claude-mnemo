@@ -61,42 +61,46 @@ describe("console-shell.ts stale-shell guard", () => {
 // dozen colours hardcoded in rules and the type colours RESOLVED to literals at
 // render time. The tests below pin the three properties that make a theme
 // switch actually work, rather than merely exist.
-// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to a three-word
-// list. v12 deleted the phase axis and one of those words with it, and NO test
-// pinned any of it — the rewrite here was green before these assertions
-// existed, which is why the drift survived two model revisions.
-describe("console-shell.html edge dashing says internal vs not", () => {
+// [S15069/T1754], superseded by main-agent-edges ticket 11. The dash has now
+// had three meanings: CROSS-PHASE (keyed on a retired word list), then
+// "internal to one lane", now COVERAGE. Each replaced the last rather than
+// joining it — a single channel carrying two meanings cannot be read on any
+// given line — and each rewrite before this one shipped with NO test pinning
+// it, which is why the first drift survived two model revisions.
+describe("console-shell.html edge dashing says coverage", () => {
   const html = readFileSync(HTML_PATH, "utf8");
 
-  test("dashing is decided by the EDGE, not by its relation word", () => {
-    expect(html).toContain("const isInternalEdge = (e) =>");
-    expect(html).toContain('if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray"');
-    // The retired keying: a fixed set of relation words, one of which
-    // (`refutes`) folded into `override` and no longer exists at all.
+  test("dashing is decided by COVERAGE alone, and the two retired keyings are gone", () => {
+    expect(html).toContain('const edgeCoverageClass = (e) => e.relationCoverage === "partial" ? " partial" : "";');
+    expect(html).toContain("path.edge.partial { stroke-dasharray:5 3; }");
+    // The two retired keyings: a fixed set of relation words (the cross-phase
+    // reading), and the lane-internality predicate that replaced it.
     expect(html).not.toContain('new Set(["grounds","verifies","refutes"])');
     expect(html).not.toMatch(/DASH\.has\(/);
+    expect(html).not.toContain("const isInternalEdge = (e) =>");
+    expect(html).not.toContain('p.setAttribute("stroke-dasharray"');
   });
 
-  test("behavioral proof: same word, opposite dashing, decided by the two sides", () => {
-    const line = "const isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;";
+  test("behavioral proof: one class, opposite dashing, decided by the coverage bit alone", () => {
+    const line = 'const edgeCoverageClass = (e) => e.relationCoverage === "partial" ? " partial" : "";';
     expect(html).toContain(line);
-    const isInternalEdge = new Function(
+    const edgeCoverageClass = new Function(
       "e",
-      "return e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;",
-    ) as (e: { tailLaneToken: string | null; headLaneToken: string | null }) => boolean;
+      'return e.relationCoverage === "partial" ? " partial" : "";',
+    ) as (e: { relationClass: string; relationCoverage: string }) => string;
 
-    // One relation word, four edges, three of them dashed — which is exactly
-    // what a per-word swatch could never express.
+    // The SAME class, two edges, one dashed — which is exactly what a
+    // per-class swatch could never express, and why the swatch stays solid.
     const cases = [
-      { name: "internal", tailLaneToken: "LANE_A", headLaneToken: "LANE_A", internal: true },
-      { name: "crossing", tailLaneToken: "LANE_A", headLaneToken: "LANE_B", internal: false },
-      { name: "half-settled", tailLaneToken: "LANE_A", headLaneToken: null, internal: false },
-      { name: "unattributed", tailLaneToken: null, headLaneToken: null, internal: false },
+      { name: "correct/full", relationClass: "correct", relationCoverage: "full", dashed: "" },
+      { name: "correct/partial", relationClass: "correct", relationCoverage: "partial", dashed: " partial" },
+      { name: "verify", relationClass: "verify", relationCoverage: "", dashed: "" },
+      { name: "use", relationClass: "use", relationCoverage: "", dashed: "" },
     ];
     for (const c of cases) {
-      expect({ name: c.name, internal: isInternalEdge(c) }).toEqual({
+      expect({ name: c.name, dashed: edgeCoverageClass(c) }).toEqual({
         name: c.name,
-        internal: c.internal,
+        dashed: c.dashed,
       });
     }
   });
@@ -129,7 +133,7 @@ describe("console-shell.html edge dashing says internal vs not", () => {
   // focus — because the exclusivity the old ruling protected turned out to
   // cost nothing to release: a draft edge never renders in the graph at all,
   // so `--draft` never painted a pixel for the opacity-only rule to protect.
-  test("grey is spoken for again — by focus dimming now, not opacity alone — while consume keeps its hue", () => {
+  test("grey is spoken for again — by focus dimming now, not opacity alone", () => {
     expect(html).toContain("--draft:");
     expect(html).toContain("--edge-gray:");
     // Focus restains to grey; width is a SEPARATE channel now (user ruling
@@ -143,40 +147,54 @@ describe("console-shell.html edge dashing says internal vs not", () => {
       "path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; stroke-width:1.1; }",
     );
     expect(html).not.toContain("path.edge.gray:not(.hot) { opacity:.28; }");
-    // `consume` carries real chroma still, not the old #a2a9b1 grey.
-    expect(html).not.toContain("--consume:#a2a9b1");
-    expect(html).not.toContain("--consume:#8d959e");
+    // No relation ever carried a grey of its own — the two claimants above
+    // are the whole tenancy.
+    expect(html).not.toMatch(/--rel-[a-z]+:#a2a9b1/);
+    expect(html).not.toMatch(/--rel-[a-z]+:#8d959e/);
   });
 
-  test("a draft is any edge missing a tag on EITHER side, and it renders grey", () => {
-    expect(html).toContain('const isDraft = e.tailTag === "" || e.headTag === "";');
+  test("a draft is any edge attributing to no lane on EITHER side, and it renders grey", () => {
+    expect(html).toContain("const isDraft = e.tail.lane === null || e.head.lane === null;");
     expect(html).toContain('isDraft?"var(--draft)"');
     // The stroke is a var() reference, not a literal baked at draw time — the
     // same defect the node dots were fixed for.
-    expect(html).not.toContain('stroke:css("--"+e.relation)');
+    expect(html).not.toContain('stroke:css("--"+e.relationClass)');
   });
 
   // console-focus-encoding ticket 01: weight retires as a channel of its own.
   // No edge may be thin for any reason other than being unfocused, so the
-  // one-off thin class for `indexes` — and the CSS rule behind it — are both
-  // gone, from the stylesheet AND the class-assignment site.
-  test("weight is no longer decided per-relation — the retired thin-index class is gone from both the stylesheet and the class-assignment site", () => {
+  // one-off thin class one relation used to get — and the CSS rule behind it
+  // — are both gone, from the stylesheet AND the class-assignment site.
+  test("weight is no longer decided per-relation — the retired thin-convergence class is gone from both the stylesheet and the class-assignment site", () => {
     expect(html).not.toMatch(/\bconverge\b/);
-    expect(html).not.toContain('e.relation==="indexes"?" converge":""');
-    expect(html).toContain('const p = mk("path",{class:"edge",');
-    // Retired with v12 into `override`; it had kept its own filter checkbox.
-    expect(html).not.toMatch(/WORDS = \[[^\]]*refutes/);
-    expect(html).not.toContain("--refutes:");
+    expect(html).toContain('const p = mk("path",{class:"edge"+edgeCoverageClass(e),');
+    // The retired four-token list, and the per-word colour variables behind
+    // it: three classes, three variables, and nothing keyed on a word.
+    expect(html).not.toMatch(/WORDS = \[/);
+    expect(html).toContain('const CLASSES = ["correct","verify","use"];');
+    expect(html).not.toContain("--rel-correct-full:");
+    expect(html).not.toContain("--rel-correct-partial:");
   });
 
-  // Acceptance: "an `indexes` edge and an `extends` edge share the same
-  // width, whether or not either is incident to the clicked node" — true
-  // because every edge (indexes included) carries the same bare "edge"
-  // class, and stroke-width is decided by path.edge (shared thin base) /
-  // path.edge.inc (incidence to the clicked node), never by relation.
-  test("an indexes edge and an extends edge share the same width, incident or not — width is decided by node incidence alone, never by relation", () => {
-    expect(html).not.toMatch(/class:"edge"\s*\+/);
+  // Acceptance: any two edges share the same width, whether or not either is
+  // incident to the clicked node — true because stroke-width is decided by
+  // path.edge (shared thin base) / path.edge.inc (incidence to the clicked
+  // node), never by relation. The ONE class the draw site concatenates is
+  // `partial`, and its rule sets a dash array, not a width.
+  test("two edges of different classes share the same width, incident or not — width is decided by node incidence alone, never by relation", () => {
     expect(html).not.toMatch(/\.converge\s*\{/);
+    // Exactly one concatenated class on the edge element, and it is coverage.
+    expect(html).toMatch(/class:"edge"\+edgeCoverageClass\(e\)/);
+    expect([...html.matchAll(/class:"edge"\s*\+\s*(\w+)/g)].map((m) => m[1])).toEqual([
+      "edgeCoverageClass",
+    ]);
+    // Every stroke-width rule in the stylesheet, enumerated: the shared base
+    // and the node-incidence one. A per-class width rule would show up here.
+    expect([...html.matchAll(/^\s*([^\n{]*?)\{[^}]*stroke-width:[^}]*\}/gm)].map((m) => m[1]!.trim())).toEqual([
+      "path.edge",
+      "path.edge.inc",
+      "g.node circle.selring",
+    ]);
   });
 
   // Acceptance criterion 1 (width means incident to the clicked node, user
@@ -298,9 +316,30 @@ describe("console-shell.html edge dashing says internal vs not", () => {
     expect(html).toContain("if (!anyFocus) continue;");
   });
 
-  test("a per-word swatch cannot carry a per-edge property, so it carries only colour", () => {
-    expect(html).toContain('<span class="sw" style="border-color:var(--${w})"></span>');
+  test("a per-class swatch cannot carry a per-edge property, so it carries only colour", () => {
+    expect(html).toContain('<span class="sw" style="border-color:var(${REL_VAR[c]})"></span>');
     expect(html).not.toContain('class="sw ${DASH.has(w)?"dash":""}"');
+    // And the swatch's colour comes from the class's own variable name, never
+    // interpolated as `--${class}` — the retired form resolved to a property
+    // that does not exist and painted nothing.
+    expect(html).not.toContain("border-color:var(--${");
+  });
+
+  // The legend the filter bar cannot carry: the rubric's own deciding
+  // questions, plus the rule the dash means. Three class words, one full/
+  // partial sentence, and the precedence — stated where the reader is,
+  // because none of it is recoverable from the graph.
+  test("the class legend states the rubric: three class words, the full/partial rule, and the precedence", () => {
+    const legend = html.slice(html.indexOf('<div id="relLegend">'), html.indexOf("</div>", html.indexOf('<div id="relLegend">')));
+    expect(legend).toContain('<b class="c">correct</b>');
+    expect(legend).toContain('<b class="v">verify</b>');
+    expect(legend).toContain('<b class="u">use</b>');
+    // The coverage rule, named as the line style it actually is.
+    expect(legend).toContain("实线 = full");
+    expect(legend).toContain("虚线 = partial");
+    // The precedence, which is what makes the three a decision rather than a
+    // menu, and the one-row-per-pair rule that follows from it.
+    expect(legend).toContain("correct &gt; verify &gt; use");
   });
 });
 
@@ -462,29 +501,37 @@ describe("console-shell.html DOM rule", () => {
       bare: "${l.tag}",
     },
     {
-      name: "edge relation (tooltip)",
-      escaped: "${addrOf(e.citingId)} —${esc(e.relation)}→ ${addrOf(e.citedId)}",
-      bare: "${addrOf(e.citingId)} —${e.relation}→ ${addrOf(e.citedId)}",
+      // main-agent-edges ticket 11: an edge's relation reaches BOTH sinks as
+      // `class(coverage)` through `edgeClassLabel`, a CLOSED-SET lookup over
+      // `CLASSES`/`COVERAGE_LABEL` rather than an escape — a payload value
+      // outside those sets renders `?` and never reaches the DOM at all. The
+      // sink entries below therefore pin the helper's call, and the escape
+      // discipline for this field is asserted separately (the closed-set test
+      // further down), same posture as `SEGMENT_STATUS_DOT`.
+      name: "edge class+coverage (tooltip)",
+      escaped: "${addrOf(e.citingId)} —${edgeClassLabel(e)}→ ${addrOf(e.citedId)}",
+      bare: "${addrOf(e.citingId)} —${e.relationClass}→ ${addrOf(e.citedId)}",
     },
     {
-      // lane-model-v12 ticket 07: an edge's lane label is built ONCE, in
-      // `edgeLaneLabel`, and rendered by both sinks (tooltip + panel erow) —
-      // so this ONE pair is the whole DOM-rule boundary for an edge's lane
-      // tags. Each side is escaped exactly once, which is what lets the
-      // teeth check below target this site and no other.
-      name: "edge side tags (edgeLaneLabel, the single escape site for both sinks)",
-      escaped: "const tail = esc(e.tailTag), head = esc(e.headTag);",
-      bare: "const tail = e.tailTag, head = e.headTag;",
+      // main-agent-edges ticket 11: an edge's side attribution is built ONCE,
+      // in `edgeSideLabel` (through `edgeLaneLabel`), and rendered by both
+      // sinks (tooltip + panel erow) — so this ONE call is the whole DOM-rule
+      // boundary for a lane tag on an edge. The tag is escaped exactly once,
+      // which is what lets the teeth check below target this site and no
+      // other; the OUTCOME beside it is a closed-set lookup, not an escape.
+      name: "edge side tag (edgeSideLabel, the single escape site for both sinks)",
+      escaped: 'return esc(s.tag)+"("+(HOW_LABEL[s.how]||"?")+")";',
+      bare: 'return s.tag+"("+(HOW_LABEL[s.how]||"?")+")";',
     },
     {
-      name: "edge relation (panel erow, out)",
-      escaped: "`—${esc(e.relation)}→ ${addrOf(e.citedId)}`",
-      bare: "`—${e.relation}→ ${addrOf(e.citedId)}`",
+      name: "edge class+coverage (panel erow, out)",
+      escaped: "`—${edgeClassLabel(e)}→ ${addrOf(e.citedId)}`",
+      bare: "`—${e.relationClass}→ ${addrOf(e.citedId)}`",
     },
     {
-      name: "edge relation (panel erow, in)",
-      escaped: "`${addrOf(e.citingId)} —${esc(e.relation)}→`",
-      bare: "`${addrOf(e.citingId)} —${e.relation}→`",
+      name: "edge class+coverage (panel erow, in)",
+      escaped: "`${addrOf(e.citingId)} —${edgeClassLabel(e)}→`",
+      bare: "`${addrOf(e.citingId)} —${e.relationClass}→`",
     },
 
     {
@@ -566,27 +613,61 @@ describe("console-shell.html DOM rule", () => {
     expect(html).toContain("function renderMonoText(raw){ return linkifyAddresses(esc(raw)); }");
   });
 
-  test("the edge tooltip (tip()) escapes relation and routes lane tags through edgeLaneLabel — the twin sink to the panel's erow, patched to match it", () => {
+  test("the edge tooltip (tip()) renders class+coverage through edgeClassLabel and lane sides through edgeLaneLabel — the twin sink to the panel's erow, patched to match it", () => {
     const tooltipBlock = html.slice(html.indexOf('addEventListener("mousemove"'), html.indexOf('addEventListener("mouseleave"'));
-    expect(tooltipBlock).toContain("esc(e.relation)");
+    expect(tooltipBlock).toContain("edgeClassLabel(e)");
     expect(tooltipBlock).toContain("edgeLaneLabel(e)");
   });
 
   // Both sinks reach a lane tag ONLY through the escaping helper — a second
   // sink that interpolated a raw side tag would escape the field-sink table
-  // above entirely, since that table now pins the helper rather than each
-  // call site (lane-model-v12 ticket 07).
-  test("no sink interpolates a raw side tag: `${e.tailTag}` / `${e.headTag}` appear nowhere in a template", () => {
+  // above entirely, since that table pins the helper rather than each call
+  // site (lane-model-v12 ticket 07, re-pointed at the side objects by
+  // main-agent-edges ticket 11).
+  test("no sink interpolates a raw side tag: `${e.tail.tag}` / `${e.head.tag}` appear nowhere in a template", () => {
     expect(html).toContain('<span class="lg">${edgeLaneLabel(e)}</span>');
     expect(html).toContain('<span class="etags">${edgeLaneLabel(e)}</span>');
-    expect(html).not.toContain("${e.tailTag}");
-    expect(html).not.toContain("${e.headTag}");
+    expect(html).not.toContain("${e.tail.tag}");
+    expect(html).not.toContain("${e.head.tag}");
+    // And the retired flat fields are gone from the shell entirely.
+    expect(html).not.toContain("e.tailTag");
+    expect(html).not.toContain("e.headTag");
+    expect(html).not.toContain("e.tailLaneToken");
+    expect(html).not.toContain("e.headLaneToken");
   });
 
-  test("relation words reach a style attribute only through the relationVar() closed-set lookup, never bare interpolation", () => {
-    expect(html).toContain("const relationVar = rel =>");
-    expect(html).not.toMatch(/style="color:var\(--\$\{e\.relation\}\)"/);
-    expect(html).toContain("style=\"color:${relationVar(e.relation)}\"");
+  test("relation classes reach a style attribute only through the relationVar() closed-set lookup, never bare interpolation", () => {
+    expect(html).toContain("const relationVar = cls => REL_VAR[cls] ? `var(${REL_VAR[cls]})` : \"inherit\";");
+    expect(html).not.toMatch(/style="color:var\(--\$\{e\.relationClass\}\)"/);
+    expect(html).toContain("style=\"color:${relationVar(e.relationClass)}\"");
+  });
+
+  // The relation's TEXT sink is a closed-set lookup for the same reason the
+  // style sink is: both halves of `class(coverage)` are server-authored
+  // enums, and a lookup refuses an unexpected value outright rather than
+  // escaping it into the page.
+  test("relation class and coverage reach the DOM only through edgeClassLabel's closed-set lookups", () => {
+    expect(html).toContain('const COVERAGE_LABEL = { full:"full", partial:"partial" };');
+    expect(html).toContain('const cls = CLASSES.includes(e.relationClass) ? e.relationClass : "?";');
+    expect(html).toContain("const cov = COVERAGE_LABEL[e.relationCoverage];");
+    expect(html).not.toContain("${e.relationClass}");
+    expect(html).not.toContain("${e.relationCoverage}");
+  });
+
+  // The attribution OUTCOME is the third closed set on an edge. It reaches
+  // the DOM through HOW_LABEL, and the two DEBT outcomes are wrapped in a
+  // mark of their own — the whole reason the payload carries `how` at all.
+  test("the side outcome reaches the DOM only through HOW_LABEL, with ambiguous/invalid marked", () => {
+    expect(html).toContain(
+      'const HOW_LABEL = { declared:"declared", derived:"derived", ambiguous:"ambiguous", invalid:"invalid" };',
+    );
+    expect(html).toContain(
+      'if (s.how==="ambiguous" || s.how==="invalid") return \'<span class="bad">\'+(HOW_LABEL[s.how]||"?")+"</span>";',
+    );
+    expect(html).not.toContain("${s.how}");
+    // And the mark is actually styled, in both sinks.
+    expect(html).toContain("#panel .erow .etags .bad {");
+    expect(html).toContain("#tip .lg .bad {");
   });
 
   test("segment status reaches a class attribute only through the SEGMENT_STATUS_DOT closed-set lookup, never bare interpolation", () => {
@@ -1149,43 +1230,75 @@ describe("console-shell.html multi-lane edge highlight (ticket 05)", () => {
     expect(html).not.toContain("p.laneTokens.some(t=>selLanes.has(t))");
   });
 
-  // lane-model-v12 ticket 07 — the crossing render, EXECUTED rather than
-  // grepped. The three side-tag helpers are pure (their only free name is
-  // `esc`), so they can be lifted out of the shell source and run against a
-  // stand-in escaper: this pins what a reader actually SEES for a crossing,
-  // not merely that some source line exists.
-  test("edgeLaneLabel renders a same-lane edge as {tag} and a CROSSING as {tail→head} — the two sides' whole reason to exist", () => {
+  // lane-model-v12 ticket 07, re-pointed by main-agent-edges ticket 11 — the
+  // attribution render, EXECUTED rather than grepped. The side helpers are
+  // pure (their only free name is `esc`), so they can be lifted out of the
+  // shell source and run against a stand-in escaper: this pins what a reader
+  // actually SEES for each of the five outcomes, not merely that some source
+  // line exists.
+  test("edgeLaneLabel renders each side's lane WITH its declared/derived mark, `·` for none, and marks ambiguous/invalid", () => {
     const start = html.indexOf("const edgeSettled =");
     const end = html.indexOf("\n", html.indexOf("const edgeLaneTokens ="));
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const helpers = new Function(
       "esc",
-      html.slice(start, end) + "\nreturn { edgeSettled, edgeLaneLabel, edgeLaneTokens };",
+      html.slice(start, end) + "\nreturn { edgeSettled, edgeSideLabel, edgeLaneLabel, edgeLaneTokens };",
     )((v: string) => v) as {
       edgeSettled: (e: unknown) => boolean;
+      edgeSideLabel: (s: unknown) => string;
       edgeLaneLabel: (e: unknown) => string;
       edgeLaneTokens: (e: unknown) => string[];
     };
 
-    const unsettled = { tailTag: "", headTag: "", tailLaneToken: null, headLaneToken: null };
-    const sameLane = { tailTag: "a", headTag: "a", tailLaneToken: "TA", headLaneToken: "TA" };
-    const crossing = { tailTag: "a", headTag: "b", tailLaneToken: "TA", headLaneToken: "TB" };
+    // ALL FIVE outcomes, one side each — the whole point of the payload's
+    // `how`, and the distinction the retired `""` collapsed.
+    expect(helpers.edgeSideLabel({ lane: "TA", tag: "a", how: "declared" })).toBe("a(declared)");
+    expect(helpers.edgeSideLabel({ lane: "TA", tag: "a", how: "derived" })).toBe("a(derived)");
+    expect(helpers.edgeSideLabel({ lane: null, tag: null, how: "none" })).toBe("·");
+    expect(helpers.edgeSideLabel({ lane: null, tag: null, how: "ambiguous" })).toBe(
+      '<span class="bad">ambiguous</span>',
+    );
+    expect(helpers.edgeSideLabel({ lane: null, tag: null, how: "invalid" })).toBe(
+      '<span class="bad">invalid</span>',
+    );
 
-    expect(helpers.edgeSettled(unsettled)).toBe(false);
-    expect(helpers.edgeLaneLabel(unsettled)).toBe("");
-    expect(helpers.edgeLaneTokens(unsettled)).toEqual([]);
+    const none = { tail: { lane: null, tag: null, how: "none" }, head: { lane: null, tag: null, how: "none" } };
+    const sameLane = {
+      tail: { lane: "TA", tag: "a", how: "derived" },
+      head: { lane: "TA", tag: "a", how: "derived" },
+    };
+    const crossing = {
+      tail: { lane: "TA", tag: "a", how: "declared" },
+      head: { lane: "TB", tag: "b", how: "derived" },
+    };
+    const halfOwed = {
+      tail: { lane: "TA", tag: "a", how: "derived" },
+      head: { lane: null, tag: null, how: "invalid" },
+    };
 
-    // Byte-identical to what the retired merged set rendered for a one-tag
-    // edge — the source swap is invisible here, which is the point.
-    expect(helpers.edgeLaneLabel(sameLane)).toBe("{a}");
+    expect(helpers.edgeSettled(none)).toBe(false);
+    expect(helpers.edgeLaneLabel(none)).toBe("");
+    expect(helpers.edgeLaneTokens(none)).toEqual([]);
+
+    // Two sides that agree exactly collapse to one — the ordinary edge reads
+    // as compactly as it did before the marks existed.
+    expect(helpers.edgeLaneLabel(sameLane)).toBe("{a(derived)}");
     expect(helpers.edgeLaneTokens(sameLane)).toEqual(["TA"]);
 
-    // The one thing that changes: a crossing reads as a crossing, with a
-    // DIRECTION. `{a,b}` (the old render) could not say which end was which.
-    expect(helpers.edgeLaneLabel(crossing)).toBe("{a→b}");
+    // A crossing reads as a crossing, with a DIRECTION — and each end says
+    // how it got its lane, which the tag alone never could.
+    expect(helpers.edgeLaneLabel(crossing)).toBe("{a(declared)→b(derived)}");
     expect(helpers.edgeLaneLabel(crossing)).not.toBe(helpers.edgeLaneLabel(sameLane));
     expect(helpers.edgeLaneTokens(crossing)).toEqual(["TA", "TB"]);
+
+    // Debt on ONE end still renders the other end's lane, and names the debt
+    // rather than showing an empty side.
+    expect(helpers.edgeLaneLabel(halfOwed)).toBe('{a(derived)→<span class="bad">invalid</span>}');
+    expect(helpers.edgeLaneTokens(halfOwed)).toEqual(["TA"]);
+    // `edgeSettled` (the draft-grey predicate) reads the LANE, not the mark:
+    // one attributed end is enough to be settled at all.
+    expect(helpers.edgeSettled(halfOwed)).toBe(true);
   });
 
   test("no `.tagSet` field access (exact-set lane identity) survives anywhere in the shell — D5 collapsed it to one tag per lane; prose comments may still name the retired field for context", () => {
@@ -1269,8 +1382,8 @@ describe("console-shell.html inline script is parseable JavaScript", () => {
     // and the compile must go red. Without this, a guard that only ever sees
     // valid input proves nothing about what it rejects.
     const broken = blocks[1].replace(
-      "// CSS custom properties cannot carry parentheses",
-      "CSS custom properties cannot carry parentheses",
+      "// Each class names its own CSS variable rather than being interpolated",
+      "Each class names its own CSS variable rather than being interpolated",
     );
     expect(broken).not.toBe(blocks[1]);
     expect(() => new Function(broken)).toThrow();

@@ -1,5 +1,6 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
-import { DEFAULT_SEGMENT, laneToken, UNSETTLED_LANE_TAG } from "../shared/lane-interpretation";
+import { DEFAULT_SEGMENT, laneToken } from "../shared/lane-interpretation";
+import type { LaneEdgeInput, LaneSideOutcome } from "../shared/lane-interpretation";
 import type {
   LaneComponentReport,
   LaneStatsReport,
@@ -7,7 +8,15 @@ import type {
 } from "../shared/lane-checker";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../shared/lane-checker-render";
 import { electMilestones, type MilestoneTurnInput } from "../shared/milestone-election";
-import { displayEdgeRelation } from "../shared/relation-class";
+import {
+  edgeRelationClass,
+  NO_RELATION_CLASS,
+  NO_RELATION_COVERAGE,
+  RELATION_CLASSES,
+  RELATION_COVERAGES,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 
 import type { ConsoleReader } from "./console-reader";
 import { parseSessionsCursor } from "./console-reader";
@@ -272,49 +281,79 @@ export interface ConsoleTurnLaneMembership {
   componentId: string;
 }
 
+/**
+ * ONE SIDE of an arc, as the console publishes it (main-agent-edges spec D2,
+ * ticket 11): WHICH lane this end attributes to, and HOW that attribution was
+ * reached. It replaces the flat `tailTag`/`headTag` + `tailLaneToken`/
+ * `headLaneToken` quartet, which carried the same two facts with no way to say
+ * the third: an end with no lane could be an endpoint in NO lane, an endpoint
+ * in SEVERAL with nobody having picked one, or a stored declaration that has
+ * since stopped being true — three different findings the console rendered
+ * identically as `""`.
+ *
+ * `lane` and `tag` are the SAME lane in two spellings, and both are on the
+ * wire on purpose. `lane` is the machine identity — `laneToken(segment, tag)`,
+ * a JSON pair, the only key that distinguishes two tasks' identically-named
+ * `#alpha` lanes and the key the shell's focus/component maps are built on.
+ * `tag` is the word a reader is shown. The shell could re-derive `tag` from
+ * `lane` through the payload's own `lanes` array, but only for a lane that
+ * array happens to contain: an interval that cut the far endpoint away leaves
+ * the token unresolvable, and the panel would print raw JSON at the reader.
+ * Both are `null` together, exactly when `how` is not `declared`/`derived`.
+ */
+export interface ConsoleGraphEdgeSide {
+  /** The qualified lane (`ConsoleGraphLane.token`) this side attributes to — non-null for `declared` and `derived` ONLY. */
+  lane: string | null;
+  /** That lane's own tag, the reader-facing word. Non-null exactly when `lane` is. */
+  tag: string | null;
+  /**
+   * The five outcomes of `resolveEdgeSide` (spec D2), verbatim: `declared` (a
+   * stored tag that IS one of the endpoint's lanes), `derived` (no stored tag,
+   * the endpoint is in exactly one lane), `ambiguous` (no stored tag, two or
+   * more), `none` (no stored tag, no lane), `invalid` (a stored tag that is
+   * NOT among the endpoint's current tags). `invalid` never degrades to
+   * `derived` — it is a contradiction between two writes, and the console
+   * shows it as one.
+   */
+  how: LaneSideOutcome;
+}
+
 export interface ConsoleGraphEdge {
   citingId: number;
   citedId: number;
   /**
-   * The edge's CLASS TOKEN — `correct(full)`, `correct(partial)`, `verify`,
-   * `use` (main-agent-edges ticket 02). It published the stored seven-word
-   * value until then; the shell's own filter list, arc-depth set and colour
-   * variables are keyed on these four instead, because the column that held
-   * the words is dropped at the cutover and a UI keyed on it would render
-   * every edge colourless the day that lands.
-   */
-  relation: string;
-  /**
-   * lane-model-v12 ticket 07 (spec D1): the arc's TWO ENDS, one lane tag
-   * each, REPLACING the single merged `tags: string[]` this field used to
-   * publish. `tailTag` is the CITING side (which lane the reference comes
-   * FROM), `headTag` the CITED side (which lane it points AT); `""` on a
-   * side is the UNSETTLED sentinel — no one has attributed that end yet —
-   * never a lane whose tag is the empty string.
+   * The edge's CLASS (main-agent-edges D1) — `correct`, `verify` or `use`,
+   * resolved through `edgeRelationClass` so a row written under the retired
+   * seven words reads as the class it means. The stored WORD is gone from this
+   * payload: the column that held it is dropped at the cutover, and a UI keyed
+   * on it would render every edge colourless the day that lands.
    *
-   * This is the ONE deliberate payload change in ticket 07, and the reason
-   * the merged set had to go: a CROSS-LANE edge (`tailTag !== headTag`, both
-   * settled) is a crossing between two NAMED lanes, and the old single set
-   * had no way to say which end named which — `{a,b}` could equally have
-   * meant "this edge is in lane a and lane b at once" (the v11 merge
-   * reading). Every other console field is a byte-for-byte source swap.
+   * `""` is structurally unreachable on this route — the projection loader
+   * admits only class-bearing rows (`relationClassBearingSql`) — and is typed
+   * rather than asserted so a row that somehow arrives unclassified still
+   * reaches the shell as an edge it can draw, instead of throwing a whole
+   * graph away over one row.
    */
-  tailTag: string;
-  headTag: string;
+  relationClass: RelationClassValue;
   /**
-   * Each side's own lane token (`ConsoleGraphLane.token`), or `null` when
-   * that side is unsettled — the plural `laneTokens: string[]` this replaces
-   * could only ever carry ONE segment (the citing turn's) for every tag on
-   * the edge, which is wrong for the head end of a cross-segment edge.
-   *
-   * A lane's identity is `(segment, tag)`, so each side resolves in its OWN
-   * endpoint's segment: `tailLaneToken` in the CITING turn's, `headLaneToken`
-   * in the CITED turn's. For the overwhelmingly common same-segment,
-   * same-lane edge the two are the identical string, which is exactly the
-   * single token the old field published.
+   * `correct`'s coverage bit, `""` on `verify`/`use`. A SEPARATE field, never
+   * folded into `relationClass` as a `correct(full)` token: the shell paints
+   * class as HUE and coverage as LINE STYLE, two channels, and a merged token
+   * would force it to split the string back apart to reach either one.
    */
-  tailLaneToken: string | null;
-  headLaneToken: string | null;
+  relationCoverage: RelationCoverageValue;
+  /**
+   * The arc's TWO ENDS, resolved (spec D2). `tail` is the CITING side (which
+   * lane the reference comes FROM), `head` the CITED side (which lane it
+   * points AT) — a CROSS-LANE edge is a crossing between two NAMED lanes, and
+   * which end named which is what a merged set could never say.
+   *
+   * Each side's lane is resolved in its OWN endpoint's segment, because a
+   * lane's identity is `(segment, tag)` and two tasks may both declare
+   * `#alpha`.
+   */
+  tail: ConsoleGraphEdgeSide;
+  head: ConsoleGraphEdgeSide;
 }
 
 /**
@@ -917,14 +956,54 @@ function sortTurnsById(turns: readonly LaneTurnInput[]): LaneTurnInput[] {
   return [...turns].sort((a, b) => a.id - b.id);
 }
 
-/** Same `(citingId, citedId, relation)` order `db/lane-checker-load.ts` already sorts its own output by — kept identical here so the "stable prefix" truncation below cuts the SAME prefix a caller reading `loadLaneCheckScope` directly would see. */
+/**
+ * Display order: CLASS, then COVERAGE, then the two ids (main-agent-edges
+ * ticket 11).
+ *
+ * It used to be `(citingId, citedId, relation)` — the same order
+ * `db/lane-checker-load.ts` sorts its own output by — and the word component
+ * of that key is gone with the column. What replaces it is not the word's
+ * slot: the classes lead, so the payload arrives GROUPED by what the reader
+ * filters and colours by, most specific first (`RELATION_CLASSES`' own order,
+ * `correct` before `verify` before `use`), and inside `correct` the FULL
+ * corrections before the partial ones.
+ *
+ * Both key tables are consulted by INDEX, never by `localeCompare`: the class
+ * order is a precedence, and alphabetical would put `correct` after neither
+ * and `verify` before `use` only by luck of spelling. An unclassified value
+ * (structurally unreachable here — see `ConsoleGraphEdge.relationClass`) sorts
+ * last rather than first, so it can never displace a real class at the head of
+ * the list.
+ *
+ * NOTE for a future edge-cap reader: `GRAPH_EDGE_MAX` trims this list by
+ * SUFFIX, so a scope over that cap (10,000 edges, versus a 2,000-turn window
+ * cap) would now drop `use` edges before `correct` ones rather than the oldest
+ * ones. That is a strictly better casualty order for the same bound, and the
+ * bound is not reachable by any real window.
+ */
 function sortEdgesForDisplay<
-  T extends { citingId: number; citedId: number; relation: string },
+  T extends {
+    citingId: number;
+    citedId: number;
+    relationClass: RelationClassValue;
+    relationCoverage: RelationCoverageValue;
+  },
 >(edges: readonly T[]): T[] {
+  const classRank = (value: RelationClassValue): number => {
+    const index = (RELATION_CLASSES as readonly string[]).indexOf(value);
+    return index === -1 ? RELATION_CLASSES.length : index;
+  };
+  const coverageRank = (value: RelationCoverageValue): number => {
+    const index = (RELATION_COVERAGES as readonly string[]).indexOf(value);
+    return index === -1 ? RELATION_COVERAGES.length : index;
+  };
   return [...edges].sort((a, b) => {
+    const byClass = classRank(a.relationClass) - classRank(b.relationClass);
+    if (byClass !== 0) return byClass;
+    const byCoverage = coverageRank(a.relationCoverage) - coverageRank(b.relationCoverage);
+    if (byCoverage !== 0) return byCoverage;
     if (a.citingId !== b.citingId) return a.citingId - b.citingId;
-    if (a.citedId !== b.citedId) return a.citedId - b.citedId;
-    return a.relation.localeCompare(b.relation);
+    return a.citedId - b.citedId;
   });
 }
 
@@ -1499,7 +1578,6 @@ export function handleGraphRoute(
   const segmentByTurnId = new Map(run.turns.map((turn) => [turn.id, turn.segment ?? DEFAULT_SEGMENT]));
 
   const sortedTurns = sortTurnsById(run.turns);
-  const sortedEdges = sortEdgesForDisplay(run.edges);
 
   // Display-load EVERY turn in the full projection (ticket 03, peer
   // P1-3/P2-7) — no pre-interval WIDEN_NODE_MAX cap narrows this set first
@@ -1528,27 +1606,58 @@ export function handleGraphRoute(
       laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? [],
     };
   });
-  // Each SIDE resolves its lane token in its OWN endpoint's segment (ticket
-  // 07): the tail in the citing turn's, the head in the cited turn's. An
-  // unsettled side names no lane and so gets `null`, never a token built over
-  // the empty tag.
-  const sideLaneToken = (turnId: number, tag: string): string | null =>
-    tag === UNSETTLED_LANE_TAG
-      ? null
-      : laneToken(segmentByTurnId.get(turnId) ?? DEFAULT_SEGMENT, tag);
-  const edgesPayload: ConsoleGraphEdge[] = sortedEdges.map((edge) => ({
-    citingId: edge.citingId,
-    citedId: edge.citedId,
-    relation: displayEdgeRelation({
-      relation: edge.relation,
-      relationClass: edge.relationClass ?? "",
-      relationCoverage: edge.relationCoverage ?? "",
+  // ONE SIDE, resolved (spec D2; ticket 11). Three facts come off the
+  // projection row the loader already resolved — WHICH lane the side
+  // attributes to (`tailTag`/`headTag` hold the RESOLVED tag since ticket 02,
+  // not the stored declaration), HOW it got there (`tailOutcome`/
+  // `headOutcome`), and the endpoint whose SEGMENT qualifies that lane.
+  //
+  // The outcome is what makes `lane: null` legible. A loader that supplied no
+  // outcome (a pure fixture — `LaneEdgeInput` types both as optional) is read
+  // exactly as it always meant: a tag present is a `declared` side, a tag
+  // absent is `none`. That fallback keeps every pre-resolution fixture
+  // rendering what it rendered before, and no real DB path takes it.
+  const edgeSide = (
+    edge: LaneEdgeInput,
+    side: "tail" | "head",
+  ): ConsoleGraphEdgeSide => {
+    const tag = side === "tail" ? edge.tailTag : edge.headTag;
+    const turnId = side === "tail" ? edge.citingId : edge.citedId;
+    const supplied = side === "tail" ? edge.tailOutcome : edge.headOutcome;
+    const how: LaneSideOutcome = supplied ?? (tag === "" ? "none" : "declared");
+    // A lane is named ONLY by an attributing outcome. `ambiguous`/`invalid`
+    // name none by construction (the resolver leaves their lane null), and
+    // reading the tag anyway would let an `invalid` declaration re-enter the
+    // payload as if it had resolved.
+    if (tag === "" || (how !== "declared" && how !== "derived")) {
+      return { lane: null, tag: null, how };
+    }
+    return {
+      lane: laneToken(segmentByTurnId.get(turnId) ?? DEFAULT_SEGMENT, tag),
+      tag,
+      how,
+    };
+  };
+  const edgesPayload: ConsoleGraphEdge[] = sortEdgesForDisplay(
+    run.edges.map((edge) => {
+      // `edgeRelationClass` is the ONE accessor (shared/relation-class.ts): a
+      // row with the stored class answers from it, a pre-v13 row answers
+      // through the legacy word table, and this route never spells either.
+      const resolved = edgeRelationClass({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
+      });
+      return {
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relationClass: resolved?.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: resolved?.relationCoverage ?? NO_RELATION_COVERAGE,
+        tail: edgeSide(edge, "tail"),
+        head: edgeSide(edge, "head"),
+      };
     }),
-    tailTag: edge.tailTag,
-    headTag: edge.headTag,
-    tailLaneToken: sideLaneToken(edge.citingId, edge.tailTag),
-    headLaneToken: sideLaneToken(edge.citedId, edge.headTag),
-  }));
+  );
 
   // Interval selection, over the FULL display payload (ticket 04,
   // T1496/T1498 rulings; ticket 03 fix: no pre-cap ahead of this anymore —
