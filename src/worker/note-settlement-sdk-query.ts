@@ -232,6 +232,13 @@ const STAGE_TWO_TURN_NOTE_FIELDS: ReadonlySet<string> = new Set([
   "turn",
   ...RELATION_FIELD_ENTRIES.map(([key]) => key),
   ...RETRACTION_FIELD_ENTRIES.map(([key]) => key),
+  // MAIN-AGENT-EDGES TICKET 06: `declare` (ticket 03, spec D4) is the edge
+  // pass's own act — it patches a lane side on a row the citing turn already
+  // carries — and it was MISSING here: ticket 03b's route test drove the
+  // facade directly, below this allowlist, so the live tool refused every
+  // `declare` a run sent as "refused on the edge pass". Admitted by name;
+  // pinned in `tests/worker/note-settlement-sdk-query.test.ts`.
+  "declare",
 ]);
 
 /**
@@ -311,7 +318,7 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "this prompt declares) or `session` (\"S<session>\", this session). " +
   "On `turn` the only parameters this pass may carry are THE SIX EDGE " +
   "FIELDS — the three relation classes and their three retract… mirrors, enumerated " +
-  "below — for a turn in that writable set; omit to leave alone. " +
+  "below — plus `declare`, for a turn in that writable set; omit to leave alone. " +
   "`title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a " +
   "turn address and the whole call writes nothing when one appears. A turn's " +
   "prose and type are the first pass's judgment and it is settled; `tags` is " +
@@ -333,47 +340,57 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "moved this turn's relations since you read them, or you never read them, " +
   "the WHOLE call is refused and NOTHING is written — re-read the turn's " +
   "`relations` and send it again. No field yields on its own. " +
+  // MAIN-AGENT-EDGES TICKET 06 (spec D3/D6): the division of labour and the
+  // entry form, as they stand. The main agent writes its own turn's edges
+  // routinely (ticket 05), so most edges here are already written; an entry
+  // carries the edge and nothing else, and a stored lane side is written
+  // ONLY through `declare` (D4) — the two-sided draft-and-E6 teaching that
+  // stood here described a model the resolver (D2) retired.
   "correct/verify/use: " +
-  "address lists, and normally yours — the main agent's `note` carries the " +
-  "same three fields but is taught not to reach for them, so all but a few " +
-  "edges are ones you wrote. ASSERTION takes " +
-  "two entry forms and ALL THREE classes accept either: a bare address leaves " +
-  "both sides UNSETTLED (the draft an edge starts as), a " +
-  "`{turn, tailTag, headTag}` entry places each END in a lane — `tailTag` the " +
-  "lane this turn writes FROM, `headTag` the lane the cited turn sits in. " +
+  "address lists. The main agent's `note` carries the same three fields and " +
+  "writes them ROUTINELY on its own turn, so most edges here are already " +
+  "written — yours are the ones it missed. ASSERTION is a bare address and " +
+  "ALL THREE classes accept it: an entry carries the edge and nothing else, " +
+  "because a lane side is an attribution the endpoint's own lane set resolves " +
+  "and a stored side is written only through `declare`. " +
   "A `correct` entry ALSO carries `\"coverage\": \"full\"` or `\"partial\"` — " +
   "FULL when no substantial part of the cited principal result may still serve " +
   "as a PREMISE (it survives only as history), PARTIAL when a definite " +
   "non-empty part still stands as one. A `correct` with no coverage is " +
   "refused naming the missing bit, and a `verify` or `use` carrying one is " +
   "refused too — only `correct` has a coverage bit. " +
-  "A DRAFT — either side left empty, or both — is ACCEPTED here, but it does " +
-  "not survive `commit`: every edge inside your writable set with an empty " +
-  "side is error E6, and commit refuses while one remains. Place both sides " +
-  "before you finish, or retract the row. Each PLACED side is checked against " +
-  "ITS " +
-  "OWN endpoint, in this order: the tag must be canonical (lowercase letters, " +
-  "digits and \"-\" only, never leading or trailing); the lane must already be DECLARED " +
-  "(remember create) in the task THAT endpoint belongs to — an endpoint " +
-  "carrying no task tag is refused naming the turn; and the tag must " +
-  "already be on that endpoint turn's own tags. A lane's identity is (task, " +
+  "A BLANK SIDE IS LEGAL wherever the endpoint sits in ONE lane or in none — " +
+  "the side derives, and nothing is owed. It is error E6 only where the " +
+  "endpoint sits in SEVERAL lanes and no side is declared, and commit refuses " +
+  "while one remains in your writable set: `declare` it, or retract the row. " +
+  "`declare` entries — `{turn, class?, tailTag?, headTag?}`, `turn` the CITED " +
+  "end's address — patch the pair's ONE row in place. Each side named is " +
+  "checked against ITS OWN endpoint, in this order: the tag must be canonical " +
+  "(lowercase letters, digits and \"-\" only, never leading or trailing); the " +
+  "lane must already be DECLARED (remember create) in the task THAT endpoint " +
+  "belongs to — an endpoint carrying no task tag is refused naming the turn; " +
+  "the tag must already be on that endpoint turn's own tags; and an endpoint " +
+  "in exactly one lane is refused as derivable. A side omitted is left alone; " +
+  "`null` clears it. A lane's identity is (task, " +
   "tag), so the same word on both sides means ONE lane spanning the edge, two " +
   "different words is a legal CROSSING, and the same word in two different " +
   "tasks is a crossing too — two lanes that merely share a name. " +
   "An edge stands on its own: no prose citation, no " +
-  "pre-existing link between the two turns, and one pair may carry several " +
-  "relations at once; a structurally illegal call (an undeclared lane, a " +
+  "pre-existing link between the two turns, and one pair carries ONE row at " +
+  "its most specific class; a structurally illegal call (an undeclared lane, a " +
   "self-citation) is rejected, naming what is missing — the WORD " +
   "itself is never refused, no relation requires a particular `type` on " +
   "either end, and a SELF edge is refused outright whatever its lanes. " +
   "Writing an edge also needs THIS run's own current read of the citing " +
-  "turn's relations — a relation write states how that turn's edges stand, " +
-  "so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's " +
-  "own field list already delivers it) or the call is refused naming that " +
-  "read; your own edge writes keep the set current afterwards. " +
-  "RETRACTION is the other half: each relation has a retract… mirror " +
-  "(retractCorrect …), same two entry forms. A bare entry deletes the " +
-  "UNSETTLED row and a two-sided one deletes exactly that lane placement; an " +
+  "turn's relations — a relation write states how that turn's edges stand. " +
+  "Your one read's field list already delivered it; a call refused naming " +
+  "that read is repaired by `filter={fields:[\"relations\"]}` on that turn " +
+  "alone, never the batch again, and your own edge writes keep the set " +
+  "current afterwards. " +
+  "RETRACTION is the other half: each class has a retract… mirror " +
+  "(retractCorrect …) taking bare addresses. A retraction addresses the PAIR, " +
+  "and the mirror's own class is the precondition — a pair now carrying a " +
+  "different class refuses naming it; an " +
   "address carrying no such edge rejects the call, naming it, and nothing is " +
   "deleted. " +
   "Which relation, if any, is the Memory Rubric's own " +
@@ -2667,8 +2684,8 @@ export const UNIFIED_NOTE_TOOL_DESCRIPTION =
   "`tags` write states the turn's task tag, every lane it belongs to and " +
   "every `topic:` word — a lane word left out is REMOVED, a `topic:` word " +
   "left out is refused (use `retireTopic` to correct one). AFTER `finalize` " +
-  "has succeeded: the six edge fields only (the three relation classes and " +
-  "their retract… mirrors) on a turn address, or `title`/`content` on this " +
+  "has succeeded: the six edge fields (the three relation classes and " +
+  "their retract… mirrors) plus `declare` on a turn address, or `title`/`content` on this " +
   "session's own `session` address — title/content/insight/type/tags are " +
   "refused on a turn address, because that judgment is now your own settled " +
   "one and `tags` especially would move a turn between lanes underneath the " +
@@ -2709,7 +2726,9 @@ export const UNIFIED_FINALIZE_TOOL_DESCRIPTION =
   "read — the writable set, the (task, lane) worklist your projection " +
   "touched, each of those lanes' members, and the lane words your projection " +
   "REMOVED — and records any homeless group per member. Its own result is " +
-  "DATA ONLY: the frozen writable set, worklist, removed-side debts and " +
+  "DATA ONLY: the frozen writable set, the two read deltas (the writable " +
+  "delta, relations only; the context delta, read-only), worklist, " +
+  "removed-side debts and " +
   "homeless groups, printed as facts — every instruction for what to do with " +
   "them already lives in your prompt. It marks nothing done and grants " +
   "nothing; only your own later `commit` publishes. " +
@@ -3636,8 +3655,17 @@ export function createUnifiedNoteSettlementSdkQuery(
  * fact the transition just persisted or the run already declared — never an
  * instruction. What to DO with this data is the prompt's job, not this
  * string's.
+ *
+ * MAIN-AGENT-EDGES TICKET 06 adds the two READ DELTAS (read-once spec D6):
+ * `writable delta` — the citers the two closures admitted, relations only —
+ * and `context delta` — the frozen lane members and cited endpoints stage 1
+ * never read, one hop. Both are printed from the SAME persisted snapshot the
+ * range gate and `lane_check` read (`scope.readDeltas`), so the list the
+ * model is told to read once is the list the gate will judge it against.
+ * Exported for the test that pins the two lines; production calls it from
+ * the unified `finalize` handler alone.
  */
-function renderUnifiedFinalizeDataResult(
+export function renderUnifiedFinalizeDataResult(
   db: Database,
   jobId: number,
   transitionSeq: number | null,
@@ -3647,10 +3675,18 @@ function renderUnifiedFinalizeDataResult(
     .sort((a, b) => a - b)
     .map((id) => turnAddressFor(db, id));
   const worklist = buildSettlementWorklistRendering(db, jobId);
+  const addressList = (ids: readonly number[]): string =>
+    ids.length > 0 ? ids.map((id) => turnAddressFor(db, id)).join(", ") : "(none)";
   const lines: string[] = [
     `job ${jobId}, transition ${transitionSeq}.`,
     `frozen writable set (${frozenAddresses.length}): ${
       frozenAddresses.length > 0 ? frozenAddresses.join(", ") : "(none)"
+    }`,
+    `writable delta — relations only, not in the initial set (${scope.readDeltas.writableDelta.length}): ${
+      addressList(scope.readDeltas.writableDelta)
+    }`,
+    `context delta — read-only, one hop, not in the initial set (${scope.readDeltas.contextDelta.length}): ${
+      addressList(scope.readDeltas.contextDelta)
     }`,
     `worklist lanes (${worklist.lanes.length}):`,
   ];

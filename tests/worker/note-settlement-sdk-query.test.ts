@@ -786,6 +786,61 @@ describe("the stage-2 note description teaches the allowlist it is judged by (ti
       throw error;
     }
   });
+
+  // MAIN-AGENT-EDGES TICKET 06: `declare` (ticket 03, spec D4) is the edge
+  // pass's own act and the description offers it — so the REGISTERED handler
+  // must admit it. It did not: ticket 03b's route test drove the facade below
+  // this allowlist, and the live tool answered every `declare` with "refused
+  // on the edge pass". Pinned at the handler, the same way the refusals above
+  // are: the answer may be any downstream refusal (there is no such edge
+  // here), but never the allowlist's own.
+  test("`declare` on a turn address passes the edge-pass allowlist (ticket 06)", () => {
+    const db = createDatabase(":memory:");
+    try {
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, job } = seedFixture(db);
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const answer = (await handlers.get("note")!({
+            turn: `S${sessionDbId}/T1`,
+            declare: [{ turn: `S${sessionDbId}/T1`, headTag: "lane" }],
+          })) as { content: Array<{ text: string }> };
+          const text = answer.content[0]!.text;
+          expect(text.startsWith("Parameter error: declare is refused on the edge pass")).toBe(false);
+          expect(text).not.toContain("refused on the edge pass");
+          void t1;
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      return createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      })({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: new Set([t1]),
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, new Set([t1]), 1, 1),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      }).finally(() => db.close());
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  });
 });
 
 describe("commit's description names the four friction categories and the exclusion (settlement-commit-report ticket 01)", () => {
@@ -992,9 +1047,12 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       expect(description).not.toContain("out-of-branch");
       expect(description).not.toContain("flow");
       expect(description).not.toContain("branch");
-      // The current contract: entries are bare-or-`{turn, tailTag, headTag}`, and
-      // validation is phase domains + tag legality + the self-citation gate.
-      expect(description).toContain("{turn, tailTag, headTag}");
+      // The current contract (main-agent-edges ticket 06): relation entries are
+      // bare addresses, a lane side is written only through `declare`'s
+      // `{turn, class?, tailTag?, headTag?}` patch, and validation is tag
+      // legality + the self-citation gate.
+      expect(description).toContain("{turn, class?, tailTag?, headTag?}");
+      expect(description).not.toContain("{turn, tailTag, headTag}");
       expect(description).toContain("self-citation gate");
     } finally {
       db?.close();

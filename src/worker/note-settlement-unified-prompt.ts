@@ -4,6 +4,7 @@ import type {
   NoteSettlementContext,
   SettlementWritableSet,
 } from "./note-settlement-context";
+import { renderEdgePassTeaching } from "./note-settlement-edge-pass-teaching";
 import { renderImpressionTeaching } from "./note-settlement-impression-teaching";
 import {
   SETTLEMENT_BOUNDED_FIELDS,
@@ -287,12 +288,15 @@ export function renderNoteSettlementUnifiedPrompt(
     "You can see how each turn's claims actually turned out, which decision a",
     "later turn overturned, and which arc a turn belongs to — none of which the",
     "writing side could know at the time. Driven by the worklist `finalize`",
-    "handed back: lane by lane, in its own order, read that lane's members as",
-    "one thread and write the edges that run between them; then one crossing",
-    "pass over lanes that genuinely link; then the debts that come with the",
-    "handover — pre-existing bare drafts reconciled per pair, removed-side",
-    "debts discharged, and edges whose endpoints have no task at all retracted",
-    "with cause.",
+    // MAIN-AGENT-EDGES TICKET 06: the frame names the three acts and the two
+    // surviving debts; "pre-existing bare drafts reconciled per pair" went
+    // with the draft itself (one pair, one row; a blank side is legal where
+    // the endpoint's lane set decides it).
+    "handed back: lane by lane, in its own order, over the members it froze",
+    "and the one read you already made; then one crossing pass over lanes",
+    "that genuinely link; then the debts that come with the handover — the",
+    "writable delta's citers discharged, and edges whose endpoints have no",
+    "task at all retracted with cause.",
     "",
     "## Your authority",
     "",
@@ -418,33 +422,28 @@ export function renderNoteSettlementUnifiedPrompt(
     "",
     "PHASE 2 — EDGE PASS, once `finalize` has succeeded.",
     "",
+    // MAIN-AGENT-EDGES TICKET 06 (spec D6): steps 5-7 used to be this file's
+    // own wording of the edge pass — "recall that lane's members with
+    // `relations`", "PLACE EVERY EDGE AT WRITE" with the two-sided draft-and-
+    // E6 entry, "before any edge write, recall the citing turn", and a
+    // "reconcile pre-existing bare drafts" debt. Each was either a re-read the
+    // one read (step 1) had already paid for, or a rule the resolution model
+    // (D2) retired. The pass is now the SHARED block, byte-identical with the
+    // resume prompt's; step 5 says what `finalize` prints and step 6 hands
+    // over to the block.
     "5. READ `finalize`'s own result: it names your frozen worklist lane by",
-    "   lane, each lane's frozen members, any removed-side debts, and any",
-    "   homeless dispositions. Nothing recomputed after this point can widen it",
-    "   — a turn that joins a lane later is not one of its members for this",
+    "   lane, each lane's frozen members, any removed-side debts, any",
+    "   homeless dispositions, and the two READ DELTAS — the writable delta",
+    "   and the context delta. Nothing recomputed after this point can widen",
+    "   it — a turn that joins a lane later is not one of its members for this",
     "   run.",
-    "6. Work the worklist lane by lane, in its own order: recall that lane's",
-    "   members with `filter={fields:[\"title\",\"metadata\",\"content\",",
-    "   \"insight\",\"relations\"]}` — re-read any truncated field with a bigger",
-    "   `turn` budget — and identify the claim-level links wholly visible among",
-    "   them; a shared topic, adjacency or state-only pairing is never a link on",
-    "   its own. Write the relations you find, judged by the Memory Rubric's",
-    "   **三个关系类** entry above. PLACE EVERY EDGE AT WRITE: each relation",
-    "   entry is `{turn, tailTag, headTag}` in the call that writes it —",
-    "   `tailTag` the lane THIS turn writes from, `headTag` the lane the cited",
-    "   turn sits in, both sides or neither. A bare address writes a DRAFT, and",
-    "   a draft with either side unnamed is an E6 ERROR that blocks your",
-    "   `commit`; repairing it afterwards costs a full retract-and-re-add round",
-    "   per edge. Before any edge write, recall the citing",
-    "   turn with `filter={fields:[\"relations\"]}` first — a relation write",
-    "   states how that turn's edges stand, and the call is refused naming that",
-    "   read if you skip it.",
-    "7. Run ONE crossing pass over lanes that genuinely link, then discharge the",
-    "   three handover debts: reconcile pre-existing bare drafts per pair,",
-    "   discharge every removed-side debt `finalize` named (a relation write on",
-    "   the citing turn only — its own note fields are not yours), and retract",
-    "   any edge whose endpoint has no task at all, with cause.",
-    "8. You may call `lane_check` once your first pass over the worklist is",
+    "6. Run the edge pass exactly as taught below — read the delta union",
+    "   once, then DECLARE, FILL and REVIEW over the worklist, lane by lane in",
+    "   its own order, with ONE crossing pass over lanes that genuinely link.",
+    "",
+    renderEdgePassTeaching(),
+    "",
+    "7. You may call `lane_check` once your first pass over the worklist is",
     "   done, to see what the grammar still forbids before `commit` judges you",
     "   on it. A SEVERED lane this run touched — a member or an edge — is named",
     "   at the end of that report and again on your commit receipt, with its",
@@ -453,7 +452,7 @@ export function renderNoteSettlementUnifiedPrompt(
     "   make a genuine use-relation true, leave an honest fracture standing",
     "   otherwise, and do not delay the commit over it. A lane severed entirely",
     "   outside your writable set is not this run's debt at all.",
-    "9. Write this session's own `title`/`content` where they need it (a",
+    "8. Write this session's own `title`/`content` where they need it (a",
     "   `note(session=…)` call), then end with ONE successful `commit` — a",
     "   refusal is not that commit. `commit` verifies your job lease is still",
     "   valid, reports what this run actually wrote, and marks the job durably",
@@ -481,7 +480,7 @@ export function renderNoteSettlementUnifiedPrompt(
     "this run cannot repair.",
     "Do not chase it and do not retype a turn to silence it. E4 and E6 anchored",
     "on that same turn ARE yours — both are relation grammar, both are repaired",
-    "by retracting or re-placing the edge, and both block your `commit`.",
+    "by a `declare` entry or a retraction, and both block your `commit`.",
     "",
     // SETTLEMENT-GATE-TAXONOMY TICKET 04 (user ruling [S15069/T2274]).
     "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING — a severed",

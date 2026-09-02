@@ -459,21 +459,24 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain('"used"');
     expect(prompt).not.toContain('"built on"');
 
-    // Revision 7 (ticket 07), re-aimed by relation-vocabulary-v13 ticket 02:
-    // the discriminator lives in the finalization pass's JUDGE AND WRITE step,
-    // and it is a PRECEDENCE now rather than a seven-word ladder — prefixed by
-    // the repair-is-re-judgment rule and by the principal-result rule, and
-    // followed by the same non-evidences the trial mistook for continuation.
-    expect(prompt).toContain("2. JUDGE AND WRITE. For every candidate and every stock row you touch,");
-    expect(prompt).toContain("ignore the stored relation word and run the class test as if no");
-    expect(prompt).toContain("edge existed — the old word is evidence of nothing. BOTH ENDS ARE");
-    expect(prompt).toContain("earn edges. Then run the PRECEDENCE, in order:");
-    expect(prompt).toContain("acceptance, reliability or scope? negated or limited = correct;");
-    expect(prompt).toContain("confirmed or supported = verify. (2) otherwise, is the cited");
-    // The two nearest-neighbour traps, restated in the new vocabulary: a
-    // "confirms" about a DETAIL is `use`, and a completed blocker is `use`.
-    expect(prompt).toContain("DETAIL of the cited turn is use, not verify.");
-    expect(prompt).toContain("adjacency, or preserving lane shape are never use evidence —");
+    // Revision 7 (ticket 07), re-aimed by relation-vocabulary-v13 ticket 02,
+    // and again by MAIN-AGENT-EDGES TICKET 06: the English JUDGE AND WRITE
+    // restatement of the precedence is GONE with the five-step pass — the
+    // class judgment defers to the rubric's own 三个关系类 entry, which the
+    // prompt embeds byte-identically and which carries the precedence and the
+    // "confirms a DETAIL is not verify" trap itself. What the prompt keeps in
+    // English is the two measured traps the rubric does not carry, inside the
+    // shared edge-pass block's FILL step.
+    expect(prompt).not.toContain("2. JUDGE AND WRITE.");
+    expect(prompt).not.toContain("Then run the PRECEDENCE, in order:");
+    expect(prompt).toContain("判定是一个**优先级**,不是一个划分");
+    expect(prompt).toContain("否决或限缩 = **correct**;确认或支持 = **verify**");
+    expect(prompt).toContain("散文里写着「确认」但指向的是细节,不构成 verify");
+    expect(prompt).toContain("judged by the Memory Rubric's");
+    expect(prompt).toContain("**三个关系类** entry above: one edge per pair at the most specific class");
+    // The two nearest-neighbour traps the measurement found, kept in English.
+    expect(prompt).toContain("Adjacency, a shared topic and preserving a lane's shape are never use");
+    expect(prompt).toContain("evidence; a blocker satisfied by doing the work is completion (use), not");
     expect(prompt).toContain(
       "`note`'s correct/verify/use fields — the three-class",
     );

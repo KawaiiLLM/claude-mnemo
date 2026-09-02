@@ -200,6 +200,26 @@ const LANE_MEMBERS_DDL = `
   );
 `;
 
+/**
+ * THE DECLARATION ENDPOINTS (main-agent-edges ticket 06, spec D6 / read-once
+ * D6): the other endpoint of every live outgoing edge of a writable citer, as
+ * the transition saw it. The fourth frozen fact, and the only input of the
+ * stage-2 read deltas that the three snapshots above do not already hold —
+ * `writableDelta` is a set difference over snapshot #1's own classes and the
+ * lane half of `contextDelta` is snapshot #3, but which turns a writable
+ * citer's edges POINT AT is a fact about the live graph at transition time,
+ * and a retry of stage 2 that re-read it live would read a different set
+ * whenever an edge landed in between. Frozen here, the deltas are a pure
+ * function of persisted rows (`computeSettlementReadDeltas`).
+ */
+const DECLARATION_ENDPOINTS_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_declaration_endpoints (
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL,
+    PRIMARY KEY (job_id, turn_id)
+  );
+`;
+
 const INDEX_DDL = [
   `CREATE INDEX IF NOT EXISTS idx_note_settlement_writable_turns_job
      ON note_settlement_writable_turns(job_id);`,
@@ -241,6 +261,7 @@ export function ensureNoteSettlementSnapshotTables(db: Database): void {
   db.exec(WORKLIST_DDL);
   db.exec(REMOVED_SIDE_DEBTS_DDL);
   db.exec(LANE_MEMBERS_DDL);
+  db.exec(DECLARATION_ENDPOINTS_DDL);
   for (const ddl of INDEX_DDL) {
     db.exec(ddl);
   }
@@ -330,6 +351,81 @@ export interface NoteSettlementSnapshot {
   derivedSideDebts: readonly DerivedSideDebt[];
   /** Keyed by `laneSnapshotKey`; ids ascending. */
   laneMembers: Map<string, number[]>;
+  /** Snapshot #4: the other endpoint of every live outgoing edge of a writable citer, ascending. */
+  declarationEndpointIds: number[];
+  /** The two stage-2 read lists, computed from the four snapshots above — see `computeSettlementReadDeltas`. */
+  readDeltas: SettlementReadDeltas;
+}
+
+/**
+ * THE STAGE-2 READ DELTAS (main-agent-edges ticket 06; read-once spec D6).
+ *
+ * Both lists are SET DIFFERENCES against what stage 1 already read, never
+ * source categories — a removed-side citer may already be a window turn, a
+ * historical lane member may also be in the lookback — so an address stage 1
+ * read appears in neither, whatever else it is:
+ *
+ *   initialWritableIds = the ids carrying an ORDINARY class (window, lookback,
+ *                        closure) — exactly the claim-time writable set stage
+ *                        1's prompt printed and stage 1 read;
+ *   finalWritableIds   = every id in snapshot #1 (= frozen ∪ derivedDebtCiters);
+ *   writableDelta      = finalWritableIds − initialWritableIds — the citers the
+ *                        two closures admitted, RELATIONS ONLY by construction
+ *                        (an id here carries no ordinary class, so
+ *                        `settlementWritePermissions` grants it no field);
+ *   contextDelta       = (⋃ laneMembers ∪ declarationEndpointIds)
+ *                        − initialWritableIds − writableDelta — read-only
+ *                        judgment material, ONE HOP: a lane member's own
+ *                        edges are not followed further.
+ *
+ * Pure over the persisted rows, so the finalize result, the resume prompt and
+ * any retry print the SAME two lists.
+ */
+export interface SettlementReadDeltas {
+  initialWritableIds: number[];
+  writableDelta: number[];
+  contextDelta: number[];
+}
+
+export function computeSettlementReadDeltas(input: {
+  writable: ReadonlyMap<number, ReadonlySet<SettlementWritableProvenance>>;
+  laneMembers: ReadonlyMap<string, readonly number[]>;
+  declarationEndpointIds: Iterable<number>;
+}): SettlementReadDeltas {
+  const initial = new Set<number>();
+  const writableDelta = new Set<number>();
+  for (const [turnId, provenances] of input.writable) {
+    if (ORDINARY_PROVENANCES.some((provenance) => provenances.has(provenance))) {
+      initial.add(turnId);
+    } else {
+      writableDelta.add(turnId);
+    }
+  }
+  const context = new Set<number>();
+  const admit = (turnId: number): void => {
+    if (!initial.has(turnId) && !writableDelta.has(turnId)) {
+      context.add(turnId);
+    }
+  };
+  for (const members of input.laneMembers.values()) {
+    for (const turnId of members) {
+      admit(turnId);
+    }
+  }
+  for (const turnId of input.declarationEndpointIds) {
+    admit(turnId);
+  }
+  const ascending = (ids: Iterable<number>): number[] => [...ids].sort((a, b) => a - b);
+  return {
+    initialWritableIds: ascending(initial),
+    writableDelta: ascending(writableDelta),
+    contextDelta: ascending(context),
+  };
+}
+
+/** An empty delta pair — what a job that never transitioned (or froze nothing) hands stage 2. */
+export function emptySettlementReadDeltas(): SettlementReadDeltas {
+  return { initialWritableIds: [], writableDelta: [], contextDelta: [] };
 }
 
 /** The canonical lane address (`E<n>/#<tag>`), reused as the member-snapshot map key. */
@@ -409,6 +505,18 @@ export function writeNoteSettlementTransitionSnapshots(
     eraCutoffEpoch,
   );
 
+  // SNAPSHOT #4 (ticket 06): taken AFTER the two closures, over the FINAL
+  // writable set — a derived-side citer's own outgoing edges point at turns
+  // stage 2 has to read before it can declare that citer's side, and those
+  // turns are exactly what would be missed by enumerating over the ordinary
+  // set alone.
+  const declarationEndpointIds = enumerateDeclarationEndpoints(db, [...writable.keys()]);
+  const readDeltas = computeSettlementReadDeltas({
+    writable,
+    laneMembers,
+    declarationEndpointIds,
+  });
+
   const insertWritable = db.query<unknown, [number, number, string]>(
     `INSERT INTO note_settlement_writable_turns (job_id, turn_id, provenance)
      VALUES (?, ?, ?)`,
@@ -447,7 +555,62 @@ export function writeNoteSettlementTransitionSnapshots(
     }
   }
 
-  return { writable, worklist: input.worklist, debts, derivedSideDebts, laneMembers };
+  const insertEndpoint = db.query<unknown, [number, number]>(
+    `INSERT INTO note_settlement_declaration_endpoints (job_id, turn_id)
+     VALUES (?, ?)`,
+  );
+  for (const turnId of declarationEndpointIds) {
+    insertEndpoint.run(input.jobId, turnId);
+  }
+
+  return {
+    writable,
+    worklist: input.worklist,
+    debts,
+    derivedSideDebts,
+    laneMembers,
+    declarationEndpointIds,
+    readDeltas,
+  };
+}
+
+/** SQLite's parameter ceiling is the only reason the endpoint read is chunked. */
+const DECLARATION_ENDPOINT_ID_CHUNK = 400;
+
+/**
+ * The OTHER endpoint of every live outgoing edge of the given citers — the
+ * turns stage 2 must have read before it can declare or review those edges.
+ *
+ * Same boundaries as the two closures: turn→turn rows, live on both ends,
+ * carrying a class. The citer itself is returned only when it is the cited
+ * end of another citer's edge (it is in the writable set already and the
+ * delta subtracts it). Ascending, deduplicated.
+ */
+function enumerateDeclarationEndpoints(
+  db: Database,
+  citerTurnIds: readonly number[],
+): number[] {
+  const endpoints = new Set<number>();
+  for (let offset = 0; offset < citerTurnIds.length; offset += DECLARATION_ENDPOINT_ID_CHUNK) {
+    const chunk = citerTurnIds.slice(offset, offset + DECLARATION_ENDPOINT_ID_CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = db
+      .query<{ citedId: number }, number[]>(
+        `SELECT DISTINCT me.cited_id AS citedId
+           FROM memory_edges me
+           JOIN turns tc ON tc.id = me.citing_id
+           JOIN turns td ON td.id = me.cited_id
+          WHERE me.citing_id IN (${placeholders})
+            AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+            AND ${relationClassBearingSql("me")}
+            AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
+      )
+      .all(...chunk);
+    for (const row of rows) {
+      endpoints.add(row.citedId);
+    }
+  }
+  return [...endpoints].sort((a, b) => a - b);
 }
 
 /**
@@ -724,6 +887,23 @@ export function readNoteSettlementWorklistSnapshot(
     )
     .all(jobId);
   return { lanes, debts };
+}
+
+/** Snapshot #4, ascending: the other endpoint of every live outgoing edge of a writable citer at transition time. */
+export function readNoteSettlementDeclarationEndpointSnapshot(
+  db: Database,
+  jobId: number,
+): number[] {
+  ensureNoteSettlementSnapshotTables(db);
+  return db
+    .query<{ turnId: number }, [number]>(
+      `SELECT turn_id AS turnId
+         FROM note_settlement_declaration_endpoints
+        WHERE job_id = ?
+        ORDER BY turn_id ASC`,
+    )
+    .all(jobId)
+    .map((row) => row.turnId);
 }
 
 /**

@@ -313,6 +313,7 @@ export function clearSettlementJobTransitionScratch(db: Database, jobId: number)
     "note_settlement_worklist",
     "note_settlement_removed_side_debts",
     "note_settlement_lane_members",
+    "note_settlement_declaration_endpoints",
     "note_settlement_pre_side_resolutions",
     "homeless_retraction_audits",
     "homeless_groups",

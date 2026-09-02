@@ -35,6 +35,7 @@ import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
   renderNoteSettlementPrompt,
 } from "../../src/worker/note-settlement-prompt";
+import { renderEdgePassTeaching } from "../../src/worker/note-settlement-edge-pass-teaching";
 import { buildSettlementWorklistRendering } from "../../src/worker/note-settlement-shape-numbers";
 import {
   SETTLEMENT_ALLOWED_TOOLS,
@@ -601,18 +602,24 @@ describe("ticket 06 — the writable set is declared, window first, in addresses
 });
 
 /**
- * TAG-MANDATE TICKET 07 — Block A's batched procedure (spec: revision 7 of
- * `.scratch/tag-mandate/issues/06-prompt-text.md`), replacing ticket 06's
- * per-window STEP-0-COVERAGE framing wholesale: the writable set is now
- * worked in chronological ten-turn batches, each running three workstations
- * in order (TURN AUDIT, CONTENT CANDIDATES, BACK-LINK).
+ * MAIN-AGENT-EDGES TICKET 06 (spec D6; read-once D6 as rewritten) — THE
+ * PROCEDURE IS THE SHARED EDGE PASS.
  *
- * Every assertion is a substring of the AUTHORED text (Block A), pinned
- * inside the Procedure section rather than anywhere in the prompt: the
- * batch loop is worthless if it drifts out of the place the agent reads
- * before judging.
+ * Tag-mandate ticket 07's Block A (the writable set worked in chronological
+ * ten-turn batches, three workstations per batch, a private open-thread
+ * ledger, "do not call `lane_check` during the batch loop") and settlement-
+ * ergonomics ticket 02's "before any edge write, run this call sequence"
+ * bullet are RETIRED from the rendered prompt: each was a re-read the one
+ * paginated read already pays for, and the ledger's DISPOSE step went with
+ * the batches it summarised. What renders instead is the scope sentence (kept
+ * byte-for-byte), one resume-specific read instruction, and the shared block
+ * `renderEdgePassTeaching()` — pinned sentence by sentence in
+ * `tests/worker/note-settlement-edge-pass-teaching.test.ts`. Here the pins
+ * are the HOST's: the block is present verbatim inside `## Procedure`, and
+ * the retired sentences are absent from the RENDERED text, not merely from
+ * the source.
  */
-describe("ticket 07 — Block A teaches the batched workstations, and timeline licenses nothing", () => {
+describe("main-agent-edges ticket 06 — the procedure is the shared edge pass, and Block A's batch loop is gone", () => {
   function procedureText(prompt: string): string {
     return prompt.slice(prompt.indexOf("## Procedure"), prompt.indexOf("## Duties"));
   }
@@ -625,94 +632,61 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
     expect(procedure).toContain("write must land inside it; the gate refuses the rest and names why.");
   });
 
-  test("batches are ten chronological turns, and batch/window/lookback labels are never topology", () => {
+  test("the resume read is ONE sweep over the writable set plus the context delta, and reading is still the write license", () => {
     const procedure = procedureText(renderPrompt());
 
-    expect(procedure).toContain("Work the WHOLE writable set in chronological batches of ten turns (the");
-    expect(procedure).toContain("last batch may be smaller). Batches bound working memory, nothing else:");
-    expect(procedure).toContain("window and lookback labels and batch boundaries are never thread, lane,");
-    expect(procedure).toContain("phase or convergence boundaries. Do not call `lane_check` during the");
-    expect(procedure).toContain("batch loop.");
+    expect(procedure).toContain("This dispatch resumes a job whose stage-1 transition has already landed");
+    expect(procedure).toContain("read the writable set below TOGETHER WITH the worklist's context delta as");
+    expect(procedure).toContain("one paginated sweep");
+    expect(procedure).toContain("Reading is your write license throughout: a whole-field `write`");
+    expect(procedure).toContain("over another writer's text requires your own untruncated read of that");
+    expect(procedure).toContain("field, and `timeline` licenses nothing.");
   });
 
-  test("reading is the write license throughout, and timeline licenses nothing", () => {
-    const procedure = procedureText(renderPrompt());
+  test("the shared edge-pass block renders verbatim inside the procedure, before the writable set", () => {
+    const prompt = renderPrompt();
+    const procedure = procedureText(prompt);
+    const block = renderEdgePassTeaching();
 
-    expect(procedure).toContain("Reading is your write license throughout: a whole-field");
-    expect(procedure).toContain("`write` over another writer's text requires your own untruncated read of");
-    expect(procedure).toContain("that field, and `timeline` licenses nothing.");
+    expect(procedure).toContain(block);
+    expect(procedure.indexOf(block)).toBeLessThan(procedure.indexOf("WRITABLE SET:"));
+    expect(procedure.indexOf("WRITABLE SET:")).toBeLessThan(procedure.indexOf("YOUR WORKLIST"));
   });
 
-  // T1466 (finding P1-4)'s own root cause carries forward: explicit `fields`
-  // REPLACE recall's defaults, so BATCH STEP 1's field list and the sentence
-  // naming what must have been seen are pinned together.
-  test("BATCH STEP 1 names the recall call's fields, the re-read rule, and the note-less-turn read", () => {
-    const procedure = procedureText(renderPrompt());
-
-    expect(procedure).toContain("BATCH STEP 1 — READ. Recall every turn of this batch with");
-    expect(procedure).toContain(
-      '`filter={fields:["title","metadata","content","insight","relations"]}`;',
-    );
-    expect(procedure).toContain("re-read any truncated field with a bigger `turn` budget, and read a turn");
-    expect(procedure).toContain("carrying no note with `prompt` and `response` added — the raw exchange is");
-    expect(procedure).toContain("what you judge it by, and a field never delivered licenses nothing.");
-  });
-
-  // FINAL REVIEW, FINDING 1: this step was a TURN AUDIT — note, type, task
-  // tag — which is stage 1's duty, discharged in a context whose only job was
-  // that judgment, before this pass ever started. Re-auditing spends the
-  // window twice and invites a run that believes it still decides the
-  // partition. What survives is the READ, because edges are judged on it.
-  test("BATCH STEP 1 reads exhaustively and audits nothing — the turn-scope duties are gone", () => {
-    const procedure = procedureText(renderPrompt());
-
-    expect(procedure).toContain("Read");
-    expect(procedure).toContain("EVERY turn, whether or not anything about it looks interesting: this is");
-    expect(procedure).toContain("the material your edges are judged on, and the relations read is what");
-    expect(procedure).toContain("licenses writing them. What you are NOT doing here is auditing the note,");
-    expect(procedure).toContain("the type or the tags — the first pass settled those");
-    // The audit criteria themselves are GONE from the prompt, not contradicted.
-    expect(procedure).not.toContain("TURN AUDIT");
-    expect(procedure).not.toContain("does the type honor the Ruling supplement");
-    expect(procedure).not.toContain("Turn-local corrections");
-    expect(procedure).not.toContain("reassign");
-  });
-
-  test("BATCH STEP 2 records claim-level candidates only, writing no relation yet", () => {
-    const procedure = procedureText(renderPrompt());
-
-    expect(procedure).toContain("BATCH STEP 2 — CONTENT CANDIDATES. Without consulting the stored edge");
-    expect(procedure).toContain("words, identify the claim-level links wholly visible in this batch. Add");
-    expect(procedure).toContain("each to a private open-thread ledger: at least two turn addresses, the");
-    expect(procedure).toContain("claim link, a phase hypothesis, its current frontier. Shared topic,");
-    expect(procedure).toContain("adjacency and state-only turns are never candidates; there is no target");
-    expect(procedure).toContain("count, and an empty batch ledger is valid. Record candidates only —");
-    // relation-vocabulary-v13 ticket 02: `indexes` is deleted from the write
-    // vocabulary, so the sentence names what is still withheld and nothing
-    // else — naming a parameter a run cannot send is the stale-teacher shape.
-    expect(procedure).toContain("write no relation and no lane tag yet.");
-  });
-
-  test("BATCH STEP 3 back-links against the ledger's own frontiers, never every earlier turn", () => {
-    const procedure = procedureText(renderPrompt());
-
-    expect(procedure).toContain("BATCH STEP 3 — BACK-LINK. Compare this batch against the ledger's open");
-    expect(procedure).toContain("frontiers, the batch's own explicit predecessor language, and any prior");
-    expect(procedure).toContain("terminus this content explicitly continues or corrects — never against");
-    expect(procedure).toContain("every earlier turn. Follow predecessor language across window, lookback");
-    expect(procedure).toContain("and batch boundaries; when it points outside the writable set, read that");
-    expect(procedure).toContain("endpoint for judgment even though it stays unwritable. A membership");
-    expect(procedure).toContain("break never proves a content thread absent. Targeted re-reads collect");
-    expect(procedure).toContain("any historical relations or full tag sets the final write gate will");
-    expect(procedure).toContain("require — the ledger itself licenses nothing. Update the ledger; do not");
-    expect(procedure).toContain("finalize the graph.");
+  test("the batch loop, the ledger and the per-edge relations read are absent from the rendered prompt", () => {
+    const prompt = renderPrompt();
+    for (const retired of [
+      "batches of ten",
+      "Batches bound working memory",
+      "Do not call `lane_check` during the",
+      "batch loop.",
+      "BATCH STEP 1",
+      "BATCH STEP 2",
+      "BATCH STEP 3",
+      "Recall every turn of this batch with",
+      "private open-thread ledger",
+      "Update the ledger",
+      "before any edge write, run this call sequence",
+      "read the citing turn's own edges with an EXPLICIT, large `turn`",
+      "turn=2000)",
+      "DISPOSE every ledger candidate",
+      "JUDGE AND WRITE",
+      "CHECK AND REPAIR",
+      "All relation writes happen HERE, after the last batch",
+    ]) {
+      expect({ retired, present: prompt.includes(retired) }).toEqual({ retired, present: false });
+    }
+    // The fan-out lane route stays absent from the WHOLE prompt (settlement-
+    // ergonomics ticket 02's one surviving absence pin): it takes no budget
+    // parameter and is a candidate to blow the tool-result cap.
+    expect(prompt).not.toContain("E<n>/L*");
+    expect(prompt).not.toContain("/L*");
   });
 
   // ABSENCE pin (ticket 07, retired teaching #1): the old per-window
   // STEP-0-COVERAGE framing and its trailing "Reconcile what is stored..."
-  // SUPPLY/CORRECT/RETRACT paragraph are both gone, replaced whole by the
-  // batched workstations above — pinned so a future merge cannot resurrect
-  // either half independently.
+  // SUPPLY/CORRECT/RETRACT paragraph are both gone — pinned so a future merge
+  // cannot resurrect either half independently.
   test("the retired STEP 0 framing and the 'Reconcile what is stored' opener are both gone", () => {
     const procedure = procedureText(renderPrompt());
 
@@ -728,283 +702,123 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
 });
 
 /**
- * TAG-MANDATE TICKET 06, amended by LANE-DECLARATION TICKET 08 — the edges
- * bullet (authored Block B, hand-amended by ticket 08's own header comment
- * in note-settlement-prompt.ts) is the prompt's half of "every teaching
- * surface speaks the current lane model". Pinned inside duty 2, where the
- * agent reads them, rather than anywhere in the prompt.
+ * MAIN-AGENT-EDGES TICKET 06 — duty 1 states the CALL SHAPES and the two
+ * `lane_check`-warning teachings, and nothing the shared block already says.
  *
- * The tag MANDATE this describe used to pin ("extends/narrows accept ONLY
- * the tagged form") is GONE — ticket 08 retired it here to match the
- * rubric's own retirement of the same idea (memory-rubric.test.ts, "the
- * five retired v10 lane ideas"). See note-settlement-prompt.ts's own
- * "LANE-DECLARATION TICKET 08'S AMENDMENT" comment for the full list of
- * what changed and the known transient inconsistency with the live write
- * gate (lane-declaration ticket 02, not yet built as of this commit).
+ * Tag-mandate ticket 06's edges bullet (a DRAFT that "does NOT survive
+ * `commit`", the two-sided `{turn, tailTag, headTag}` placement, "each PLACED
+ * side is checked against ITS OWN endpoint", DRAFT RECONCILIATION, and the
+ * five-step pass) taught the stored-side model the resolver (spec D2) retired.
+ * Pinned inside duty 1, where the agent reads them.
  */
-describe("ticket 06 — the edges bullet teaches the entry forms and the lane procedure", () => {
-  function edgesBullet(prompt: string): string {
+describe("main-agent-edges ticket 06 — duty 1 teaches the bare entry, the coverage bit, `declare` and pair-addressed retraction", () => {
+  function dutyOne(prompt: string): string {
     return prompt.slice(
-      prompt.indexOf("   - edges: `note`'s"),
-      prompt.indexOf("   - `type` and `tags` are the two fields"),
+      prompt.indexOf("1. TURN EDGES, via the `note` tool"),
+      prompt.indexOf("2. SESSION FIELDS"),
     );
   }
 
-  // [S15069/T1721] REPAIR. This test used to pin `{turn, tags:["lane-tag"]}` —
-  // v11's merged tag SET — which lane-model-v12 replaced with the two-sided
-  // form over a year of releases ago in prompt-time terms, and which the
-  // settlement note schema has refused ever since. The prompt kept teaching it
-  // because this test kept it green: a verbatim-string pin protects the STRING,
-  // not the CONTRACT, and it was pointed at a shape the tool cannot accept.
-  //
-  // The repair is not a new string. It is the test below it — the prompt is now
-  // checked AGAINST the tool description that defines the shape, so the two
-  // cannot drift apart again without one of them reddening.
-  test("the two entry forms are the ones the tool actually accepts, with the draft rule", () => {
-    const bullet = edgesBullet(renderPrompt());
+  test("the duty names the three acts and defers the class judgment to the rubric", () => {
+    const duty = dutyOne(renderPrompt());
 
-    expect(bullet).toContain('An entry is a bare address ("S15069/T7") — a DRAFT');
-    expect(bullet).toContain('`{ "turn": "S15069/T7", "tailTag": "a", "headTag": "b" }`');
-    expect(bullet).toContain("`tailTag` names the lane THIS turn writes");
-    expect(bullet).toContain("`headTag` the lane the cited turn sits in");
-    // A draft is writable but not committable — the half of the rule whose
-    // absence let a run finish its whole pass before commit told it otherwise.
-    expect(bullet).toContain("does NOT survive `commit`");
-    expect(bullet).toContain("error E6");
-    // Each side answers to ITS OWN endpoint: identity is (segment, tag), so the
-    // v11 reading — one tag set that both endpoints must carry — is gone.
-    expect(bullet).toContain("checked against ITS OWN endpoint");
-    // FINAL REVIEW, FINDING 1: the member tags are stage 1's and already
-    // written — an unplaceable side is a fact about the partition, not a tags
-    // write for this pass to make.
-    expect(bullet).toContain("tags — stage 1 wrote those, so a side you cannot place is a fact about");
-    expect(bullet).not.toContain("write the member turns' tags first");
-
-    // The retired v11 shape must not come back.
-    expect(bullet).not.toContain('"tags": ["lane-tag"]');
-    expect(bullet).not.toContain("UNTAGGED edge acting on the cited turn itself");
+    expect(duty).toContain("the DECLARE, FILL and REVIEW acts");
+    expect(duty).toContain("the procedure above describes");
+    expect(duty).toContain("Rubric's **三个关系类** entry above; this prompt states only the");
+    expect(duty).toContain("call shape");
   });
 
-  // The drift guard the verbatim pin above could not be: both texts are
-  // rendered from source, and the SHAPE WORDS the tool contract uses must
-  // appear in the prompt that teaches it. A future edit to either side that
-  // renames a side field reddens here instead of shipping a prompt that
-  // teaches an unwritable call.
-  test("the prompt's edge shape agrees with the settlement tool's own contract", () => {
-    const bullet = edgesBullet(renderPrompt());
-    for (const word of ["tailTag", "headTag", "E6"]) {
+  test("a lane side is the endpoint's own lane set, and an undeclarable side is a fact about the partition", () => {
+    const duty = dutyOne(renderPrompt());
+
+    expect(duty).toContain("a lane side is what an endpoint's own lane set decides");
+    expect(duty).toContain("A side you cannot declare");
+    expect(duty).toContain("since a lane's identity is (task, tag)");
+    expect(duty).toContain("is a fact about the partition, not a tags write to make: leave the");
+    expect(duty).toContain("side to derive, or retract the row.");
+    expect(duty).not.toContain("write the member turns' tags first");
+  });
+
+  test("the entry forms are the ones the tool accepts: bare address, coverage on correct, declare riding the call", () => {
+    const duty = dutyOne(renderPrompt());
+
+    expect(duty).toContain("`note`'s correct/verify/use fields — the three-class");
+    expect(duty).toContain('An entry is a bare address ("S15069/T7"); a `correct`');
+    expect(duty).toContain('"coverage": "full" }` or `"partial"`. A `correct` without it is');
+    expect(duty).toContain("refused naming the missing bit; a `verify` or `use` carrying one is");
+    expect(duty).toContain("refused too.");
+    expect(duty).toContain("`declare` entries ride the same call, after the edges it");
+    expect(duty).toContain("writes, and are the only way a stored side moves");
+    // The retired forms must not come back.
+    expect(duty).not.toContain("a DRAFT");
+    expect(duty).not.toContain("both sides UNSETTLED");
+    expect(duty).not.toContain('"tailTag": "a", "headTag": "b"');
+    expect(duty).not.toContain("does NOT survive `commit`");
+    expect(duty).not.toContain("checked against ITS OWN endpoint");
+    expect(duty).not.toContain('"tags": ["lane-tag"]');
+    expect(duty).not.toContain("UNTAGGED edge acting on the cited turn itself");
+  });
+
+  test("retraction is taught by pair with the mirror's class as precondition", () => {
+    const duty = dutyOne(renderPrompt());
+
+    expect(duty).toContain("The `retractCorrect`/`retractVerify`/`retractUse`");
+    expect(duty).toContain("mirrors delete the addressed PAIR's row, with the mirror's own class");
+    expect(duty).toContain("as the precondition — a pair now carrying a different class refuses,");
+    expect(duty).toContain("naming it.");
+    expect(duty).not.toContain("addressed placement's row of that CLASS");
+    expect(duty).not.toContain("legacy rows stay deletable");
+  });
+
+  test("the prompt's shape words agree with the settlement tool's own contract", () => {
+    const duty = dutyOne(renderPrompt());
+    for (const word of ["`declare`", "coverage", "retractCorrect"]) {
       expect({ word, inContract: SETTLEMENT_NOTE_TOOL_DESCRIPTION.includes(word) }).toEqual({
         word,
         inContract: true,
       });
-      expect({ word, inPrompt: bullet.includes(word) }).toEqual({ word, inPrompt: true });
+      expect({ word, inPrompt: duty.includes(word) }).toEqual({ word, inPrompt: true });
     }
-    // And the retired one appears in NEITHER.
+    // And the retired shapes appear in NEITHER.
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain('"tags": ["lane-tag"]');
+    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("{turn, tailTag, headTag}");
+    expect(duty).not.toContain("{turn, tailTag, headTag}");
   });
 
-  // FINAL REVIEW, FINDING 1: FORM LANES is GONE. Forming the window's lanes
-  // is stage 1's judgment and the transition froze it; a step that told this
-  // pass to continue-or-`create` a lane was teaching it to re-open the very
-  // partition its own worklist is a snapshot of, with a `create` verb the
-  // toolset no longer even offers.
-  test("FORM LANES is gone: the worklist says which lanes exist, and no step forms one", () => {
-    const prompt = renderPrompt();
-    const bullet = edgesBullet(prompt);
+  test("lane_check is the review's repair queue, and every repair is a declare or a retraction", () => {
+    const duty = dutyOne(renderPrompt());
 
-    expect(bullet).not.toContain("FORM LANES");
-    expect(bullet).not.toContain("`create` a fresh one only when none fits");
-    expect(bullet).not.toContain("no set to discriminate");
-    expect(bullet).not.toContain("discriminating exact tag set");
-    expect(bullet).not.toContain("proper-superset branch");
-    // What replaced it: the members are already tagged, and the frozen
-    // worklist is the answer to "which lane is this turn in".
-    expect(bullet).toContain("members are already tagged and the frozen worklist is which lanes");
-    expect(prompt).toContain("YOUR WORKLIST (frozen by the stage-1 transition");
+    expect(duty).toContain("after your first complete pass, call `lane_check`. ERRORS are a");
+    expect(duty).toContain("repair queue for the graph you already judged, never the work plan;");
+    expect(duty).toContain("every repair is a `declare` entry or a retraction. WARNINGS inform");
+    expect(duty).toContain("the topology review and never compel a write.");
   });
 
-  // lane-model-v12 ticket 04 deleted the lane-shape error class (E5), so
-  // CHECK AND REPAIR no longer states a one-source/one-sink law at all. Its
-  // two earlier readings — "a fork opens a BRANCH (a proper-superset tag set
-  // rooted at the parent node)" and then "a fork is a shape error (E5)" —
-  // are both retired; a fresh declared tag survives only as advice.
-  test("CHECK AND REPAIR states no lane-shape law — a fork is neither a branch nor an error", () => {
-    const bullet = edgesBullet(renderPrompt());
+  // lane-model-v12 ticket 04 deleted the lane-shape error class (E5), so the
+  // review states no one-source/one-sink law at all. Its two earlier readings
+  // — "a fork opens a BRANCH" and "a fork is a shape error (E5)" — stay retired.
+  test("no lane-shape law — a fork is neither a branch nor an error", () => {
+    const duty = dutyOne(renderPrompt());
 
-    expect(bullet).toContain("A lane's shape is no longer policed");
-    expect(bullet).toContain("usually clearer under a fresh, independently declared tag.");
-    expect(bullet).not.toContain("opens a BRANCH");
-    expect(bullet).not.toContain("proper-superset tag set rooted at the parent node");
-    expect(bullet).not.toContain("(E5)");
-    expect(bullet).not.toContain("one source, one sink");
+    expect(duty).toContain("A lane's shape is no");
+    expect(duty).toContain("longer policed");
+    expect(duty).toContain("fresh, independently declared tag.");
+    expect(duty).not.toContain("opens a BRANCH");
+    expect(duty).not.toContain("proper-superset tag set rooted at the parent node");
+    expect(duty).not.toContain("(E5)");
+    expect(duty).not.toContain("one source, one sink");
+    expect(duty).not.toContain("FORM LANES");
   });
 
-  // T1466 (RB hand-off): the relations gate is enforced in `db/write-gate.ts`
-  // (`checkRelationsGate`) and refuses an edge write from a run that never
-  // read the citing turn's current relation set. Ticket 07: the read now
-  // comes from BATCH STEP 1's own audit rather than a "Step 0" label, and a
-  // stale one (a turn audited in an earlier batch, edited since) is re-read,
-  // never guessed.
-  test("an edge write is taught to need the citing turn's current relations read", () => {
-    const bullet = edgesBullet(renderPrompt());
+  test("the two lane_check-warning teachings survive: the severed lane and phase connectivity", () => {
+    const duty = dutyOne(renderPrompt());
 
-    expect(bullet).toContain("An edge write");
-    expect(bullet).toContain("also needs your own current read of the citing turn's RELATIONS — the");
-    expect(bullet).toContain("batch reads earn it, your own writes keep it current, and a");
-    expect(bullet).toContain("stale one is re-read, never guessed.");
-  });
-
-  // Ticket 07: the old seven-step PER-THREAD procedure is gone, replaced by a
-  // procedure that runs ONCE, after the last batch, over the ledger BATCH STEP
-  // 2/3 built. FINAL REVIEW, FINDING 1 took its FORM LANES step out; and
-  // relation-vocabulary-v13 ticket 02 took DECLARE CONVERGENCE out with the
-  // `indexes` word itself (user ruling S15069/T2306), so it is THREE steps.
-  test("the three relation steps are present and ordered, ending in check-and-repair", () => {
-    const bullet = edgesBullet(renderPrompt());
-
-    const steps = [
-      "1. DISPOSE every ledger candidate:",
-      "2. JUDGE AND WRITE.",
-      "3. CHECK AND REPAIR.",
-    ];
-    let cursor = -1;
-    for (const step of steps) {
-      const at = bullet.indexOf(step);
-      expect(at).toBeGreaterThan(cursor);
-      cursor = at;
-    }
-
-    expect(bullet).toContain("All relation writes happen HERE, after the last batch, in three steps:");
-    // DISPOSE: uncertainty never reads as CONVERGED — the trial's own root
-    // cause for premature closure. The word was OPEN until lane state retired;
-    // it now says STILL RUNNING, because OPEN named a lane state that no
-    // longer exists and would have kept teaching one.
-    expect(bullet).toContain("Uncertainty is STILL RUNNING, never");
-    expect(bullet).toContain("CONVERGED.");
-    // ... and the bullet says out loud that these three are dispositions of the
-    // candidate, not a state the lane carries.
-    expect(bullet).toContain("a state the lane carries");
-    expect(bullet).not.toContain("Uncertainty is OPEN");
-    // JUDGE AND WRITE: the stored word is evidence of nothing; the class
-    // test re-runs fresh every time.
-    expect(bullet).toContain("ignore the stored relation word and run the class test as if no");
-    expect(bullet).toContain("edge existed — the old word is evidence of nothing.");
-    // DECLARE CONVERGENCE is DELETED (relation-vocabulary-v13 ticket 02, user
-    // ruling S15069/T2306): `indexes` is gone as a word, convergence is no
-    // longer declared, and a step teaching a run to write one would be a step
-    // whose every call is refused. Pinned as an ABSENCE, in both halves.
-    expect(bullet).not.toContain("DECLARE CONVERGENCE");
-    expect(bullet).not.toContain("never convergence evidence");
-    // The lane-state clause is gone in BOTH its halves.
-    expect(bullet).not.toContain("leaving a lane honestly OPEN is normal life");
-    expect(bullet).not.toContain("never closure evidence");
-    // CHECK AND REPAIR is the whole reason a settlement window meets E1 at
-    // all — repairs repeat step 3, never a fresh work plan.
-    expect(bullet).toContain("ERRORS are a repair queue for the graph you already");
-    expect(bullet).toContain("judged, never the work plan; every repair repeats step 2.");
-    // THE PRECEDENCE, the principal-result rule and the coverage bit ride in
-    // JUDGE AND WRITE — a mutation dropping any one of them drives this red.
-    expect(bullet).toContain("BOTH ENDS ARE");
-    expect(bullet).toContain("PRINCIPAL RESULTS");
-    expect(bullet).toContain("Details do not");
-    expect(bullet).toContain("earn edges. Then run the PRECEDENCE, in order:");
-    expect(bullet).toContain("correct and verify are SUBSETS of use, and the slot stores the");
-    expect(bullet).toContain("most specific class");
-    expect(bullet).toContain("correct carries a coverage bit: `full` when the cited principal");
-    expect(bullet).toContain("stands as a premise.");
-    expect(bullet).toContain("VERIFY IS NARROW");
-    expect(bullet).toContain("the DOMINANT");
-    expect(bullet).toContain("action wins, not the safer label.");
-    // The sufficiency law, as a WRITING law with a warning-only lint.
-    expect(bullet).toContain("SUFFICIENT CITATION");
-    expect(bullet).toContain("This is a writing law, not a machine verdict");
-    // ARM B KEEPS the sparsity rule (ticket 04 deferred, ruling S15069/T2391).
-    expect(bullet).toContain("through existing edges is not re-drawn");
-  });
-
-  // T1466 (finding P2-5): the routing for a turn that TESTED the cited claim
-  // carries forward into JUDGE AND WRITE (step 3 of the new five) — a
-  // verification must never fall back to `extends`, the nearest neighbour a
-  // model reaches for.
-  test("JUDGE AND WRITE routes a supporting check to verify and a contrary one to correct, never use", () => {
-    const bullet = edgesBullet(renderPrompt());
-
-    expect(bullet).toContain("negated or limited = correct;");
-    expect(bullet).toContain("confirmed or supported = verify.");
-    // The two nearest-neighbour traps the measurement found, restated in the
-    // new vocabulary: a completed blocker is `use` (not a correction), and a
-    // "confirms" about a DETAIL is `use` (not `verify`).
-    expect(bullet).toContain("a blocker satisfied by doing the work is completion (use),");
-    expect(bullet).toContain("DETAIL of the cited turn is use, not verify.");
-    expect(bullet).not.toContain("refutes");
-  });
-});
-
-/**
- * SETTLEMENT-ERGONOMICS TICKET 02 (spec D2, `.scratch/settlement-ergonomics/`
- * — not the lane-declaration ticket of the same number): a real settlement
- * run (job 98, S15069/T901-1000) failed a dozen edge writes with "the
- * relations of S15069/T9xx were not delivered to this run" even though the
- * prompt already stated the read requirement as prose (the edges bullet's
- * own "An edge write also needs your own current read of the citing turn's
- * RELATIONS" sentence, pinned above). The fix is a copyable CALL SEQUENCE,
- * seated right before the edges bullet begins, and it has to dodge two traps
- * an example can fall into on its own: teaching a read whose default budget
- * truncates a high in-degree turn's relations (a truncated field earns no
- * complete-read grant, so the write right after it would be refused by the
- * same gate the sequence exists to satisfy), and offering the fan-out lane
- * route (`timeline(id="E<n>/L*")`), which accepts no budget parameter at all
- * and is itself a candidate to blow the tool-result cap.
- */
-describe("ticket 02 (settlement-ergonomics D2) — the edge write call sequence", () => {
-  function callSequenceText(prompt: string): string {
-    const start = prompt.indexOf("   - before any edge write, run this call sequence");
-    const end = prompt.indexOf("   - edges: `note`'s", start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return prompt.slice(start, end);
-  }
-
-  test("gives a complete, addressed recall call for the citing turn's relations, with an EXPLICIT turn budget well above the default", () => {
-    const sequence = callSequenceText(renderPrompt());
-
-    expect(sequence).toContain(
-      '`recall(id="S15069/T7", filter={fields:["relations"]},',
-    );
-    expect(sequence).toContain("turn=2000)`");
-    expect(sequence).toContain("EXPLICIT, large `turn`");
-
-    // The number itself must actually be large relative to the default per-
-    // item budget — a literal-string pin alone would stay green even if the
-    // prose forgot to say WHY 2000 was chosen, but this ties the two
-    // together: whatever number is printed, it must clear the truncation
-    // threshold by a wide margin.
-    const budgetMatch = sequence.match(/turn=(\d+)\)/);
-    expect(budgetMatch).not.toBeNull();
-    expect(Number(budgetMatch![1])).toBeGreaterThan(DEFAULT_TURN_TOKEN_BUDGET * 5);
-  });
-
-  test("states the truncation trap and its recovery: raise the budget and re-read", () => {
-    const sequence = callSequenceText(renderPrompt());
-
-    expect(sequence).toContain("renders a high in-degree turn's relations");
-    expect(sequence).toContain("TRUNCATED, and a truncated field earns no complete-read grant");
-    expect(sequence).toContain("refused by the SAME gate");
-    expect(sequence).toContain("truncated, raise the budget and re-read");
-  });
-
-  test("teaches only the single-lane timeline form; the fan-out E<n>/L* route never appears anywhere in the prompt", () => {
-    const prompt = renderPrompt();
-    const sequence = callSequenceText(prompt);
-
-    expect(sequence).toContain('`timeline(id="E<n>/L<k>")`');
-    expect(sequence).toContain("ONE lane, singular");
-
-    // Not merely absent from this bullet — absent from the WHOLE rendered
-    // prompt, since the failure mode is an example the model could copy from
-    // anywhere in the text.
-    expect(prompt).not.toContain("E<n>/L*");
-    expect(prompt).not.toContain("/L*");
+    expect(duty).toContain("IT BLOCKS NOTHING and there is no disposition to file.");
+    expect(duty).toContain("A GENUINE STITCH SELF-EVIDENCES");
+    expect(duty).toContain("leave the fracture standing and commit");
+    expect(duty).toContain("A landing turn (implement/fix/refactor) should be traceable");
+    expect(duty).toContain("EDGE FIRST: prefer writing the edge that already exists in");
+    expect(duty).toContain("`typeReason` on the `note` call");
   });
 });
 
@@ -1279,14 +1093,14 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // Authority statement.
     expect(prompt).toContain("## Your authority");
     expect(prompt).toContain("Your pen is the EDGES of the turns in your writable set");
-    // Procedure (ticket 07): the batched workstations replaced the old
-    // supply/correct/retract triad — see the Block A describe below for the
-    // full pin set.
+    // Procedure (main-agent-edges ticket 06): the shared edge pass replaced
+    // ticket 07's batched workstations — see the ticket 06 describe above for
+    // the full pin set.
     expect(prompt).toContain("## Procedure");
-    expect(prompt).toContain("Work the WHOLE writable set in chronological batches of ten turns");
-    expect(prompt).toContain("BATCH STEP 1 — READ");
-    expect(prompt).toContain("BATCH STEP 2 — CONTENT CANDIDATES");
-    expect(prompt).toContain("BATCH STEP 3 — BACK-LINK");
+    expect(prompt).toContain("THE EDGE PASS — DECLARE, FILL, REVIEW.");
+    expect(prompt).toContain("READ ONCE.");
+    expect(prompt).not.toContain("Work the WHOLE writable set in chronological batches of ten turns");
+    expect(prompt).not.toContain("BATCH STEP");
     // Commit as the terminal check, last.
     expect(prompt.indexOf("## Your task")).toBeLessThan(prompt.indexOf("## Your authority"));
     expect(prompt.indexOf("## Your authority")).toBeLessThan(prompt.indexOf("## Procedure"));
@@ -1355,13 +1169,16 @@ describe("the turn-scope reconciliation teaching left with the duty", () => {
  * call the agent might make once, after its own first pass) retires with
  * the per-window shape it belonged to.
  */
-describe("ticket 07 — lane_check is forbidden inside the batch loop; the check lands in Block B instead", () => {
-  test("the procedure forbids calling lane_check during the batch loop", () => {
+describe("ticket 07 — lane_check lands in the review, and the retired procedure wording stays gone", () => {
+  // MAIN-AGENT-EDGES TICKET 06: the batch loop is gone, so there is no loop
+  // to forbid `lane_check` inside; the call is taught once, in the REVIEW.
+  test("lane_check is taught in the review, after the first complete pass", () => {
     const prompt = renderPrompt();
     const procedure = prompt.slice(prompt.indexOf("## Procedure"), prompt.indexOf("## Duties"));
 
-    expect(procedure).toContain("Do not call `lane_check` during the");
-    expect(procedure).toContain("batch loop.");
+    expect(procedure).not.toContain("Do not call `lane_check` during the");
+    expect(procedure).toContain("Then `lane_check`: E6 and E4");
+    expect(prompt).toContain("after your first complete pass, call `lane_check`");
   });
 
   // ABSENCE pin: the retired per-window advisory sentence and the retired
@@ -1398,12 +1215,15 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
   test("the prompt teaches the retraction mirrors", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("`retractCorrect`/`retractVerify`/`retractUse` mirrors delete the");
-    expect(prompt).toContain("addressed placement's row of that CLASS");
-    // The half that keeps a legacy row deletable at all — the E2 deadlock is
-    // what a mirror that only reached the NEW vocabulary would re-arm.
-    expect(prompt).toContain("retired seven-word vocabulary included");
-    expect(prompt).toContain("addresses (legacy rows stay deletable)");
+    // main-agent-edges ticket 03 (T2432 P1): a retraction addresses the PAIR
+    // and the mirror's class is a precondition; "the addressed placement's
+    // row" and "legacy rows stay deletable" described the retired identity
+    // (side tags left the address, the wordless rows are deleted at cutover).
+    expect(prompt).toContain("The `retractCorrect`/`retractVerify`/`retractUse`");
+    expect(prompt).toContain("mirrors delete the addressed PAIR's row, with the mirror's own class");
+    expect(prompt).toContain("as the precondition");
+    expect(prompt).not.toContain("addressed placement's row of that CLASS");
+    expect(prompt).not.toContain("legacy rows stay deletable");
     // Ticket 15: the membership `create` verb this test used to pin alongside
     // them retired, and the roster advice it carried went with it.
     expect(prompt).not.toContain('`action="create"`');
@@ -1424,7 +1244,8 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
     // The authored bullet's own field list, exact — a class dropped from it
     // (or a retired word re-added) fails here.
     expect(prompt).toContain("`note`'s correct/verify/use fields — the three-class");
-    expect(prompt).toContain('or `"partial"`. A `correct` without it is refused naming the missing');
+    expect(prompt).toContain('or `"partial"`. A `correct` without it is');
+    expect(prompt).toContain("refused naming the missing bit");
     expect(prompt).not.toContain("collects");
     expect(prompt).not.toContain("out-of-branch");
   });
@@ -1573,644 +1394,14 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
     expect(words(renderPrompt()).includes(words(body))).toBe(true);
   });
 
-  // Block A, WITH lane-model-v12 ticket 15's ONE amendment applied to the
-  // archived text before comparison — the same narrowed-guard shape block B
-  // has carried since lane-declaration ticket 08. BATCH STEP 1's membership
-  // clause named `reassign`, a verb ticket 15 retired; the criterion it states
-  // is unchanged, only the move it names. A drift anywhere else in block A
-  // still fails here.
-  test("block A appears as a contiguous word sequence once ticket 15's amendment is applied", () => {
-    const section = readAuthoredSections()[0]!;
-    const body = words(
-      section
-        .slice(section.indexOf("\n") + 1)
-        .replace(/WRITABLE SET:\s*\{WRITABLE_SET\}\s*$/m, "")
-        .trim(),
-    );
-
-    const amended = body.replace(
-      words(
-        "does membership match content against the roster (homeless is legal " +
-          "by itself — reassign only when one destination is obvious from " +
-          "content, never from adjacency, a shared project noun or a checker " +
-          "warning). Turn-local corrections — notes, type, tags, membership — " +
-          "may land now.",
-      ),
-      words(
-        "does the task tag in its `tags` match content against the roster " +
-          "(unowned is legal by itself — write a task tag only when one " +
-          "destination is obvious from content, never from adjacency, a shared " +
-          "project noun or a checker warning). Turn-local corrections — notes, " +
-          "type, tags — may land now.",
-      ),
-    );
-    // FINAL REVIEW, FINDING 1: BATCH STEP 1 stops being a TURN AUDIT. Note,
-    // type and task tag are turn-scope duties and stage 1 discharged them in a
-    // context whose only job was that judgment; re-auditing them here spends
-    // the window twice and invites a pass that believes it still decides the
-    // partition. The READ survives, because edges are judged on it.
-    const purged = amended
-      .replace(words("BATCH STEP 1 — TURN AUDIT."), words("BATCH STEP 1 — READ."))
-      .replace(
-        words(
-          "Audit EVERY turn independently, whether or not anything flags it: does " +
-            "the note misread its turn; does the type honor the Ruling supplement " +
-            "(a user ruling or veto that landed here adds `design` or `correction`, " +
-            "and `discuss` cannot remain); does the task tag in its `tags` match " +
-            "content against the roster (unowned is legal by itself — write a task " +
-            "tag only when one destination is obvious from content, never from " +
-            "adjacency, a shared project noun or a checker warning). Turn-local " +
-            "corrections — notes, type, tags — may land now.",
-        ),
-        words(
-          "Read EVERY turn, whether or not anything about it looks interesting: " +
-            "this is the material your edges are judged on, and the relations read " +
-            "is what licenses writing them. What you are NOT doing here is auditing " +
-            "the note, the type or the tags — the first pass settled those, and " +
-            "re-judging them spends this window on work it has already had.",
-        ),
-      );
-
-    // The guard against a mistyped `.replace()`: an unmatched needle would
-    // leave `amended` equal to `body` and silently re-check the RETIRED text.
-    // RELATION-VOCABULARY-V13 TICKET 02: `indexes` is deleted from the write
-    // vocabulary (user ruling S15069/T2306), so BATCH STEP 2 stops naming it —
-    // a step that withholds a parameter no call may carry teaches the
-    // parameter.
-    const v13 = purged.replace(
-      words("write no relation, no lane tag, no `indexes` yet."),
-      words("write no relation and no lane tag yet."),
-    );
-    expect(amended).not.toBe(body);
-    expect(purged).not.toBe(amended);
-    expect(v13).not.toBe(purged);
-    expect(words(renderPrompt()).includes(v13)).toBe(true);
-  });
-
-  // Block B, WITH lane-declaration ticket 08's three amendments applied to
-  // the archived text before comparison — the same guard shape as above,
-  // narrowed to admit exactly the known, named amendments and nothing else.
-  // A drift anywhere else in Block B (a hand-edit that missed the header
-  // comment, or a future edit to the archive) still fails this test.
-  //
-  // Word-normalized BEFORE the three `.replace()` calls (not after, unlike
-  // the plain block-A/C check above): the archived file's own indentation
-  // (2 spaces on the bullet, 5 on numbered sub-items) makes an exact
-  // multi-line literal match brittle, and `words()` is idempotent, so
-  // normalizing first costs nothing and removes that fragility entirely.
-  test("block B appears as a contiguous word sequence once every recorded amendment is applied", () => {
-    const section = readAuthoredSections()[1]!;
-    const body = words(section.slice(section.indexOf("\n") + 1).trim());
-
-    const amended = body
-      // Lane-model v12 ticket 02, amendment A: the field list loses the
-      // merged eighth word.
-      .replace(
-        words("verifies/refutes fields. An entry is a bare address"),
-        words("verifies fields. An entry is a bare address"),
-      )
-      // Lane-model v12 ticket 02, amendment B: step 3's word discriminator.
-      // `refutes` is gone, so a check that came out AGAINST the cited claim
-      // needs somewhere to go or a run reaches for `extends` — the failure
-      // T1466 measured. The "same phase" and "from another phase" qualifiers
-      // go with the phase axis.
-      .replace(
-        words(
-          "narrows; replaced outright = override; merely used, same phase = " +
-            "consume; a check THIS turn produced, for or against the cited " +
-            "conclusion, is verifies or refutes, never extends; an evidence " +
-            "product cited from another phase takes `grounds`. Shared topic,",
-        ),
-        words(
-          "narrows; replaced, withdrawn or disproved outright = override; " +
-            "merely used = consume; a check THIS turn produced that SUPPORTS the " +
-            "cited conclusion is verifies, never extends — one that goes against " +
-            "it is override; work this turn stands or falls with takes " +
-            "`grounds`. Shared topic,",
-        ),
-      )
-      // [S15069/T1721] amendment: THE ENTRY FORMS THEMSELVES.
-      //
-      // The archived text below is v11's — a bare address meaning "untagged,
-      // acting on the cited turn" and a tagged entry carrying a merged tag SET.
-      // lane-model-v12 replaced both with a draft and a TWO-SIDED placement,
-      // and the settlement note schema has accepted only those since. This
-      // guard is why the prompt kept teaching the retired pair for so long:
-      // it holds its own copy of the authored text and asserts the prompt
-      // still contains it, so correcting the prompt reddened the guard and
-      // leaving it wrong kept everything green. A verbatim archive protects
-      // the STRING; only an amendment recorded here can move the contract.
-      .replace(
-        words(
-          "verifies fields. An entry is a bare address (\"S15069/T7\") — an " +
-            "UNTAGGED edge acting on the cited turn itself — or a tagged entry " +
-            "`{ \"turn\": \"S15069/T7\", \"tags\": [\"lane-tag\"] }` acting on the named " +
-            "LANE. extends/narrows accept ONLY the tagged form: continuation names " +
-            "its line. An edge's tags must already sit on BOTH endpoint turns' own",
-        ),
-        words(
-          "verifies fields. An entry is a bare address (\"S15069/T7\") — a DRAFT, " +
-            "both sides UNSETTLED — or a TWO-SIDED entry " +
-            "`{ \"turn\": \"S15069/T7\", \"tailTag\": \"a\", \"headTag\": \"b\" }`, which " +
-            "places each END in a lane: `tailTag` names the lane THIS turn writes " +
-            "FROM, `headTag` the lane the cited turn sits in. The same word on both " +
-            "sides is ONE lane spanning the edge; two different words are a legal " +
-            "CROSSING; the same word in two different tasks is a crossing too, " +
-            "since a lane's identity is (task, tag). A draft is ACCEPTED when you " +
-            "write it but does NOT survive `commit` — every edge in your writable " +
-            "set with an empty side is error E6, and commit refuses while one " +
-            "remains. Place both sides before you finish, or retract the row. Each " +
-            "PLACED side is checked against ITS OWN endpoint: the lane must already " +
-            "be DECLARED in the task THAT endpoint belongs to, and the tag must " +
-            "already sit on that endpoint turn's own",
-        ),
-      )
-      .replace(
-        words(
-          "2. FORM LANES across all batches: merge fragments, choose the smallest " +
-            "discriminating exact tag set and one phase, resolve continuation " +
-            "versus proper-superset branch, and identify each lane's source, " +
-            "frontier and surviving core. Never the segment's own tags. A batch " +
-            "boundary contributes no topology — it is never a source, sink, " +
-            "branch point or convergence signal. A decision→delivery arc is TWO " +
-            "lanes, hinged by untagged cross-phase `grounds`.",
-        ),
-        words(
-          "2. FORM LANES across all batches: continue a fragment onto an " +
-            "EXISTING declared tag (check the task's own card, `recall`, for " +
-            // [S15069/T1738]: `declare` -> `create` here, inside ticket 08's own
-            // REPLACEMENT text rather than as a fourth amendment — the same
-            // sentence changing twice reads better as one current value than as
-            // a chain. The ARCHIVE side above is untouched, so the guard's
-            // needle still matches and `amended !== body` still has teeth.
-            "its declared lanes); `create` a fresh one only when none fits. Identity is " +
-            "`(task, ONE tag)` — no set to discriminate. " +
-            "Identify each lane's source, frontier and surviving core. Never " +
-            "the task's own tags. A batch boundary contributes no topology — " +
-            "it is never a source, sink or convergence signal. A lane is not " +
-            "phase-local: a decision→delivery arc may be ONE lane, continued " +
-            "across that boundary by any TAGGED edge.",
-        ),
-      )
-      // STAGED-SETTLEMENT TICKET 19, finding 3: the lane-shape amendment that
-      // stood here (archive "Keep each lane one source, one sink: diamonds
-      // that re-merge are fine; a fork the lane never re-joins opens a BRANCH
-      // — a proper-superset tag set rooted at the parent node." → the shipped
-      // "A lane's shape is no longer policed…") is RETIRED because the ARCHIVE
-      // now carries the shipped sentence directly. Ticket 15 retired the
-      // minimality law in the artifact only, leaving this source half teaching
-      // it; ticket 19 synced the two, so this amendment's needle no longer
-      // exists and the replacement is what the file already says. The
-      // severed-lane-teaching amendment below still matches — its needle was
-      // always this amendment's OUTPUT.
-      // lane-state-retirement ticket 01 amendment: STEP 4 ITSELF.
-      //
-      // The archived step asked a question about a LANE — is this lane
-      // finished, and is it honest to leave it OPEN — which a bounded window
-      // cannot answer; answering it honestly meant declining, which is why
-      // `index` was used ONCE in 819 edges. It now asks the question the
-      // window CAN answer, about a TURN, and carries the granularity rule the
-      // rubric gained in the same batch.
-      .replace(
-        words(
-          "4. DECLARE CONVERGENCE. Only a candidate disposed CONVERGED writes a " +
-            "TAGGED `indexes`, from its actual last node to the surviving core. " +
-            "Work merely stopping, a batch ending, or an existing declaration is " +
-            "never closure evidence — producing the declaration is your job, and " +
-            "leaving a lane honestly OPEN is normal life.",
-        ),
-        words(
-          "4. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this " +
-            "turn close out a stretch of work — a design settled, an " +
-            "implementation landed, a batch verified, a version shipped? If it " +
-            "did, it writes an `indexes` citing the nodes that genuinely " +
-            "produced that ONE result. A lane may converge more than once — " +
-            "each finished stretch earns its own declaration, and an earlier " +
-            "one neither blocks nor substitutes for a later one. " +
-            "CITE THE BATCH — one `/to-spec` run, one release. A single cited " +
-            "node means the phase was cut too fine; `lane_check` says so as a " +
-            "WARNING, and no write refuses on it, so finish the batch rather " +
-            "than trimming it. Work merely stopping, or a batch ending, is " +
-            "never convergence evidence — producing the declaration is your " +
-            "job, and having nothing to declare this round is normal life.",
-        ),
-      )
-      // lane-state-retirement follow-up amendment: STEP 1'S TRIAGE WORD.
-      //
-      // Ticket 01 rewrote step 4 and left step 1 alone, so the triage still
-      // read NOT A LANE / OPEN / CONVERGED — and OPEN was a lane state that
-      // ticket 01 had just deleted. A word that names a retired concept keeps
-      // teaching it however carefully the rest of the prompt avoids it, so the
-      // word moves to one that describes the CANDIDATE, and the bullet now
-      // says out loud that these three are dispositions rather than a state
-      // the lane carries.
-      .replace(
-        words(
-          "1. DISPOSE every ledger candidate: NOT A LANE, OPEN, or CONVERGED — " +
-            "exactly one each. Uncertainty is OPEN, never CONVERGED. NOT A LANE",
-        ),
-        words(
-          "1. DISPOSE every ledger candidate: NOT A LANE, STILL RUNNING, or " +
-            "CONVERGED — exactly one each. Uncertainty is STILL RUNNING, never " +
-            "CONVERGED. These three describe THIS CANDIDATE at this moment, not " +
-            "a state the lane carries: a lane has none, so a CONVERGED " +
-            "disposition closes nothing and a later member contradicts nothing. " +
-            "NOT A LANE",
-        ),
-      )
-      // Severed-lane-teaching ticket 01 (user ruling 2026-08-27): step 5
-      // (CHECK AND REPAIR) gains one instruction, appended after its
-      // existing close — the earlier "Keep each lane..." amendment above
-      // already rewrote that close, so this needle matches the OUTPUT of
-      // that amendment, not the raw archive.
-      .replace(
-        words(
-          "write. A lane's shape is no longer policed: a fork the lane never " +
-            "re-joins is not an error, though an independent line of work is " +
-            "usually clearer under a fresh, independently declared tag.",
-        ),
-        words(
-          "write. A lane's shape is no longer policed: a fork the lane never " +
-            "re-joins is not an error, though an independent line of work is " +
-            "usually clearer under a fresh, independently declared tag. A lane " +
-            "this window wrote a member or edge into owes more than a read of " +
-            "the WARNING: when Report 2 shows it SEVERED within the scope " +
-            "view, read the disconnected pieces' candidate turns to their " +
-            "full text — the same untruncated read any edge write already " +
-            "requires — and either write the stitching edge a genuine " +
-            "use-relation supports (adjacency is not use, and a chronology " +
-            "bridge invented to silence the warning is worse than the " +
-            "warning) or name, in your final reply, the components and why " +
-            "they stand apart. A lane this window never touched owes nothing " +
-            "here.",
-        ),
-      )
-      // Severed-lane ticket 02 amendment: the teaching-only sentence above
-      // UPGRADES to the mandatory-disposition mechanism (stitch
-      // self-evidences, or `remember(justify, …)` bound to a read receipt +
-      // full-content grant), and phase-connectivity ticket 01 appends its
-      // own report-only teaching immediately after — see
-      // note-settlement-prompt.ts's own file-header comments for both.
-      .replace(
-        words(
-          "A lane this window wrote a member or edge into owes more than a " +
-            "read of the WARNING: when Report 2 shows it SEVERED within the " +
-            "scope view, read the disconnected pieces' candidate turns to " +
-            "their full text — the same untruncated read any edge write " +
-            "already requires — and either write the stitching edge a " +
-            "genuine use-relation supports (adjacency is not use, and a " +
-            "chronology bridge invented to silence the warning is worse than " +
-            "the warning) or name, in your final reply, the components and " +
-            "why they stand apart. A lane this window never touched owes " +
-            "nothing here.",
-        ),
-        words(
-          "A lane this window wrote a member or edge into owes more than a " +
-            "read of the WARNING: when Report 2 shows it SEVERED within the " +
-            "scope view, EDGE FIRST — read the disconnected pieces' candidate " +
-            "turns to their full text (page through the lane with " +
-            "`recall(id=\"E<n>/#<tag>\")` until every page is covered — a " +
-            "partial read does not qualify) and write the stitching edge a " +
-            "genuine use-relation supports; adjacency is not use, and a " +
-            "chronology bridge invented to silence the warning is worse than " +
-            "the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
-            "next `lane_check` no longer reports that fracture, and nothing " +
-            "further is owed for it. If no stitch is genuine, call " +
-            "`remember(justify, id, tag, representative, otherRepresentative, " +
-            "reason)` naming BOTH components' current representative turns " +
-            "(lane_check's SEVERED report names them) and why none of the " +
-            "seven relation words applies — refused unless you have fully " +
-            "recalled the lane AND hold a full-content grant on " +
-            "`otherRepresentative`, which is what makes \"you read it first\" " +
-            "checkable rather than merely asked for. `commit` REFUSES while " +
-            "any fracture this window touched carries neither a stitch nor a " +
-            "justify; a lane this window never touched owes nothing here, and " +
-            "a topology change (your own later stitch, a further split) " +
-            "invalidates an old justify automatically. " +
-            "A landing turn (implement/fix/refactor) should be traceable, by " +
-            "a directed walk along its own out-edges (any of the seven " +
-            "words, an unbounded hop count, crossing lanes and tasks freely), to a basis " +
-            "node (design/correction/measure/research/review) — its execution " +
-            "basis. EDGE FIRST: prefer writing the edge that already exists in " +
-            "the work over retyping the turn. Only retype a landing turn to " +
-            "ADD a basis word when its OWN content genuinely set or revised a " +
-            "commitment or carries the finding — the ACCURATE word (a " +
-            "measurement adds \"measure\", an investigation \"research\", a " +
-            "review finding \"review\"), never a default \"design\"/ " +
-            "\"correction\" for convenience. A compound retype requires " +
-            "`typeReason` on the `note` call — the accurate basis and why — " +
-            "and is recorded; a landing turn with genuinely no external " +
-            "upstream is itself the compound, at zero hops.",
-        ),
-      )
-      // SETTLEMENT-GATE-TAXONOMY TICKET 04 amendment (user ruling
-      // [S15069/T2274]): the mandatory-disposition mechanism above is WITHDRAWN
-      // — a severed lane is a warning naming its stitch target, `justify` is
-      // never required, and both round-trip-buying moves are named and
-      // forbidden. Job 166 was abandoned after 21 refused commits on the
-      // sentence this replaces. The phase-connectivity paragraph that follows
-      // it is untouched, which is why the needle stops where it does.
-      .replace(
-        words(
-          "A lane this window wrote a member or edge into owes more than a " +
-            "read of the WARNING: when Report 2 shows it SEVERED within the " +
-            "scope view, EDGE FIRST — read the disconnected pieces' candidate " +
-            "turns to their full text (page through the lane with " +
-            "`recall(id=\"E<n>/#<tag>\")` until every page is covered — a " +
-            "partial read does not qualify) and write the stitching edge a " +
-            "genuine use-relation supports; adjacency is not use, and a " +
-            "chronology bridge invented to silence the warning is worse than " +
-            "the warning. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
-            "next `lane_check` no longer reports that fracture, and nothing " +
-            "further is owed for it. If no stitch is genuine, call " +
-            "`remember(justify, id, tag, representative, otherRepresentative, " +
-            "reason)` naming BOTH components' current representative turns " +
-            "(lane_check's SEVERED report names them) and why none of the " +
-            "seven relation words applies — refused unless you have fully " +
-            "recalled the lane AND hold a full-content grant on " +
-            "`otherRepresentative`, which is what makes \"you read it first\" " +
-            "checkable rather than merely asked for. `commit` REFUSES while " +
-            "any fracture this window touched carries neither a stitch nor a " +
-            "justify; a lane this window never touched owes nothing here, and " +
-            "a topology change (your own later stitch, a further split) " +
-            "invalidates an old justify automatically.",
-        ),
-        words(
-          "A lane this window wrote a member or edge into is named again at " +
-            "the end of `lane_check` and on your commit receipt when it is " +
-            "SEVERED, with the pieces' representative turns as a stitch " +
-            "target. IT BLOCKS NOTHING and there is no disposition to file. " +
-            "Write a stitching edge ONLY where the turns you are already " +
-            "reading make a genuine use-relation true; adjacency is not use, " +
-            "and a chronology bridge invented to clear the line is worse than " +
-            "the line. A GENUINE STITCH SELF-EVIDENCES — once written, the " +
-            "next `lane_check` no longer reports that fracture. If no stitch " +
-            "is genuine, leave the fracture standing and commit: do not call " +
-            "`justify`, do not re-read the lane to satisfy the warning, and do " +
-            "not delay the commit over it.",
-        ),
-      )
-      // SETTLEMENT-GATE-TAXONOMY TICKET 06 amendment (user ruling
-      // S15069/T2278): `justify` is RETIRED, so the sentence that forbade
-      // calling it names a verb that no longer exists. The two remaining
-      // round-trip-buying moves (re-reading the lane, delaying the commit) are
-      // still named and still forbidden — that is the part ticket 04 was
-      // actually buying, and it survives the verb.
-      .replace(
-        words(
-          "If no stitch is genuine, leave the fracture standing and commit: " +
-            "do not call `justify`, do not re-read the lane to satisfy the " +
-            "warning, and do not delay the commit over it.",
-        ),
-        words(
-          "If no stitch is genuine, leave the fracture standing and commit: " +
-            "do not re-read the lane to satisfy the warning, and do not delay " +
-            "the commit over it.",
-        ),
-      );
-
-    // FINAL REVIEW, FINDING 1: FORM LANES leaves the finalization pass, which
-    // is four steps now. Forming the window's lanes is stage 1's judgment and
-    // the transition froze it; a step telling this pass to continue-or-create
-    // one re-opens the partition its own worklist is a snapshot of, with a
-    // verb the toolset no longer offers. The member-tagging instructions go
-    // with it for the same reason.
-    const purged = amended
-      .replace(words("in five steps:"), words("in four steps:"))
-      .replace(
-        words(
-          "2. FORM LANES across all batches: continue a fragment onto an EXISTING " +
-            "declared tag (check the task's own card, `recall`, for its declared " +
-            "lanes); `create` a fresh one only when none fits. Identity is `(task, " +
-            "ONE tag)` — no set to discriminate. Identify each lane's source, " +
-            "frontier and surviving core. Never the task's own tags. A batch " +
-            "boundary contributes no topology — it is never a source, sink or " +
-            "convergence signal. A lane is not phase-local: a decision→delivery arc " +
-            "may be ONE lane, continued across that boundary by any TAGGED edge. " +
-            "3. JUDGE AND WRITE.",
-        ),
-        words("2. JUDGE AND WRITE."),
-      )
-      .replace(
-        words("(narrows). Tag the members first, then write only what the fresh judgment supports."),
-        words(
-          "(narrows). The members are already tagged and the frozen worklist is " +
-            "which lanes they sit in; write only what the fresh judgment supports.",
-        ),
-      )
-      .replace(
-        words("4. DECLARE CONVERGENCE, of a TURN"),
-        words("3. DECLARE CONVERGENCE, of a TURN"),
-      )
-      .replace(
-        words("5. CHECK AND REPAIR."),
-        words("4. CHECK AND REPAIR."),
-      )
-      .replace(
-        words("every repair repeats step 3."),
-        words("every repair repeats step 2."),
-      )
-      .replace(
-        words(
-          "tags — write the member turns' tags first, then the edge. An edge write " +
-            "also needs your own current read of the citing turn's RELATIONS — the " +
-            "batch audits earn it,",
-        ),
-        words(
-          "tags — stage 1 wrote those, so a side you cannot place is a fact about " +
-            "the partition and not a tags write to make. An edge write also needs " +
-            "your own current read of the citing turn's RELATIONS — the batch reads " +
-            "earn it,",
-        ),
-      )
-      // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030): the unified
-      // edge-declaration law, appended to JUDGE AND WRITE's own closing
-      // sentence, and 最小连通's retirement taking "and minimality" out of
-      // CHECK AND REPAIR. Both were recorded here as amendments because
-      // ticket 15 changed the ARTIFACT only.
-      //
-      // STAGED-SETTLEMENT TICKET 19, finding 3: both are RETIRED as
-      // amendments because the ARCHIVE now carries them. A source half that
-      // still taught the retired law was the finding — a future source →
-      // artifact sync would have re-shipped it — so the file was updated to
-      // the shipped substance and these two `.replace()` steps became a
-      // duplicate-append and a dead needle respectively. The law itself is
-      // unchanged and still checked: it reaches `purged` through the archive,
-      // carried past the FORM-LANES purge by the "(narrows). Tag the members
-      // first…" replacement directly above, whose needle is the sentence the
-      // law now follows.
-      ;
-
-    // -----------------------------------------------------------------------
-    // RELATION-VOCABULARY-V13 TICKET 02 (user ruling S15069/T2391, "先直接落地
-    // B"): the seven-word vocabulary becomes THREE CLASSES, and the archive
-    // still carries the seven. Every amendment below is one of that ticket's
-    // own edits, recorded here for the same reason ticket 08's three were —
-    // the archive protects the STRING, and only a recorded amendment may move
-    // the contract.
-    // -----------------------------------------------------------------------
-    const v13 = purged
-      // The field list, and the coverage bit `correct` now carries.
-      .replace(
-        words(
-          "- edges: `note`'s override/narrows/extends/consume/indexes/grounds/ " +
-            "verifies fields. An entry is a bare address",
-        ),
-        words(
-          "- edges: `note`'s correct/verify/use fields — the three-class " +
-            "vocabulary. An entry is a bare address",
-        ),
-      )
-      // The retraction mirrors: class-level now, and explicitly reaching a row
-      // written under the retired vocabulary (the E2-deadlock repair).
-      .replace(
-        words(
-          "The `retract<Relation>` mirrors delete one row each and still accept " +
-            "bare addresses (legacy rows stay deletable). One pair may carry " +
-            "several relations at once; a call carrying nothing but relations is " +
-            "valid. All relation writes happen HERE, after the last batch, in " +
-            "four steps:",
-        ),
-        words(
-          "A `correct` entry ALSO carries its coverage bit — " +
-            "`{ \"turn\": …, \"tailTag\": …, \"headTag\": …, \"coverage\": \"full\" }` " +
-            "or `\"partial\"`. A `correct` without it is refused naming the missing " +
-            "bit; a `verify` or `use` carrying one is refused too. The " +
-            "`retractCorrect`/`retractVerify`/`retractUse` mirrors delete the " +
-            "addressed placement's row of that CLASS — a row written under the " +
-            "retired seven-word vocabulary included — and still accept bare " +
-            "addresses (legacy rows stay deletable). " +
-            "All relation writes happen HERE, after the last batch, in three steps:",
-        ),
-      )
-      // JUDGE AND WRITE: the seven-word ladder becomes the PRECEDENCE, with the
-      // principal-result rule in front of it and the coverage bit inside it.
-      .replace(
-        words(
-          "2. JUDGE AND WRITE. For every candidate and every stock row you touch, " +
-            "ignore the stored relation word and run the claim test as if no edge " +
-            "existed — the old word is evidence of nothing. Still fully valid and " +
-            "built upon = extends; partly withdrawn or re-scoped = narrows; " +
-            "replaced, withdrawn or disproved outright = override; merely used = " +
-            "consume; a check THIS turn produced that SUPPORTS the cited " +
-            "conclusion is verifies, never extends — one that goes against it is " +
-            "override; work this turn stands or falls with takes `grounds`. Shared " +
-            "topic, adjacency, or preserving lane shape are never extends evidence " +
-            "— and a blocker satisfied by doing the work is completion (extends), " +
-            "not a correction of the blocking judgment (narrows).",
-        ),
-        words(
-          "2. JUDGE AND WRITE. For every candidate and every stock row you touch, " +
-            "ignore the stored relation word and run the class test as if no edge " +
-            "existed — the old word is evidence of nothing. BOTH ENDS ARE " +
-            "PRINCIPAL RESULTS: the conclusion or output the cited turn actually " +
-            "established, never a detail it happened to mention. Details do not " +
-            "earn edges. Then run the PRECEDENCE, in order: " +
-            "(1) does this output change the cited principal result's acceptance, " +
-            "reliability or scope? negated or limited = correct; confirmed or " +
-            "supported = verify. (2) otherwise, is the cited principal result a " +
-            "DIRECT input to this new output — actually consulted, adopted, tested " +
-            "or incorporated? = use. Ancestors are excluded: cite the layer you " +
-            "used, not what it rested on. " +
-            "correct and verify are SUBSETS of use, and the slot stores the most " +
-            "specific class; a pair that was both corrected and built on is " +
-            "correct, and no second row is written for it. " +
-            "correct carries a coverage bit: `full` when the cited principal " +
-            "result has no substantial part left that may serve as a PREMISE — it " +
-            "survives only as history, and permanent historical facts (it " +
-            "dispatched something, it wrote a file, it ran a test) never rescue " +
-            "it; `partial` when a definite non-empty substantial part still stands " +
-            "as a premise. " +
-            "VERIFY IS NARROW: this turn's own work must bear on whether the cited " +
-            "principal result holds. Prose saying \"confirms\" about a DETAIL of " +
-            "the cited turn is use, not verify. " +
-            "Where a cited turn holds several parallel principal results and this " +
-            "turn verifies one while correcting another, the DOMINANT action wins, " +
-            "not the safer label. Shared topic, adjacency, or preserving lane shape " +
-            "are never use evidence — and a blocker satisfied by doing the work is " +
-            "completion (use), not a correction of the blocking judgment.",
-        ),
-      )
-      // The SUFFICIENCY LAW joins the one-edge-per-claim law, and ruling 2's
-      // one-row-per-pair rule joins it. The sparsity rule STAYS — arm B keeps
-      // it (ticket 04 deferred).
-      .replace(
-        words(
-          "No claim carries two edges, and a path already readable through " +
-            "existing edges is not re-drawn.",
-        ),
-        words(
-          "No claim carries two edges, and a path already readable through " +
-            "existing edges is not re-drawn. One pair of nodes carries ONE row, at " +
-            "the lane placement you judge honest — not one row per candidate lane. " +
-            "SUFFICIENT CITATION: where this turn's principal result rests on " +
-            "earlier nodes, every one of them is cited. Evidence this turn produced " +
-            "itself owes nothing — it IS this turn's contribution. This is a " +
-            "writing law, not a machine verdict; an address named in prose with no " +
-            "edge to it is reported as a WARNING only and never blocks a write.",
-        ),
-      )
-      // DECLARE CONVERGENCE is DELETED with the `indexes` word, so the step
-      // that followed it takes its number.
-      .replace(
-        words(
-          "3. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this turn " +
-            "close out a stretch of work — a design settled, an implementation " +
-            "landed, a batch verified, a version shipped? If it did, it writes an " +
-            "`indexes` citing the nodes that genuinely produced that ONE result. A " +
-            "lane may converge more than once — each finished stretch earns its own " +
-            "declaration, and an earlier one neither blocks nor substitutes for a " +
-            "later one. CITE THE BATCH — one `/to-spec` run, one release. A single " +
-            "cited node means the phase was cut too fine; `lane_check` says so as a " +
-            "WARNING, and no write refuses on it, so finish the batch rather than " +
-            "trimming it. Work merely stopping, or a batch ending, is never " +
-            "convergence evidence — producing the declaration is your job, and " +
-            "having nothing to declare this round is normal life. 4. CHECK AND REPAIR.",
-        ),
-        words("3. CHECK AND REPAIR."),
-      )
-      // The basis walk names the classes rather than "the seven words".
-      .replace(
-        words("a directed walk along its own out-edges (any of the seven words,"),
-        words("a directed walk along its own out-edges (any relation class,"),
-      )
-      // The settlement-actions half: `index` leaves the principle, and the
-      // coupling groups are re-expressed over the three classes.
-      .replace(
-        words("原则(判断性,不强制;index 不参与计算):"),
-        words("原则(判断性,不强制):"),
-      )
-      .replace(
-        words("一个宣告了 index 的节点,应该被泳道外的节点引用 ——"),
-        words("一个把一段工作收口的节点,应该被泳道外的节点引用 ——"),
-      )
-      .replace(
-        words(
-          "verify / override / narrow / extend 作用在被引节点的主张本身上," +
-            "在别人的主张上干活,通常说明两者本该同属一条泳道;ground 是本节点" +
-            "的成立依赖对方,可能是耦合,也可能是两条独立泳道之间正常的依赖," +
-            "需要读内容判断;consume / index 只是使用或汇总其产出,是两条独立" +
-            "泳道之间应有的往来。",
-        ),
-        words(
-          "correct / verify 作用在被引节点的主结果本身上,在别人的主张上" +
-            "干活,通常说明两者本该同属一条泳道;use 里本节点的成立依赖对方" +
-            "的那一种,可能是耦合,也可能是两条独立泳道之间正常的依赖,需要" +
-            "读内容判断;其余的 use 只是使用其产出,是两条独立泳道之间应有的" +
-            "往来。",
-        ),
-      );
-
-    // The guard against a mistyped `.replace()`: if any needle above failed
-    // to match the archive, `amended` would still equal `body`, and this
-    // test would silently degrade into re-checking the RETIRED text.
-    expect(amended).not.toBe(body);
-    expect(purged).not.toBe(amended);
-    expect(v13).not.toBe(purged);
-
-    const prompt = words(renderPrompt());
-    expect(prompt.includes(v13)).toBe(true);
-  });
+  // MAIN-AGENT-EDGES TICKET 06: the Block A and Block B guards are RETIRED.
+  // Both blocks described the stored-side model — ten-turn batches and a
+  // ledger (A), the two-sided draft-and-E6 placement and the five-step pass
+  // (B) — and the rendered prompt no longer carries either; the procedure is
+  // the shared `renderEdgePassTeaching()` block, pinned sentence by sentence
+  // in `tests/worker/note-settlement-edge-pass-teaching.test.ts`, and the
+  // archive's two blocks stay in `.scratch/tag-mandate/issues/06-prompt-text.md`
+  // as history. Blocks C and D still ship verbatim and are still guarded.
 
   // Block D packages TWO separate insertion points (D1 into duty 3, D2
   // replacing the output tail) under one heading, so — unlike A/B/C — its
@@ -2524,9 +1715,14 @@ describe("the rendered prompt's lane-action inventory", () => {
     for (const action of SETTLEMENT_LANE_ACTIONS) {
       expect(prompt).not.toContain(`\`${action}\``);
     }
-    for (const retired of ["justify", "declare", "undeclare", "propose", "reassign", "assign"]) {
+    // MAIN-AGENT-EDGES TICKET 06: `declare` is `note`'s own live entry field
+    // again (ticket 03, spec D4) and the prompt teaches it as such; the
+    // RETIRED lane verb is the `remember(declare)` form, pinned absent below.
+    for (const retired of ["justify", "undeclare", "propose", "reassign", "assign"]) {
       expect(prompt).not.toContain(`\`${retired}\``);
     }
+    expect(prompt).not.toContain("remember(declare");
+    expect(prompt).not.toContain('action: "declare"');
   });
 });
 
@@ -2550,6 +1746,9 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     homeless: [
       { label: "an orphan line", reason: "no attached task covers it", memberAddresses: ["S3/T5"] },
     ],
+    // main-agent-edges ticket 06: the two read deltas the transition froze.
+    writableDelta: ["S3/T7"],
+    contextDelta: ["S3/T2", "S3/T9"],
   };
 
   function renderStageTwoPrompt(): string {
@@ -2587,19 +1786,31 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain('edge #41: S3/T7 still names the removed lane "gamma"');
     expect(prompt).toContain('"an orphan line" — no attached task covers it');
     expect(prompt).toContain("a turn that joined after the transition is not one");
+    // main-agent-edges ticket 06: the two read deltas print with the worklist,
+    // each labelled with its authority.
+    expect(prompt).toContain("writable delta — relations only, not in the initial set (1):");
+    expect(prompt).toContain("context delta — read-only, one hop, not in the initial set (2):");
+    expect(prompt).toContain("S3/T2, S3/T9");
   });
 
-  test("the three edge duties are taught by name: draft reconciliation, debt discharge, homeless retraction", () => {
+  // MAIN-AGENT-EDGES TICKET 06: TWO handover debts, not three. DRAFT
+  // RECONCILIATION went with the draft (one pair, one row; a blank side is
+  // legal where the endpoint's lane set decides it), and the homeless
+  // retraction no longer claims "the bare citation comes back" — ticket 03
+  // deleted `restoreBareRowsForEmptiedPairs`, so that sentence was FALSE at
+  // HEAD and this test's old `toContain("the bare citation")` pinned it.
+  test("the two edge debts are taught by name: debt discharge and homeless retraction — and the draft one is gone", () => {
     const prompt = renderStageTwoPrompt();
 
-    expect(prompt).toContain("DRAFT RECONCILIATION, per pair and not per row");
-    expect(prompt).toContain("RETRACT");
-    expect(prompt).toContain("THE PLACED ROW");
-    expect(prompt).toContain("DEBT DISCHARGE, over the removed-side list above");
-    expect(prompt).toContain("Your authority over that citing turn is");
-    expect(prompt).toContain("RELATIONS ONLY");
+    expect(prompt).toContain("DEBT DISCHARGE. Each entry of the writable delta is a citing turn whose");
+    expect(prompt).toContain("Your authority over that citing turn is RELATIONS ONLY");
+    expect(prompt).toContain("declare the side, or retract the row");
     expect(prompt).toContain("HOMELESS RETRACTION, with cause");
-    expect(prompt).toContain("the bare citation");
+    expect(prompt).toContain("The retraction records itself");
+    expect(prompt).not.toContain("DRAFT RECONCILIATION");
+    expect(prompt).not.toContain("THE PLACED ROW");
+    expect(prompt).not.toContain("the bare citation");
+    expect(prompt).not.toContain("comes back");
   });
 
   // TICKET 17 (round-3 peer P0-1): E3 stopped blocking the stage-2 terminal
@@ -2669,7 +1880,6 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
 
     expect(prompt).toContain("You are the SECOND of two passes");
     expect(prompt).toContain("YOUR WORKLIST");
-    expect(prompt).toContain("DRAFT RECONCILIATION");
     expect(prompt).toContain("DEBT DISCHARGE");
     expect(prompt).toContain("HOMELESS RETRACTION");
     expect(prompt).toContain("This is the pass that writes it.");
@@ -2677,8 +1887,10 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("lanes to work, in stage 1's own order (0)");
     expect(prompt).toContain("removed-side debts (0)");
     expect(prompt).toContain("homeless dispositions (0)");
+    expect(prompt).toContain("writable delta — relations only, not in the initial set (0)");
+    expect(prompt).toContain("context delta — read-only, one hop, not in the initial set (0)");
     // What survives unchanged: everything the pass has always taught.
     expect(prompt).toContain("## Duties");
-    expect(prompt).toContain("BATCH STEP 1 — READ");
+    expect(prompt).toContain("THE EDGE PASS — DECLARE, FILL, REVIEW.");
   });
 });

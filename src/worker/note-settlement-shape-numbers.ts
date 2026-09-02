@@ -6,12 +6,15 @@ import {
   type HomelessRetractionAuditRow,
 } from "../db/homeless-record";
 import {
+  computeSettlementReadDeltas,
   laneSnapshotKey,
+  readNoteSettlementDeclarationEndpointSnapshot,
   readNoteSettlementLaneMemberSnapshot,
   readNoteSettlementWorklistSnapshot,
   readNoteSettlementWritableSnapshot,
   type NoteSettlementRemovedSideDebt,
   type NoteSettlementWorklistLane,
+  type SettlementReadDeltas,
   type SettlementWritableProvenance,
 } from "../db/note-settlement-snapshots";
 import { loadEndpointLaneFacts, resolveEdgeSides } from "../db/edge-side-resolution";
@@ -70,6 +73,15 @@ export interface SettlementFrozenScope {
   debts: NoteSettlementRemovedSideDebt[];
   /** Snapshot #3, keyed by `laneSnapshotKey`. */
   laneMembers: Map<string, number[]>;
+  /** Snapshot #4 (ticket 06): the other endpoint of every live outgoing edge of a writable citer. */
+  declarationEndpointIds: number[];
+  /**
+   * The two stage-2 read lists (ticket 06), a pure function of the four
+   * snapshots above — `writableDelta` (relations only) and `contextDelta`
+   * (read-only, one hop). Computed here, once, so the finalize result and
+   * the resume prompt print the same lists.
+   */
+  readDeltas: SettlementReadDeltas;
 }
 
 /**
@@ -102,13 +114,21 @@ export function readSettlementFrozenScope(
     }
   }
   const { lanes, debts } = readNoteSettlementWorklistSnapshot(db, jobId);
+  const laneMembers = readNoteSettlementLaneMemberSnapshot(db, jobId);
+  const declarationEndpointIds = readNoteSettlementDeclarationEndpointSnapshot(db, jobId);
   return {
     writableTurnIds: new Set(writableProvenance.keys()),
     writableProvenance,
     scopeProvenance: { window, baseLookback, closureOnly },
     worklist: lanes,
     debts,
-    laneMembers: readNoteSettlementLaneMemberSnapshot(db, jobId),
+    laneMembers,
+    declarationEndpointIds,
+    readDeltas: computeSettlementReadDeltas({
+      writable: writableProvenance,
+      laneMembers,
+      declarationEndpointIds,
+    }),
   };
 }
 
@@ -518,6 +538,15 @@ export interface SettlementWorklistRendering {
   lanes: SettlementWorklistLaneRendering[];
   debts: Array<{ edgeId: number; removedLaneTag: string; citingAddress: string }>;
   homeless: Array<{ label: string; reason: string; memberAddresses: string[] }>;
+  /**
+   * The two stage-2 read lists (ticket 06), as addresses: turns the closures
+   * made writable for RELATIONS ONLY, and the read-only one-hop context —
+   * frozen lane members and cited endpoints stage 1 never read. Both are set
+   * differences against the initial writable set, so an address printed
+   * there appears in neither.
+   */
+  writableDelta: string[];
+  contextDelta: string[];
 }
 
 /**
@@ -543,7 +572,7 @@ export function buildSettlementWorklistRendering(
 ): SettlementWorklistRendering {
   const scope = readSettlementFrozenScope(db, jobId);
   if (!scope) {
-    return { lanes: [], debts: [], homeless: [] };
+    return { lanes: [], debts: [], homeless: [], writableDelta: [], contextDelta: [] };
   }
   const homelessByGroup = new Map<
     number,
@@ -578,5 +607,7 @@ export function buildSettlementWorklistRendering(
       citingAddress: turnAddress(db, debt.citingTurnId),
     })),
     homeless: [...homelessByGroup.values()],
+    writableDelta: scope.readDeltas.writableDelta.map((turnId) => turnAddress(db, turnId)),
+    contextDelta: scope.readDeltas.contextDelta.map((turnId) => turnAddress(db, turnId)),
   };
 }

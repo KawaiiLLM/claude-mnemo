@@ -284,11 +284,22 @@ describe("no teaching surface still states the retired tag mandate", () => {
     return /retire/i.test(before.slice(lastBoundary + 1));
   }
 
+  /**
+   * MAIN-AGENT-EDGES TICKET 06: `declare` is a LIVE `note` parameter again
+   * (ticket 03, spec D4 — `declareEdgeSides`, the edge pass's own act), so a
+   * bare backticked `declare` no longer identifies the retired `remember`
+   * verb. For that one word only the VERB forms are the needle
+   * (`remember(declare)`, `action: "declare"`); every other retired verb keeps
+   * the bare-backtick match.
+   */
+  const VERB_FORM_ONLY = new Set(["declare"]);
+
   function findRetiredVerbTeaching(text: string): string[] {
     const hits: string[] = [];
     for (const verb of RETIRED_VERBS) {
       const pattern = new RegExp(
-        `\`${verb}\`|\\b(?:remember|verb|action)\\s*[(:]\\s*["'\`]?${verb}\\b`,
+        (VERB_FORM_ONLY.has(verb) ? "" : `\`${verb}\`|`) +
+          `\\b(?:remember|verb|action)\\s*[(:]\\s*["'\`]?${verb}\\b`,
         "g",
       );
       for (const match of text.matchAll(pattern)) {
@@ -300,21 +311,24 @@ describe("no teaching surface still states the retired tag mandate", () => {
   }
 
   test("the retired-verb detector reads instruction and notice apart", () => {
-    expect(findRetiredVerbTeaching("the repair is a `declare` plus settling both sides")).toHaveLength(1);
+    expect(findRetiredVerbTeaching("the repair is an `undeclare` plus settling both sides")).toHaveLength(1);
     expect(findRetiredVerbTeaching("remember(declare) is for a lane you judged")).toHaveLength(1);
     expect(findRetiredVerbTeaching('send { action: "declare", id: "E1" }')).toHaveLength(1);
     expect(findRetiredVerbTeaching("remember (declare) still works")).toHaveLength(1);
     // The peer's counter-example: one sentence, a notice AND an imperative.
     // The imperative is what must be reported; sparing the notice half is fine.
     expect(
-      findRetiredVerbTeaching("Although `declare` retired, call `declare` for repairs."),
+      findRetiredVerbTeaching("Although `undeclare` retired, call `undeclare` for repairs."),
     ).toHaveLength(1);
     // A notice ending its sentence no longer exempts the next instruction.
-    expect(findRetiredVerbTeaching("The verb was retired. Call `declare` for repairs")).toHaveLength(1);
-    expect(findRetiredVerbTeaching("该动词已 retired。调用 `declare` 修复")).toHaveLength(1);
+    expect(findRetiredVerbTeaching("The verb was retired. Call `undeclare` for repairs")).toHaveLength(1);
+    expect(findRetiredVerbTeaching("该动词已 retired。调用 `undeclare` 修复")).toHaveLength(1);
     // Spared: the notice itself, and every ordinary use of the same words.
     expect(findRetiredVerbTeaching("Retired with the `assign` verb — a turn's task is derived from its own tags")).toEqual([]);
     expect(findRetiredVerbTeaching("ticket 05 retired `declare` into the lane tier")).toEqual([]);
+    // main-agent-edges ticket 06: `note`'s `declare` ENTRY is live teaching,
+    // not the retired `remember` verb — only the verb form is a hit.
+    expect(findRetiredVerbTeaching("declare it with a `declare` entry on the citing turn")).toEqual([]);
     expect(findRetiredVerbTeaching("lane tags DECLARED in that task")).toEqual([]);
     expect(findRetiredVerbTeaching("lanes otherwise being settlement's to declare")).toEqual([]);
     expect(findRetiredVerbTeaching("`write` replaces one field's value whole")).toEqual([]);
@@ -447,38 +461,50 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // -------------------------------------------------------------------------
 
   describe("the settlement note description teaches the registry gate, not the mandate", () => {
-    test("all three classes take either form, and the draft form is one of them", () => {
+    // MAIN-AGENT-EDGES TICKET 06 (spec D3/D6): ONE entry form, and the
+    // division of labour as it stands — the main agent writes its own turn's
+    // edges routinely (ticket 05), so "taught not to reach for them" was
+    // FALSE at HEAD from ticket 05 on, and the two-sided draft form described
+    // a model the resolver (D2) retired. Both pinned absent.
+    test("all three classes take the bare form, and the main agent is named as the routine writer", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "ALL THREE classes accept either: a bare address leaves both sides UNSETTLED",
+        "ASSERTION is a bare address and ALL THREE classes accept it",
       );
-      // Ticket 08 said out loud that settlement is the ONLY edge writer. That
-      // claim was retired by main-agent-edge-capability ticket 01: the ruling
-      // it cited ([S15069/T1651]) said 「工具上保留这些能力」— capability kept,
-      // guidance narrowed — so the description now states the guidance without
-      // asserting an absence that is not true.
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "the main agent's `note` carries the same three fields but is taught not to reach for them",
+        "writes them ROUTINELY on its own turn, so most edges here are already written",
       );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "a stored side is written only through `declare`",
+      );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("is taught not to reach for them");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("leaves both sides UNSETTLED");
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("has no relation field at all");
     });
 
-    test("the three per-side checks and the surviving structural refusal are stated in order", () => {
+    test("E6 is taught as the several-lanes case only, and the per-side checks of a declaration are stated in order", () => {
       const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
-      // TICKET 20 REVERSED THE BOTH-OR-NEITHER REFUSAL. A draft is accepted
-      // here now, so the surface must teach acceptance PLUS the place the
-      // refusal moved to — a description still saying "exactly one side is
-      // refused" would send a run chasing a rejection that cannot arrive, and
-      // one saying nothing at all would let it commit into an E6 refusal it
-      // was never warned about.
+      // The resolution model (main-agent-edges D2): a blank side derives from a
+      // unique lane and is legal; E6 is exactly the ambiguous endpoint. A
+      // description still calling every blank side a DRAFT that commit refuses
+      // would send a run declaring sides the gate refuses as derivable.
       expect(text).not.toContain("PLACE BOTH OR NEITHER");
-      expect(text).toContain("A DRAFT — either side left empty, or both — is ACCEPTED here");
-      expect(text).toContain("error E6");
-      expect(text).toContain("commit refuses while one remains");
+      expect(text).not.toContain("A DRAFT — either side left empty, or both — is ACCEPTED here");
+      expect(text).not.toContain("every edge inside your writable set with an empty side is error E6");
+      expect(text).toContain("A BLANK SIDE IS LEGAL wherever the endpoint sits in ONE lane or in none");
+      expect(text).toContain("error E6 only where the");
+      expect(text).toContain("endpoint sits in SEVERAL lanes and no side is declared");
+      expect(text).toContain("commit refuses");
+      expect(text).toContain("while one remains in your writable set: `declare` it, or retract the row");
+      expect(text).toContain("`{turn, class?, tailTag?, headTag?}`");
       expect(text).toContain("the tag must be canonical");
       expect(text).toContain(
         "DECLARED (remember create) in the task THAT endpoint belongs to",
       );
       expect(text).toContain("an endpoint carrying no task tag is refused naming the turn");
+      expect(text).toContain("an endpoint");
+      expect(text).toContain("in exactly one lane is refused as derivable");
+      expect(text).toContain("A side omitted is left alone");
+      expect(text).toContain("`null` clears it");
       // The crossing is legal and the description has to say so, or a run will
       // avoid a call the gate accepts.
       expect(text).toContain("two different words is a legal CROSSING");
@@ -492,11 +518,22 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(text.indexOf("DECLARED (remember create)")).toBeLessThan(
         text.indexOf("the tag must already be on that endpoint turn's own tags"),
       );
+      expect(text.indexOf("the tag must already be on that endpoint turn's own tags")).toBeLessThan(
+        text.indexOf("in exactly one lane is refused as derivable"),
+      );
     });
 
-    test("retraction takes the same two forms, and no longer names a retraction-only word", () => {
+    test("retraction addresses the pair with the mirror's class as precondition, and no longer names a retraction-only word", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("RETRACTION is the other half");
-      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("A bare entry deletes the UNSETTLED row");
+      // main-agent-edges ticket 03 (T2432 P1): side tags left the retraction
+      // address. "A bare entry deletes the UNSETTLED row and a two-sided one
+      // deletes exactly that lane placement" described the old identity.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("A retraction addresses the PAIR");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "the mirror's own class is the precondition",
+      );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("A bare entry deletes the UNSETTLED row");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("deletes exactly that lane placement");
       // Lane-model v12 ticket 03 deleted both frozen-legacy mirrors with the
       // rows they addressed. This surface is the one that actually MET such a
       // row, so it is the one a stale parameter name would mislead most.
@@ -512,6 +549,15 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
         "Writing an edge also needs THIS run's own current read of the citing turn's relations",
       );
+      // main-agent-edges ticket 06 (read-once D6): the ONE read already
+      // delivered it; the filter below is the REPAIR for a refused write, on
+      // that turn alone — never a read taught in front of every edge write.
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
+        "Your one read's field list already delivered it",
+      );
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("on that turn alone, never the batch again");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("Step 0");
+      expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("so recall the turn with");
       // The SAME read the gate's own rejection prescribes. Pinned as the
       // shared fragment rather than the whole clause: the rejection addresses
       // one turn and this description addresses any of them, so the sentences
