@@ -54609,22 +54609,18 @@ function mergeOutOfVocabularyEdges(fromEdges, known) {
 }
 function subsetObligations(edge) {
   const obligations = [];
-  if (edge.tailOutcome !== void 0 || edge.headOutcome !== void 0) {
-    if (edge.tailOutcome === "invalid") {
-      obligations.push({ tag: edge.storedTailTag ?? edge.tailTag, endpoint: "citing" });
-    }
-    if (edge.headOutcome === "invalid") {
-      obligations.push({ tag: edge.storedHeadTag ?? edge.headTag, endpoint: "cited" });
-    }
-    return obligations;
+  if (edge.tailOutcome === "invalid") {
+    obligations.push({ tag: edge.storedTailTag, endpoint: "citing" });
   }
-  if (edge.tailTag !== UNSETTLED_LANE_TAG2 && edge.tailTag !== void 0) {
-    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
-  }
-  if (edge.headTag !== UNSETTLED_LANE_TAG2 && edge.headTag !== void 0) {
-    obligations.push({ tag: edge.headTag, endpoint: "cited" });
+  if (edge.headOutcome === "invalid") {
+    obligations.push({ tag: edge.storedHeadTag, endpoint: "cited" });
   }
   return obligations;
+}
+function storedEdgeTags(edge) {
+  return canonicalTagSet(
+    [edge.storedTailTag, edge.storedHeadTag].filter((tag) => tag !== UNSETTLED_LANE_TAG2)
+  );
 }
 function computeSubsetInvariantErrors(turnById, edges) {
   const errors = [];
@@ -54647,7 +54643,7 @@ function computeSubsetInvariantErrors(turnById, edges) {
       citingId: edge.citingId,
       citedId: edge.citedId,
       relation: edge.relation,
-      tags: laneEdgeTags(edge),
+      tags: storedEdgeTags(edge),
       missing
     });
   }
@@ -54657,29 +54653,10 @@ function computeDraftEdgeErrors(edges) {
   const errors = [];
   for (const edge of edges) {
     const unsettledSides = [];
-    if (edge.tailOutcome !== void 0 || edge.headOutcome !== void 0) {
-      if (edge.tailOutcome === "ambiguous") {
-        unsettledSides.push("tail");
-      }
-      if (edge.headOutcome === "ambiguous") {
-        unsettledSides.push("head");
-      }
-      if (unsettledSides.length === 0) continue;
-      errors.push({
-        class: "E6",
-        anchorId: edge.citingId,
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relation: edge.relation,
-        tags: laneEdgeTags(edge),
-        unsettledSides
-      });
-      continue;
-    }
-    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG2) {
+    if (edge.tailOutcome === "ambiguous") {
       unsettledSides.push("tail");
     }
-    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG2) {
+    if (edge.headOutcome === "ambiguous") {
       unsettledSides.push("head");
     }
     if (unsettledSides.length === 0) continue;

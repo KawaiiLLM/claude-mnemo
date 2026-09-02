@@ -2069,6 +2069,27 @@ describe("D9 segment facts — the registry and the membership table, never the 
       },
     ]);
   });
+
+  test("integrator pin (02b): the SAME stale declaration on the TAIL side is `invalid` too — no fixture had it there", () => {
+    // Mirror of the test above with the sides swapped: every E4 loader fixture
+    // put the stale word on the HEAD, so a loader that laundered an invalid
+    // TAIL outcome as `declared` kept the suite green (integrator probe).
+    const sessionId = seedSession("02b-stale-tail");
+    const segment = createSegment(db, { title: "02b-stale-tail", nowEpoch: NOW });
+    const x = insertTurn(sessionId, 1, { tags: ["alpha"] });
+    const y = insertTurn(sessionId, 2, { tags: ["alpha"] });
+    addSegmentMembers(db, segment.id, [x, y], NOW);
+    for (const tag of ["alpha", "beta"]) {
+      insertLane(db, segment.id, tag, NOW);
+    }
+    halfDeclaredEdge(y, x, "extends", "beta", "alpha");
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    const edge = projection.edges.find((e) => e.citingId === y && e.citedId === x)!;
+    expect([edge.tailOutcome, edge.tailTag, edge.storedTailTag]).toEqual(["invalid", "", "beta"]);
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.errors.map((e) => [e.class, e.anchorId])).toEqual([["E4", y]]);
+  });
 });
 
 // ------------------- v12 ticket 06: the passes read the SIDE columns

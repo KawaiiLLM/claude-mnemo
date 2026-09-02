@@ -83,3 +83,25 @@ With membership projected from each turn's own edges (the existing convention), 
 - `tests/support/lane-edge-fixtures.ts`: `withEdgeClaimedLaneTags` generic widened to `LaneTurnInput & { tags?: … }`; new export `resolveLaneEdges`.
 - `tests/worker/console-api.test.ts`: imports (`DEFAULT_SEGMENT`, `resolveLaneEdges`), two new types above `makeFakeReader`, the `runLaneCheck` seam, three fixture builders retyped, one test rewritten.
 - `tests/worker/note-settlement-call.test.ts`: one describe appended at the end. `tests/db/lane-checker-load.test.ts`: helper + two tests appended inside the "D9 segment facts" describe.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `c0642961` no-ff, clean; bundles rebuilt. `npx tsc --noEmit` 0; guards green. Full `bun test`
+**4775 / 0 / 269** against 4770/0/269 — the worker's +5 exactly. The fallback branch is gone
+(`tailOutcome !== undefined` has no hit left in `lane-checker.ts`), and `checkLanes` now refuses an
+edge input without resolved outcomes at the type level.
+
+My probes, on sites the worker's four revert probes did not use:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `lane-checker.ts`: E6 widened to fire on a `none` (lane-less) head | RED ×5 incl. both new not-a-finding cases and the golden |
+| I2 | `lane-checker-load.ts`: an `invalid` HEAD outcome laundered as `declared` | RED ×4 |
+| I3 | same, on the TAIL outcome | **GREEN** — every E4 loader fixture put the stale word on the head |
+
+I3 fixed here: a mirror test with the stale declaration on the tail (`tests/db/lane-checker-load.test.ts`,
+"integrator pin (02b)…") — the same mutation now drives it RED, verified, restored by `cp` with md5.
+Accepted with that addition. The golden's E6 count moving from a 54-turn cluster to 36 is the narrowed
+predicate reading the same fixture (76 of 77 blank sides resolve), not a regression.
