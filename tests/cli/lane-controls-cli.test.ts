@@ -1,23 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { openReadOnlyLaneCheckDatabase } from "../../src/cli/lane-check-cli";
 import {
   buildLaneControlsReport,
   DEFAULT_LANE_CONTROLS_OPENER,
-  drawGoldSample,
   parseLaneControlsArguments,
-  readGradedSample,
   renderLaneControlsReport,
   runLaneControlsCli,
-  scoreGoldSample,
   type LaneControl,
   type LaneControlsCliOptions,
-  type LaneGoldSampleRow,
 } from "../../src/cli/lane-controls-cli";
 import { createDatabase } from "../../src/db/database";
 import { insertLane } from "../../src/db/lanes";
@@ -27,12 +24,14 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 
 /**
- * THE ATTRIBUTION CONTROLS (lane-model-v12 ticket 13).
+ * THE ATTRIBUTION CONTROL (lane-model-v12 ticket 13; C1/C3/C4 retired by
+ * main-agent-edges D10, ticket 8 — only C2 remains).
  *
- * The fixture below is one deliberately IMPERFECT database — every control has
- * something to find and every control's number is hand-countable from the
- * comment on the edge list. A clean fixture would prove only that the tool can
- * print zeros, which is exactly the answer this ticket exists to distrust.
+ * The fixture below is one deliberately IMPERFECT database — C2 has something
+ * to find, and every OTHER row is either clean or unsettled (out of C2's
+ * domain), which is exactly the boundary this control has to draw right. A
+ * clean fixture would prove only that the tool can print zeros, which is
+ * exactly the answer this ticket exists to distrust.
  *
  * Two fixtures, not one: the second is a PRE-MIGRATION database (the shape the
  * production file is in today — merged `tags` column, no side columns, no
@@ -72,17 +71,17 @@ interface Fixture {
  *
  * Edges (the whole of what every expected number below is counted from):
  *   E1 T2 --extends--> T1   (ownership, ownership)   clean
- *   E2 T3 --indexes--> T1   (ownership, ownership)   clean; closes lane A at T3
+ *   E2 T3 --indexes--> T1   (ownership, ownership)   clean
  *   E3 T3 --indexes--> T2   (ownership, ownership)   clean
- *   E4 T4 --grounds--> T1   ('', '')                 C1: both sides unsettled
- *   E5 T4 --consume--> T2   (ownership, '')          C1: HALF-settled (D2 forbids)
+ *   E4 T4 --grounds--> T1   ('', '')                 both sides unsettled — out of C2's domain
+ *   E5 T4 --consume--> T2   (ownership, '')          one side unsettled — out of C2's domain
  *   E6 T2 --narrows--> T1   (drafting, ownership)    C2: tail tag never DECLARED
  *   E7 T6 --grounds--> T1   (ownership, ownership)   C2: tail tag not ON T6
- *   E8 T7 --grounds--> T4   ('', '')                 C1: both unsettled; C3: both ends laneless
+ *   E8 T7 --grounds--> T4   ('', '')                 both sides unsettled — out of C2's domain
  *   E9 T9 --extends--> T8   (ownership, ownership)   clean, in segment B
  *   E10 T10 --grounds--> T1 (ownership, ownership)   T10's stored tags are
  *       UNPARSEABLE -> no subset verdict for the tail (ignorance never
- *       manufactures an error), but T10 IS a laneless node
+ *       manufactures an error)
  *   E11 T11 --extends--> T1 (ownership, ownership)   T11 is SKIPPED -> law 8
  *       keeps the whole row out of every control, and keeps T11 from becoming
  *       lane A's latest member (which would reopen the lane)
@@ -237,17 +236,17 @@ function seedPreMigrationFixture(): void {
 function options(overrides: Partial<LaneControlsCliOptions> = {}): LaneControlsCliOptions {
   return {
     segmentIds: [],
-    perStratum: 2,
+    downstreamLimit: 10,
     findingLimit: 20,
     help: false,
     ...overrides,
   };
 }
 
-function report(overrides: Partial<LaneControlsCliOptions> = {}, graded: LaneGoldSampleRow[] | null = null) {
+function report(overrides: Partial<LaneControlsCliOptions> = {}) {
   const db = openReadOnlyLaneCheckDatabase(dbPath);
   try {
-    return buildLaneControlsReport(db, dbPath, options(overrides), graded);
+    return buildLaneControlsReport(db, dbPath, options(overrides));
   } finally {
     db.close();
   }
@@ -272,8 +271,7 @@ describe("argument parsing", () => {
     expect(() => parseLaneControlsArguments(["--bogus"])).toThrow(/unrecognized argument/);
   });
 
-  test("--sample and --findings must be non-negative integers", () => {
-    expect(() => parseLaneControlsArguments(["--sample", "2.5"])).toThrow(/non-negative integer/);
+  test("--findings must be a non-negative integer", () => {
     expect(() => parseLaneControlsArguments(["--findings", "-1"])).toThrow(/non-negative integer/);
   });
 
@@ -283,25 +281,15 @@ describe("argument parsing", () => {
   });
 });
 
-describe("the four control quantities each produce a number", () => {
-  test("C1 counts BOTH-unsettled and HALF-settled edges, and keeps them apart", () => {
-    seedFixture();
-    const c1 = control(report(), "C1");
-
-    expect(c1.unmeasurableReason).toBeNull();
-    expect(c1.measured).toBe(3); // E4, E5, E8
-    expect(c1.target).toBe("0");
-    expect(c1.context.join(" | ")).toContain("2 with BOTH sides unsettled");
-    expect(c1.context.join(" | ")).toContain("1 HALF-settled");
-  });
-
+describe("the control quantity", () => {
   test("C2 counts per-side declaration and subset violations on SETTLED edges only", () => {
     seedFixture();
     const c2 = control(report(), "C2");
 
     // E6's tail names `drafting`, which segment A never declared; E7's tail
-    // names `ownership`, which T6 does not carry. The three unsettled/half
-    // rows are control 1's, not this one's.
+    // names `ownership`, which T6 does not carry. The unsettled/half-settled
+    // rows (E4, E5, E8) carry no assignment and are out of this control's
+    // domain entirely.
     expect(c2.measured).toBe(2);
     expect(c2.context.join(" | ")).toContain("1 undeclared-lane, 1 subset (E4)");
     expect(c2.context.join(" | ")).toContain("over 8 settled edge(s)");
@@ -312,50 +300,9 @@ describe("the four control quantities each produce a number", () => {
       "is not on that endpoint turn itself",
     );
   });
-
-  test("C3 counts nodes with edges and no declared lane, naming the literal both-ends reading as a subset", () => {
-    seedFixture();
-    const c3 = control(report(), "C3");
-
-    expect(c3.measured).toBe(4); // T4, T6, T7, T10
-    expect(c3.context.join(" | ")).toContain("out of 9 turn(s) with at least one live edge");
-    // T7's only edge (E8) has T4 — also laneless — at the far end.
-    expect(c3.context.join(" | ")).toContain("1 of them are the ticket's literal reading");
-  });
-
-  test("C4 reports an accuracy from a graded sample and applies NO threshold", () => {
-    seedFixture();
-    const drawn = report().sample!;
-    const graded = drawn.rows.map((row, index) => ({
-      ...row,
-      verdict:
-        index === 0
-          ? { tail: "wrong" as const, head: "correct" as const }
-          : { tail: "correct" as const, head: "correct" as const },
-    }));
-
-    const c4 = control(report({}, graded), "C4");
-
-    expect(c4.unmeasurableReason).toBeNull();
-    expect(c4.measured).toBe(Math.round(((graded.length - 1) / graded.length) * 1000) / 10);
-    expect(c4.target).toContain("NO THRESHOLD");
-    expect(c4.context.join(" | ")).toContain("NO THRESHOLD is applied to this number");
-    expect(c4.findings).toHaveLength(1);
-    expect(c4.findings[0]!.note).toContain("graded WRONG on the tail");
-  });
 });
 
 describe("every finding carries its source address and BOTH side LaneKeys", () => {
-  test("the C1 finding for a fully unsettled edge spells the address and both sides", () => {
-    const fixture = seedFixture();
-    const c1 = control(report(), "C1");
-
-    const finding = c1.findings.find((entry) => entry.address.includes("--grounds-->"))!;
-    expect(finding.address).toMatch(/^S\d+\/T4 --grounds--> S\d+\/T1$/);
-    expect(finding.tailLane).toBe(`E${fixture.segmentA}:<unsettled>`);
-    expect(finding.headLane).toBe(`E${fixture.segmentA}:<unsettled>`);
-  });
-
   test("a settled finding names the real lane on each side, in the checker's own spelling", () => {
     const fixture = seedFixture();
     const c2 = control(report(), "C2");
@@ -368,12 +315,7 @@ describe("every finding carries its source address and BOTH side LaneKeys", () =
 
   test("no control anywhere emits a finding missing an address or a side", () => {
     seedFixture();
-    const drawn = report().sample!;
-    const graded = drawn.rows.map((row) => ({
-      ...row,
-      verdict: { tail: "wrong" as const, head: "wrong" as const },
-    }));
-    const built = report({}, graded);
+    const built = report();
 
     const findings = built.controls.flatMap((entry) => entry.findings);
     expect(findings.length).toBeGreaterThan(0);
@@ -397,151 +339,8 @@ describe("every finding carries its source address and BOTH side LaneKeys", () =
   });
 });
 
-describe("the causal matrix is in the tool's own output", () => {
-  test("all three branches and the no-threshold clause are printed", () => {
-    seedFixture();
-    const text = renderLaneControlsReport(report());
-
-    expect(text).toContain("the judging order these controls exist to enforce");
-    // Each BRANCH, not merely each phrase: the matrix's own opening paragraph
-    // already names both causes, so asserting the words alone would survive
-    // the deletion of any one branch.
-    expect(text).toContain("-> the attribution is UNFINISHED, and no checker report is yet evidence");
-    expect(text).toContain("-> fix the labels -- the turn's own tags, the edge's two side tags");
-    expect(text).toContain("-> the DEFINITION is wrong. This is the ONLY branch that is evidence");
-    expect(text).toContain("C4 sets no threshold");
-  });
-});
-
-// REQUIREMENT 4's TERMINUS SAMPLE IS DELETED (lane-state-retirement ticket
-// 01). It listed "every CLOSED lane whose terminus nobody outside cites",
-// read straight off `LaneComponentReport.terminusCitedness` — and closure, the
-// single terminus, and that report line are all gone. The sample existed ONLY
-// to carry that verdict, so it goes rather than being re-pointed: the two
-// tests here (the uncited-terminus export, and the cross-segment
-// report-once/downstream-from-the-lane's-own-segment rule) had no subject
-// left. Its third-cause caveat, its `--downstream` flag and its half of the
-// `--export` bundle went with it.
-
-describe("the gold sample is stratified by relation word AND by segment", () => {
-  test("the same relation word in two segments is two strata", () => {
-    const fixture = seedFixture();
-    const sample = report().sample!;
-
-    const strata = [...new Set(sample.rows.map((row) => row.stratum))].sort();
-    expect(strata).toContain(`extends @ E${fixture.segmentA}:{ownership}`);
-    expect(strata).toContain(`extends @ E${fixture.segmentB}:{ownership}`);
-    expect(sample.stratifiedBy).toContain("relation word");
-    expect(sample.stratifiedBy).toContain("segment");
-  });
-
-  test("the draw is a pure function of the database and honours --sample", () => {
-    seedFixture();
-    expect(report().sample!.rows).toEqual(report().sample!.rows);
-
-    // At --sample 1 the SELECTION itself is what has to be stable: two strata
-    // here hold two candidates each, so an order that depended on anything but
-    // the edge identities would pick differently across these draws.
-    const first = report({ perStratum: 1 }).sample!.rows;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect(report({ perStratum: 1 }).sample!.rows).toEqual(first);
-    }
-
-    const one = report({ perStratum: 1 }).sample!;
-    const byStratum = new Map<string, number>();
-    for (const row of one.rows) {
-      byStratum.set(row.stratum, (byStratum.get(row.stratum) ?? 0) + 1);
-    }
-    expect([...byStratum.values()].every((count) => count === 1)).toBe(true);
-    expect(one.rows.length).toBe(one.strata);
-  });
-
-  test("an unsettled edge is never drawn — it has no assignment to grade", () => {
-    seedFixture();
-    const sample = report().sample!;
-    expect(sample.rows.every((row) => row.edge.tailTag !== "" && row.edge.headTag !== "")).toBe(true);
-  });
-
-  test("--segment restricts the draw to that segment's strata", () => {
-    const fixture = seedFixture();
-    const sample = report({ segmentIds: [fixture.segmentB] }).sample!;
-    expect(sample.rows.every((row) => row.stratum.includes(`E${fixture.segmentB}:`))).toBe(true);
-  });
-});
-
-describe("scoring never lets an unmeasurable stand in as a number", () => {
-  test("without --graded, C4 says it cannot measure and prints no accuracy", () => {
-    seedFixture();
-    const c4 = control(report(), "C4");
-
-    expect(c4.measured).toBeNull();
-    expect(c4.unmeasurableReason).toContain("no graded sample was supplied");
-    expect(renderLaneControlsReport(report())).toContain("CANNOT MEASURE, because no graded sample");
-  });
-
-  test("ungraded, unsure and STALE rows are each excluded and each named", () => {
-    seedFixture();
-    const drawn = report().sample!;
-    const live = new Set(
-      drawn.rows.map((row) => JSON.stringify([
-        row.edge.citingId,
-        row.edge.citedId,
-        row.edge.relation,
-        row.edge.tailTag,
-        row.edge.headTag,
-      ])),
-    );
-    const rows: LaneGoldSampleRow[] = [
-      { ...drawn.rows[0]!, verdict: { tail: "correct", head: "correct" } },
-      { ...drawn.rows[1]!, verdict: { tail: "correct", head: "" } },
-      { ...drawn.rows[2]!, verdict: { tail: "unsure", head: "correct" } },
-      {
-        ...drawn.rows[3]!,
-        edge: { ...drawn.rows[3]!.edge, tailTag: "a-tag-nobody-stores" },
-        verdict: { tail: "correct", head: "correct" },
-      },
-    ];
-
-    const score = scoreGoldSample(rows, live);
-    expect(score.graded).toBe(1);
-    expect(score.bothSidesCorrect).toBe(1);
-    expect(score.ungraded).toBe(1);
-    expect(score.unsure).toBe(1);
-    expect(score.stale).toBe(1);
-    expect(score.accuracy).toBe(100);
-  });
-
-  test("a graded file with nothing gradable reports a reason, never 0%", () => {
-    seedFixture();
-    const drawn = report().sample!;
-    const rows = drawn.rows.map((row) => ({ ...row, verdict: { tail: "" as const, head: "" as const } }));
-
-    const c4 = control(report({}, rows), "C4");
-    expect(c4.measured).toBeNull();
-    expect(c4.unmeasurableReason).toContain("no gradable row");
-  });
-
-  test("scoreGoldSample with no live identity set skips the staleness probe entirely", () => {
-    const row: LaneGoldSampleRow = {
-      edge: { citingId: 1, citedId: 2, relation: "extends", tailTag: "a", headTag: "a" },
-      stratum: "extends @ E1:{a}",
-      address: "S1/T2 --extends--> S1/T1",
-      tailLane: "E1:{a}",
-      headLane: "E1:{a}",
-      citingTurnTags: ["a"],
-      citedTurnTags: ["a"],
-      verdict: { tail: "correct", head: "wrong" },
-    };
-    const score = scoreGoldSample([row], null);
-    expect(score.stale).toBe(0);
-    expect(score.graded).toBe(1);
-    expect(score.bothSidesCorrect).toBe(0);
-    expect(score.accuracy).toBe(0);
-  });
-});
-
 describe("a PRE-MIGRATION database reports why, never a zero", () => {
-  test("every control and the terminus sample say CANNOT MEASURE and name the migration", () => {
+  test("the control says CANNOT MEASURE and names the migration", () => {
     seedPreMigrationFixture();
     const built = report();
     const text = renderLaneControlsReport(built);
@@ -570,7 +369,7 @@ describe("a PRE-MIGRATION database reports why, never a zero", () => {
 
 describe("the control domain honours the loader's own two laws", () => {
   test("an endpoint whose stored tags are UNPARSEABLE yields no subset verdict for its side", () => {
-    const fixture = seedFixture();
+    seedFixture();
     const built = report();
 
     // E10's tail names `ownership` — declared in segment A, so no declaration
@@ -579,12 +378,6 @@ describe("the control domain honours the loader's own two laws", () => {
     const c2 = control(built, "C2");
     expect(c2.measured).toBe(2);
     expect(c2.findings.every((finding) => !finding.address.includes("/T10 "))).toBe(true);
-    // T10 is still a LANELESS node: unreadable tags name no lane.
-    expect(
-      control(built, "C3").findings.some((finding) =>
-        finding.address.startsWith(`S${fixture.sessionId}/T10 (via`),
-      ),
-    ).toBe(true);
   });
 
   test("a SKIPPED turn (law 8) is neither a node, an edge endpoint, nor a lane member", () => {
@@ -610,12 +403,7 @@ describe("read-only, end to end", () => {
     }
   });
 
-  test("every statement on the control path is a SELECT, and the ONE file write is --export's", () => {
-    // The byte-identical run below proves today's code writes nothing. This
-    // proves the NEXT edit cannot quietly add a write and still pass: the
-    // reason `--export` exists at all is that a sample has to leave the tool,
-    // and the boundary between "writes a named file" and "writes the database"
-    // is the whole read-only claim.
+  test("every statement on the control path is a SELECT, and the tool writes no file at all", () => {
     const strip = (relative: string): string =>
       readFileSync(join(process.cwd(), relative), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -626,7 +414,9 @@ describe("read-only, end to end", () => {
       expect(code).not.toMatch(/\bCREATE\s+(TABLE|INDEX|TRIGGER|VIEW)\b/i);
       expect(code).not.toMatch(/\bdb\.(run|exec|transaction)\s*\(/);
     }
-    expect(strip("src/cli/lane-controls-cli.ts").match(/writeFileSync\(/g)).toHaveLength(1);
+    // No file write of any kind survives the retirement of --export: the tool
+    // reads the database and prints to stdout, nothing else.
+    expect(strip("src/cli/lane-controls-cli.ts")).not.toContain("writeFileSync");
     expect(strip("src/db/lane-checker-load.ts")).not.toContain("writeFileSync");
   });
 
@@ -640,18 +430,17 @@ describe("read-only, end to end", () => {
     }
   });
 
-  test("a full run WITH --export leaves the database file byte-identical", () => {
+  test("a full run leaves the database file byte-identical", () => {
     seedFixture();
     const digest = () => createHash("sha256").update(readFileSync(dbPath)).digest("hex");
     const before = digest();
-    const exportPath = join(dir, "sample.json");
-    const { io } = captureIo();
+    const { io, stdout } = captureIo();
 
-    const code = runLaneControlsCli(["--db", dbPath, "--export", exportPath], io);
+    const code = runLaneControlsCli(["--db", dbPath], io);
 
     expect(code).toBe(0);
     expect(digest()).toBe(before);
-    expect(existsSync(exportPath)).toBe(true);
+    expect(stdout.join("\n")).toContain("## C2 --");
   });
 
   test("an argument error exits 1 without opening a database at all", () => {
@@ -668,95 +457,65 @@ describe("read-only, end to end", () => {
   });
 });
 
-describe("the export bundle and the graded round trip", () => {
-  test("--export writes the gold sample, and --graded reads it back", () => {
-    const fixture = seedFixture();
-    const exportPath = join(dir, "sample.json");
-    const { io } = captureIo();
-    expect(runLaneControlsCli(["--db", dbPath, "--export", exportPath], io)).toBe(0);
+/**
+ * C1 (blank sides), C3 (lane-less endpoints) and C4 (sampled side audit) are
+ * RETIRED (main-agent-edges D10, ticket 8), not reinterpreted: E6 accounting
+ * now lives in `lane_check`, a lane-less edge is legal, and a declaration is
+ * validated at write. Nothing replaces them, so nothing should re-teach them
+ * under another name.
+ *
+ * WHY SOURCE TEXT AND NOT BEHAVIOUR: a deletion is observable only as an
+ * absence, and an absence is exactly what a reimplementation restores without
+ * touching any assertion above. This sentinel is what a behavioural test
+ * cannot be.
+ *
+ * MUTATION-VERIFICATION NOTE. Each symbol below was checked by reintroducing
+ * it into `src/cli/lane-controls-cli.ts` and confirming this test reddens.
+ */
+describe("main-agent-edges ticket 8 — C1, C3 and C4 stay retired", () => {
+  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const readSource = (relativePath: string): string =>
+    readFileSync(join(REPO_ROOT, relativePath), "utf8");
 
-    const bundle = JSON.parse(readFileSync(exportPath, "utf8")) as {
-      goldSample: { rows: LaneGoldSampleRow[] };
-    };
-    expect(bundle.goldSample.rows.length).toBeGreaterThan(0);
-    // The `terminusSample` half of this bundle is deleted with lane state
-    // (lane-state-retirement ticket 01) — asserted absent, not merely unread.
-    expect("terminusSample" in bundle).toBe(false);
-
-    // Grade every row and feed the bundle straight back.
-    const graded = {
-      ...bundle,
-      goldSample: {
-        ...bundle.goldSample,
-        rows: bundle.goldSample.rows.map((row) => ({
-          ...row,
-          verdict: { tail: "correct", head: "correct" },
-        })),
-      },
-    };
-    const gradedPath = join(dir, "sample.graded.json");
-    writeFileSync(gradedPath, JSON.stringify(graded, null, 2));
-
-    const rerun = captureIo();
-    expect(
-      runLaneControlsCli(["--db", dbPath, "--graded", gradedPath], rerun.io),
-    ).toBe(0);
-    expect(rerun.stdout.join("\n")).toContain("measured: 100 % of graded rows with BOTH sides correct");
+  test("no C1/C3/C4 symbol, control id or gold-sample machinery survives in the CLI or its loader", () => {
+    for (const relative of ["src/cli/lane-controls-cli.ts", "src/db/lane-checker-load.ts"]) {
+      const source = readSource(relative);
+      for (const retired of [
+        "controlUnsettledSides",
+        "controlLanelessNodes",
+        "controlGoldSample",
+        "computeLanelessNodes",
+        "LaneLanelessNode",
+        "drawGoldSample",
+        "scoreGoldSample",
+        "readGradedSample",
+        "goldEdgeIdentity",
+        "LaneGoldSample",
+        "LaneGoldScore",
+        "LaneGoldSampleRow",
+        "LaneGoldSampleEdgeId",
+        "LaneGoldVerdict",
+        "LaneGoldStratumScore",
+        '"C1"',
+        '"C3"',
+        '"C4"',
+      ]) {
+        expect(source, `${relative} must not contain "${retired}"`).not.toContain(retired);
+      }
+    }
   });
 
-  test("readGradedSample accepts the bundle and a bare sample, and refuses anything else", () => {
-    const rows = [{ stratum: "x" }];
-    expect(readGradedSample(JSON.stringify({ goldSample: { rows } }))).toHaveLength(1);
-    expect(readGradedSample(JSON.stringify({ rows }))).toHaveLength(1);
-    expect(() => readGradedSample(JSON.stringify({ nope: 1 }))).toThrow(/rows/);
+  test("the CLI accepts no --sample, --export or --graded flag", () => {
+    for (const flag of ["--sample", "--export", "--graded"]) {
+      expect(() => parseLaneControlsArguments([flag, "x"])).toThrow(/unrecognized argument/);
+    }
   });
 
-  test("a --graded path that cannot be read exits 1 rather than scoring nothing as zero", () => {
+  test("a report never carries a sample, exportPath or gradedPath field", () => {
     seedFixture();
-    const { io, stderr } = captureIo();
-    const code = runLaneControlsCli(["--db", dbPath, "--graded", join(dir, "absent.json")], io);
-    expect(code).toBe(1);
-    expect(stderr.join("\n")).toContain("could not read --graded");
-  });
-});
-
-describe("drawGoldSample is pure", () => {
-  test("it never draws from an unsettled edge and orders strata deterministically", () => {
-    const edges = [
-      {
-        citingId: 2,
-        citedId: 1,
-        relation: "extends",
-        provenance: "asserted",
-        tailTag: "a",
-        headTag: "a",
-        citingSegment: "7",
-        citedSegment: "7",
-        citingOrder: [1, 2] as const,
-        citedOrder: [1, 1] as const,
-        citingEpoch: 2,
-        citedEpoch: 1,
-        citingTags: ["a"],
-        citedTags: ["a"],
-      },
-      {
-        citingId: 3,
-        citedId: 1,
-        relation: "extends",
-        provenance: "asserted",
-        tailTag: "",
-        headTag: "",
-        citingSegment: "7",
-        citedSegment: "7",
-        citingOrder: [1, 3] as const,
-        citedOrder: [1, 1] as const,
-        citingEpoch: 3,
-        citedEpoch: 1,
-      },
-    ];
-    const sample = drawGoldSample(edges, 5, (id) => "S1/T" + id);
-    expect(sample.rows).toHaveLength(1);
-    expect(sample.rows[0]!.stratum).toBe("extends @ E7:{a}");
-    expect(sample.rows[0]!.address).toBe("S1/T2 --extends--> S1/T1");
+    const built = report();
+    expect("sample" in built).toBe(false);
+    expect("exportPath" in built).toBe(false);
+    expect("gradedPath" in built).toBe(false);
   });
 });

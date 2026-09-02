@@ -1603,8 +1603,9 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
 // ------------------------------------------- ATTRIBUTION CONTROLS (ticket 13)
 
 /**
- * The four reads the v12 ATTRIBUTION CONTROLS (`src/cli/lane-controls-cli.ts`,
- * ticket 13) are built on. Every one is a `SELECT`; nothing below opens a
+ * The reads the v12 ATTRIBUTION CONTROL (`src/cli/lane-controls-cli.ts`,
+ * ticket 13; C1/C3/C4 retired by main-agent-edges D10, ticket 8 -- only C2
+ * remains) is built on. Every one is a `SELECT`; nothing below opens a
  * connection, begins a transaction, or writes.
  *
  * WHY A CAPABILITY PROBE COMES FIRST. `scripts/lane-controls.ts` opens
