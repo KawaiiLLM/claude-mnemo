@@ -12020,6 +12020,327 @@ var init_lanes = __esm({
   }
 });
 
+// src/shared/topic-tag.ts
+function findPhaseToken(payload) {
+  for (const token of payload.split("-")) {
+    if (TOPIC_PHASE_TOKENS.has(token)) {
+      return token;
+    }
+  }
+  return null;
+}
+function phaseBearingNameRefusal(noun, name) {
+  const phaseToken = findPhaseToken(name);
+  if (phaseToken === null) {
+    return null;
+  }
+  return `${noun} ${JSON.stringify(name)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject it is about and let each member's own type carry its phase.`;
+}
+function isTopicTag(tag) {
+  return tag.toLocaleLowerCase("en-US").startsWith(TOPIC_TAG_PREFIX);
+}
+function topicTagPayload(tag) {
+  return tag.slice(TOPIC_TAG_PREFIX.length);
+}
+function deriveCandidatePayload(payload) {
+  return payload.trim().toLocaleLowerCase("en-US").normalize("NFC").replace(/-{2,}/g, "-").replace(/^-+/, "").replace(/-+$/, "");
+}
+function offendingCharacters(payload) {
+  const seen = [];
+  for (const ch of payload) {
+    if (!/^[a-z0-9-]$/.test(ch) && !seen.includes(ch)) {
+      seen.push(ch);
+    }
+  }
+  return seen;
+}
+function checkTopicTag(raw) {
+  const payload = topicTagPayload(raw);
+  const namespaceIsCanonical = raw.startsWith(TOPIC_TAG_PREFIX);
+  const derivedPayload = deriveCandidatePayload(payload);
+  if (!namespaceIsCanonical || payload !== derivedPayload) {
+    if (derivedPayload !== "" && CANONICAL_PAYLOAD_PATTERN.test(derivedPayload)) {
+      const candidate = `${TOPIC_TAG_PREFIX}${derivedPayload}`;
+      return {
+        ok: false,
+        violation: "non-canonical",
+        candidate,
+        message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 write ${JSON.stringify(candidate)} instead. A topic word is refused rather than silently normalized, so the word stored is always the word written.`
+      };
+    }
+    return nonDerivableRefusal(raw, payload);
+  }
+  if (payload === "" || !CANONICAL_PAYLOAD_PATTERN.test(payload)) {
+    return nonDerivableRefusal(raw, payload);
+  }
+  const phaseToken = findPhaseToken(payload);
+  if (phaseToken !== null) {
+    return {
+      ok: false,
+      violation: "phase-token",
+      candidate: null,
+      message: `topic tag ${JSON.stringify(raw)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject alone and let type carry the phase.`
+    };
+  }
+  return { ok: true, tag: raw, payload };
+}
+function nonDerivableRefusal(raw, payload) {
+  const offending = offendingCharacters(deriveCandidatePayload(payload));
+  const offendingText = offending.length === 0 ? "it is empty once trimmed" : `these characters have no place in it: ${offending.map((ch) => JSON.stringify(ch)).join(", ")}`;
+  return {
+    ok: false,
+    violation: "non-canonical",
+    candidate: null,
+    message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 ${offendingText}. The canonical form is ${CANONICAL_PATTERN_TEXT}. No replacement is suggested: repairing this would be a new judgment about what the word should say, and that is yours.`
+  };
+}
+function topicTagsOf(tags) {
+  return tags.filter((tag) => isTopicTag(tag));
+}
+var TOPIC_TAG_PREFIX, TOPIC_PHASE_TOKENS, ORTHOGONALITY_LAW, CANONICAL_PATTERN_TEXT, CANONICAL_PAYLOAD_PATTERN;
+var init_topic_tag = __esm({
+  "src/shared/topic-tag.ts"() {
+    "use strict";
+    TOPIC_TAG_PREFIX = "topic:";
+    TOPIC_PHASE_TOKENS = /* @__PURE__ */ new Set([
+      "discuss",
+      "discussion",
+      "discussions",
+      "discussing",
+      "discussed",
+      "research",
+      "researches",
+      "researching",
+      "researched",
+      "measure",
+      "measures",
+      "measuring",
+      "measured",
+      "measurement",
+      "measurements",
+      "design",
+      "designs",
+      "designing",
+      "designed",
+      "correction",
+      "corrections",
+      "correct",
+      "corrects",
+      "correcting",
+      "corrected",
+      "implement",
+      "implements",
+      "implementing",
+      "implemented",
+      "implementation",
+      "implementations",
+      "refactor",
+      "refactors",
+      "refactoring",
+      "refactored",
+      "fix",
+      "fixes",
+      "fixing",
+      "fixed",
+      "bugfix",
+      "bugfixes",
+      "hotfix",
+      "hotfixes",
+      "delegate",
+      "delegates",
+      "delegating",
+      "delegated",
+      "delegation",
+      "review",
+      "reviews",
+      "reviewing",
+      "reviewed",
+      "reviewer",
+      "reviewers",
+      "ops",
+      "op",
+      "operation",
+      "operations",
+      "verify",
+      "verifies",
+      "verifying",
+      "verified",
+      "verification",
+      "test",
+      "tests",
+      "testing",
+      "tested"
+    ]);
+    ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
+    CANONICAL_PATTERN_TEXT = 'topic:<word>, where <word> is lowercase letters, digits and "-" only (NFC, no leading or trailing hyphen, non-empty)';
+    CANONICAL_PAYLOAD_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+  }
+});
+
+// src/db/turn-tag-gate.ts
+function loadSegmentTagIndex(db) {
+  const rows = db.query(
+    `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments
+        WHERE json_array_length(tags) >= 1`
+  ).all();
+  const index = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+  return index;
+}
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
+}
+function segmentsDeclaringLane(db, tag) {
+  return db.query(
+    "SELECT segment_id AS segmentId FROM lanes WHERE tag = ? ORDER BY segment_id"
+  ).all(tag).map((row) => row.segmentId);
+}
+function isMachineTag(tag) {
+  return tag.includes(":") && !isTopicTag(tag);
+}
+function quoteList(values) {
+  const quoted = values.map((value) => `"${value}"`);
+  if (quoted.length <= 1) {
+    return quoted[0] ?? "(none)";
+  }
+  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+}
+function judgeTopicTags(next, priorTags, retiringTopicTag) {
+  const priorTopics = topicTagsOf(priorTags);
+  const priorSet = new Set(priorTopics);
+  const nextTopics = topicTagsOf(next);
+  const nextSet = new Set(nextTopics);
+  const added = [];
+  const alreadyPresent = [];
+  for (const tag of nextTopics) {
+    if (priorSet.has(tag)) {
+      alreadyPresent.push(tag);
+      continue;
+    }
+    const verdict = checkTopicTag(tag);
+    if (!verdict.ok) {
+      return { ok: false, message: `Refused: ${verdict.message} Nothing was written.` };
+    }
+    added.push(tag);
+  }
+  if (retiringTopicTag !== void 0) {
+    if (!isTopicTag(retiringTopicTag)) {
+      return {
+        ok: false,
+        message: `Refused: ${JSON.stringify(retiringTopicTag)} is not a topic word, and the correction form retires topic words only. Nothing was written.`
+      };
+    }
+    if (!priorSet.has(retiringTopicTag)) {
+      const carried = priorTopics.length === 0 ? "none at all" : quoteList(priorTopics);
+      return {
+        ok: false,
+        message: `Refused: this turn does not carry ${JSON.stringify(retiringTopicTag)} \u2014 it carries ${carried}. A correction retires a word that is actually there. Nothing was written.`
+      };
+    }
+    if (nextSet.has(retiringTopicTag)) {
+      return {
+        ok: false,
+        message: `Refused: ${JSON.stringify(retiringTopicTag)} is named for retirement and is also in the replacement set \u2014 one call cannot both drop and keep it. Nothing was written.`
+      };
+    }
+    if (added.length === 0) {
+      return {
+        ok: false,
+        message: `Refused: retiring ${JSON.stringify(retiringTopicTag)} needs the word that replaces it in the SAME call \u2014 the correction form names old and new together, so a turn is never left with a subject its author silently withdrew. Nothing was written.`
+      };
+    }
+  }
+  for (const tag of priorTopics) {
+    if (nextSet.has(tag) || tag === retiringTopicTag) {
+      continue;
+    }
+    return {
+      ok: false,
+      message: `Refused: this write drops the topic word ${JSON.stringify(tag)} the turn already carries. A topic word is permanent \u2014 a whole-set tags write must restate every one of them. To replace it, name it for retirement in the same call that writes its successor. Nothing was written.`
+    };
+  }
+  return {
+    ok: true,
+    topics: {
+      added,
+      alreadyPresent,
+      retired: retiringTopicTag ?? null
+    }
+  };
+}
+function checkTurnTagWrite(db, input) {
+  const segmentTags = loadSegmentTagIndex(db);
+  const deduped = [...new Set(input.nextTags)];
+  const prior = new Set(input.priorTags);
+  const topicVerdict = judgeTopicTags(deduped, input.priorTags, input.retiringTopicTag);
+  if (!topicVerdict.ok) {
+    return { ok: false, message: topicVerdict.message };
+  }
+  const next = deduped.filter((tag) => !isTopicTag(tag));
+  const matchedSegmentTags = next.filter((tag) => segmentTags.has(tag));
+  if (matchedSegmentTags.length > 1) {
+    const named = matchedSegmentTags.map((tag) => `"${tag}" (E${segmentTags.get(tag)})`).join(" and ");
+    return {
+      ok: false,
+      message: `Refused: these tags name ${matchedSegmentTags.length} segments \u2014 ${named}. A turn belongs to at most one segment, and its segment is DERIVED from its tags, so at most one segment tag may appear. Nothing was written.`
+    };
+  }
+  const segmentTag = matchedSegmentTags[0] ?? null;
+  const segmentId = segmentTag === null ? null : segmentTags.get(segmentTag);
+  const declaredHere = segmentId === null ? /* @__PURE__ */ new Set() : loadDeclaredLaneTags(db, segmentId);
+  for (const tag of next) {
+    if (tag === segmentTag) {
+      continue;
+    }
+    if (declaredHere.has(tag)) {
+      continue;
+    }
+    const owners = segmentsDeclaringLane(db, tag);
+    if (owners.length > 0) {
+      const clauses = owners.map((owner) => {
+        const ownerTag = [...segmentTags.entries()].find(([, id]) => id === owner)?.[0] ?? null;
+        return ownerTag === null ? `E${owner} (which has no segment tag of its own yet \u2014 name one with remember(retag))` : `E${owner}, whose segment tag "${ownerTag}" is not in these tags`;
+      });
+      return {
+        ok: false,
+        message: `Refused: "${tag}" is a lane declared on ${clauses.join(" and ")}. A lane tag rides only on a turn that already carries its segment's tag \u2014 add that segment tag, or drop "${tag}". Nothing was written.`
+      };
+    }
+    if (prior.has(tag)) {
+      continue;
+    }
+    const legal = segmentId === null ? [...segmentTags.keys()].sort() : [segmentTag, ...[...declaredHere].sort()];
+    const legalText = legal.length === 0 ? "nothing \u2014 no segment has been named yet (remember(retag) names one)" : quoteList(legal);
+    const where = segmentId === null ? "no segment tag is present, so the only legal values are the segment tags themselves" : `E${segmentId} is this turn's segment, so the legal values are its own tag and the lanes it has declared`;
+    return {
+      ok: false,
+      message: `Refused: "${tag}" is neither a segment tag nor a lane declared where this turn lives. ${where} \u2014 legal now: ${legalText}. Nothing was written.`
+    };
+  }
+  const effectiveTags = [...deduped];
+  const nextSet = new Set(deduped);
+  for (const tag of input.priorTags) {
+    if (isMachineTag(tag) && !nextSet.has(tag)) {
+      effectiveTags.push(tag);
+      nextSet.add(tag);
+    }
+  }
+  return { ok: true, segmentId, topics: topicVerdict.topics, effectiveTags };
+}
+var init_turn_tag_gate = __esm({
+  "src/db/turn-tag-gate.ts"() {
+    "use strict";
+    init_topic_tag();
+  }
+});
+
 // src/db/homeless-record.ts
 function ensureHomelessRecordTables(db) {
   db.exec(HOMELESS_GROUPS_TABLE_DDL);
@@ -12248,7 +12569,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtjznpj4" : "dev";
+    BUILD_ID = true ? "0.29.0-mtjzsckv" : "dev";
   }
 });
 
@@ -12384,6 +12705,8 @@ var schema_exports = {};
 __export(schema_exports, {
   LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT: () => LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT,
   LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT: () => LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT,
+  MEMBERSHIP_CUTOVER_MIGRATION_WRITER: () => MEMBERSHIP_CUTOVER_MIGRATION_WRITER,
+  MEMBERSHIP_CUTOVER_RECEIPT: () => MEMBERSHIP_CUTOVER_RECEIPT,
   MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT: () => MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT,
   MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT: () => MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
   SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT: () => SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT,
@@ -13672,6 +13995,7 @@ function initializeSchema(db) {
   ensureSegmentImpressionColumns(db);
   retireUntenantedSegmentContentFromSearch(db);
   ensureMemoryEdgesPruneStampsRelations(db);
+  cutoverNamedTaskMembershipTags(db);
 }
 function ensureMemoryEdgesPruneStampsRelations(db) {
   const existing = db.query(
@@ -13684,6 +14008,73 @@ function ensureMemoryEdgesPruneStampsRelations(db) {
   runWriteTransaction(db, () => {
     db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
     db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
+}
+function cutoverNamedTaskMembershipTags(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "segment_members") || !hasTable2(db, "segments") || !hasTable2(db, "turns")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+      return;
+    }
+    const rows = db.query(
+      `SELECT sm.turn_id AS turnId, sm.segment_id AS segmentId,
+                json_extract(s.tags, '$[0]') AS taskTag,
+                t.tags AS turnTags,
+                t.session_id AS sessionId, t.prompt_number AS promptNumber
+           FROM segment_members sm
+           JOIN segments s ON s.id = sm.segment_id
+           JOIN turns t ON t.id = sm.turn_id
+          WHERE json_array_length(s.tags) >= 1`
+    ).all();
+    const segmentTags = loadSegmentTagIndex(db);
+    const conflicts = [];
+    let candidates = 0;
+    let tagged = 0;
+    for (const row of rows) {
+      const taskTag = row.taskTag;
+      if (typeof taskTag !== "string" || taskTag === "") {
+        continue;
+      }
+      let turnTags;
+      try {
+        const parsed = JSON.parse(row.turnTags ?? "[]");
+        turnTags = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+      } catch {
+        turnTags = [];
+      }
+      if (turnTags.includes(taskTag)) {
+        continue;
+      }
+      candidates += 1;
+      const address = `S${row.sessionId}/T${row.promptNumber}`;
+      const foreign = turnTags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+      if (foreign !== void 0) {
+        conflicts.push({
+          address,
+          segmentId: row.segmentId,
+          message: `${address} is a member of E${row.segmentId} ("${taskTag}") but its stored tags already carry "${foreign}", E${segmentTags.get(foreign)}'s own task tag \u2014 left untouched.`
+        });
+        continue;
+      }
+      const written = writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId: row.turnId, tags: [...turnTags, taskTag] }],
+        writer: MEMBERSHIP_CUTOVER_MIGRATION_WRITER,
+        nowEpoch
+      });
+      if (!written.ok) {
+        conflicts.push({ address, segmentId: row.segmentId, message: written.message });
+        continue;
+      }
+      tagged += 1;
+    }
+    const receipt = { candidates, tagged, conflicts };
+    writeMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT, nowEpoch, receipt);
   });
 }
 function runLaneModelV12EdgeMigration(db) {
@@ -14903,7 +15294,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGES_PRUNE_DELETED_TURN_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGES_PRUNE_DELETED_TURN_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT, MEMBERSHIP_CUTOVER_MIGRATION_WRITER, MEMBERSHIP_CUTOVER_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -14919,6 +15310,7 @@ var init_schema = __esm({
     init_segment_one_tag_migration();
     init_search();
     init_segments();
+    init_turn_tag_gate();
     init_relation_class();
     init_turn_phase();
     init_segment_era();
@@ -16485,6 +16877,8 @@ var init_schema = __esm({
     LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT = "lane-model-v12-me-merged-tag-set-retired";
     MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT = "memory-edges-relation-turn-scoped";
     MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT = "relation-vocabulary-v13-relation-class-backfill";
+    MEMBERSHIP_CUTOVER_MIGRATION_WRITER = "migration:membership-cutover";
+    MEMBERSHIP_CUTOVER_RECEIPT = "settlement-read-once-membership-cutover";
     NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE = "superseded by the settlement transition watermark (edge-mechanism-revision ticket 05, spec D8) \u2014 resettle via manual backfill";
     SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT = "retired-text-leaves-retrieval-segment-content";
     segmentsStatusVocabularyRebuildDdl = (tableName) => `
@@ -40829,317 +41223,7 @@ init_database();
 
 // src/db/lane-edge-gate.ts
 init_lanes();
-
-// src/shared/topic-tag.ts
-var TOPIC_TAG_PREFIX = "topic:";
-var TOPIC_PHASE_TOKENS = /* @__PURE__ */ new Set([
-  "discuss",
-  "discussion",
-  "discussions",
-  "discussing",
-  "discussed",
-  "research",
-  "researches",
-  "researching",
-  "researched",
-  "measure",
-  "measures",
-  "measuring",
-  "measured",
-  "measurement",
-  "measurements",
-  "design",
-  "designs",
-  "designing",
-  "designed",
-  "correction",
-  "corrections",
-  "correct",
-  "corrects",
-  "correcting",
-  "corrected",
-  "implement",
-  "implements",
-  "implementing",
-  "implemented",
-  "implementation",
-  "implementations",
-  "refactor",
-  "refactors",
-  "refactoring",
-  "refactored",
-  "fix",
-  "fixes",
-  "fixing",
-  "fixed",
-  "bugfix",
-  "bugfixes",
-  "hotfix",
-  "hotfixes",
-  "delegate",
-  "delegates",
-  "delegating",
-  "delegated",
-  "delegation",
-  "review",
-  "reviews",
-  "reviewing",
-  "reviewed",
-  "reviewer",
-  "reviewers",
-  "ops",
-  "op",
-  "operation",
-  "operations",
-  "verify",
-  "verifies",
-  "verifying",
-  "verified",
-  "verification",
-  "test",
-  "tests",
-  "testing",
-  "tested"
-]);
-var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
-function findPhaseToken(payload) {
-  for (const token of payload.split("-")) {
-    if (TOPIC_PHASE_TOKENS.has(token)) {
-      return token;
-    }
-  }
-  return null;
-}
-function phaseBearingNameRefusal(noun, name) {
-  const phaseToken = findPhaseToken(name);
-  if (phaseToken === null) {
-    return null;
-  }
-  return `${noun} ${JSON.stringify(name)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject it is about and let each member's own type carry its phase.`;
-}
-var CANONICAL_PATTERN_TEXT = 'topic:<word>, where <word> is lowercase letters, digits and "-" only (NFC, no leading or trailing hyphen, non-empty)';
-function isTopicTag(tag) {
-  return tag.toLocaleLowerCase("en-US").startsWith(TOPIC_TAG_PREFIX);
-}
-function topicTagPayload(tag) {
-  return tag.slice(TOPIC_TAG_PREFIX.length);
-}
-var CANONICAL_PAYLOAD_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-function deriveCandidatePayload(payload) {
-  return payload.trim().toLocaleLowerCase("en-US").normalize("NFC").replace(/-{2,}/g, "-").replace(/^-+/, "").replace(/-+$/, "");
-}
-function offendingCharacters(payload) {
-  const seen = [];
-  for (const ch of payload) {
-    if (!/^[a-z0-9-]$/.test(ch) && !seen.includes(ch)) {
-      seen.push(ch);
-    }
-  }
-  return seen;
-}
-function checkTopicTag(raw) {
-  const payload = topicTagPayload(raw);
-  const namespaceIsCanonical = raw.startsWith(TOPIC_TAG_PREFIX);
-  const derivedPayload = deriveCandidatePayload(payload);
-  if (!namespaceIsCanonical || payload !== derivedPayload) {
-    if (derivedPayload !== "" && CANONICAL_PAYLOAD_PATTERN.test(derivedPayload)) {
-      const candidate = `${TOPIC_TAG_PREFIX}${derivedPayload}`;
-      return {
-        ok: false,
-        violation: "non-canonical",
-        candidate,
-        message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 write ${JSON.stringify(candidate)} instead. A topic word is refused rather than silently normalized, so the word stored is always the word written.`
-      };
-    }
-    return nonDerivableRefusal(raw, payload);
-  }
-  if (payload === "" || !CANONICAL_PAYLOAD_PATTERN.test(payload)) {
-    return nonDerivableRefusal(raw, payload);
-  }
-  const phaseToken = findPhaseToken(payload);
-  if (phaseToken !== null) {
-    return {
-      ok: false,
-      violation: "phase-token",
-      candidate: null,
-      message: `topic tag ${JSON.stringify(raw)} contains the phase word ${JSON.stringify(phaseToken)} \u2014 ${ORTHOGONALITY_LAW}. Name the subject alone and let type carry the phase.`
-    };
-  }
-  return { ok: true, tag: raw, payload };
-}
-function nonDerivableRefusal(raw, payload) {
-  const offending = offendingCharacters(deriveCandidatePayload(payload));
-  const offendingText = offending.length === 0 ? "it is empty once trimmed" : `these characters have no place in it: ${offending.map((ch) => JSON.stringify(ch)).join(", ")}`;
-  return {
-    ok: false,
-    violation: "non-canonical",
-    candidate: null,
-    message: `topic tag ${JSON.stringify(raw)} is not in canonical form \u2014 ${offendingText}. The canonical form is ${CANONICAL_PATTERN_TEXT}. No replacement is suggested: repairing this would be a new judgment about what the word should say, and that is yours.`
-  };
-}
-function topicTagsOf(tags) {
-  return tags.filter((tag) => isTopicTag(tag));
-}
-
-// src/db/turn-tag-gate.ts
-function loadSegmentTagIndex(db) {
-  const rows = db.query(
-    `SELECT id, json_extract(tags, '$[0]') AS tag
-         FROM segments
-        WHERE json_array_length(tags) >= 1`
-  ).all();
-  const index = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
-      index.set(row.tag, row.id);
-    }
-  }
-  return index;
-}
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
-}
-function segmentsDeclaringLane(db, tag) {
-  return db.query(
-    "SELECT segment_id AS segmentId FROM lanes WHERE tag = ? ORDER BY segment_id"
-  ).all(tag).map((row) => row.segmentId);
-}
-function isMachineTag(tag) {
-  return tag.includes(":") && !isTopicTag(tag);
-}
-function quoteList(values) {
-  const quoted = values.map((value) => `"${value}"`);
-  if (quoted.length <= 1) {
-    return quoted[0] ?? "(none)";
-  }
-  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
-}
-function judgeTopicTags(next, priorTags, retiringTopicTag) {
-  const priorTopics = topicTagsOf(priorTags);
-  const priorSet = new Set(priorTopics);
-  const nextTopics = topicTagsOf(next);
-  const nextSet = new Set(nextTopics);
-  const added = [];
-  const alreadyPresent = [];
-  for (const tag of nextTopics) {
-    if (priorSet.has(tag)) {
-      alreadyPresent.push(tag);
-      continue;
-    }
-    const verdict = checkTopicTag(tag);
-    if (!verdict.ok) {
-      return { ok: false, message: `Refused: ${verdict.message} Nothing was written.` };
-    }
-    added.push(tag);
-  }
-  if (retiringTopicTag !== void 0) {
-    if (!isTopicTag(retiringTopicTag)) {
-      return {
-        ok: false,
-        message: `Refused: ${JSON.stringify(retiringTopicTag)} is not a topic word, and the correction form retires topic words only. Nothing was written.`
-      };
-    }
-    if (!priorSet.has(retiringTopicTag)) {
-      const carried = priorTopics.length === 0 ? "none at all" : quoteList(priorTopics);
-      return {
-        ok: false,
-        message: `Refused: this turn does not carry ${JSON.stringify(retiringTopicTag)} \u2014 it carries ${carried}. A correction retires a word that is actually there. Nothing was written.`
-      };
-    }
-    if (nextSet.has(retiringTopicTag)) {
-      return {
-        ok: false,
-        message: `Refused: ${JSON.stringify(retiringTopicTag)} is named for retirement and is also in the replacement set \u2014 one call cannot both drop and keep it. Nothing was written.`
-      };
-    }
-    if (added.length === 0) {
-      return {
-        ok: false,
-        message: `Refused: retiring ${JSON.stringify(retiringTopicTag)} needs the word that replaces it in the SAME call \u2014 the correction form names old and new together, so a turn is never left with a subject its author silently withdrew. Nothing was written.`
-      };
-    }
-  }
-  for (const tag of priorTopics) {
-    if (nextSet.has(tag) || tag === retiringTopicTag) {
-      continue;
-    }
-    return {
-      ok: false,
-      message: `Refused: this write drops the topic word ${JSON.stringify(tag)} the turn already carries. A topic word is permanent \u2014 a whole-set tags write must restate every one of them. To replace it, name it for retirement in the same call that writes its successor. Nothing was written.`
-    };
-  }
-  return {
-    ok: true,
-    topics: {
-      added,
-      alreadyPresent,
-      retired: retiringTopicTag ?? null
-    }
-  };
-}
-function checkTurnTagWrite(db, input) {
-  const segmentTags = loadSegmentTagIndex(db);
-  const deduped = [...new Set(input.nextTags)];
-  const prior = new Set(input.priorTags);
-  const topicVerdict = judgeTopicTags(deduped, input.priorTags, input.retiringTopicTag);
-  if (!topicVerdict.ok) {
-    return { ok: false, message: topicVerdict.message };
-  }
-  const next = deduped.filter((tag) => !isTopicTag(tag));
-  const matchedSegmentTags = next.filter((tag) => segmentTags.has(tag));
-  if (matchedSegmentTags.length > 1) {
-    const named = matchedSegmentTags.map((tag) => `"${tag}" (E${segmentTags.get(tag)})`).join(" and ");
-    return {
-      ok: false,
-      message: `Refused: these tags name ${matchedSegmentTags.length} segments \u2014 ${named}. A turn belongs to at most one segment, and its segment is DERIVED from its tags, so at most one segment tag may appear. Nothing was written.`
-    };
-  }
-  const segmentTag = matchedSegmentTags[0] ?? null;
-  const segmentId = segmentTag === null ? null : segmentTags.get(segmentTag);
-  const declaredHere = segmentId === null ? /* @__PURE__ */ new Set() : loadDeclaredLaneTags(db, segmentId);
-  for (const tag of next) {
-    if (tag === segmentTag) {
-      continue;
-    }
-    if (declaredHere.has(tag)) {
-      continue;
-    }
-    const owners = segmentsDeclaringLane(db, tag);
-    if (owners.length > 0) {
-      const clauses = owners.map((owner) => {
-        const ownerTag = [...segmentTags.entries()].find(([, id]) => id === owner)?.[0] ?? null;
-        return ownerTag === null ? `E${owner} (which has no segment tag of its own yet \u2014 name one with remember(retag))` : `E${owner}, whose segment tag "${ownerTag}" is not in these tags`;
-      });
-      return {
-        ok: false,
-        message: `Refused: "${tag}" is a lane declared on ${clauses.join(" and ")}. A lane tag rides only on a turn that already carries its segment's tag \u2014 add that segment tag, or drop "${tag}". Nothing was written.`
-      };
-    }
-    if (prior.has(tag)) {
-      continue;
-    }
-    const legal = segmentId === null ? [...segmentTags.keys()].sort() : [segmentTag, ...[...declaredHere].sort()];
-    const legalText = legal.length === 0 ? "nothing \u2014 no segment has been named yet (remember(retag) names one)" : quoteList(legal);
-    const where = segmentId === null ? "no segment tag is present, so the only legal values are the segment tags themselves" : `E${segmentId} is this turn's segment, so the legal values are its own tag and the lanes it has declared`;
-    return {
-      ok: false,
-      message: `Refused: "${tag}" is neither a segment tag nor a lane declared where this turn lives. ${where} \u2014 legal now: ${legalText}. Nothing was written.`
-    };
-  }
-  const effectiveTags = [...deduped];
-  const nextSet = new Set(deduped);
-  for (const tag of input.priorTags) {
-    if (isMachineTag(tag) && !nextSet.has(tag)) {
-      effectiveTags.push(tag);
-      nextSet.add(tag);
-    }
-  }
-  return { ok: true, segmentId, topics: topicVerdict.topics, effectiveTags };
-}
-
-// src/db/lane-edge-gate.ts
+init_turn_tag_gate();
 init_memory_edges();
 function owningSegmentId(segmentTags, tags) {
   for (const tag of tags) {
@@ -41249,6 +41333,7 @@ function canonicalTagSet(tags) {
 
 // src/db/lane-checker-load.ts
 init_turn_phase();
+init_turn_tag_gate();
 init_turn_liveness();
 var SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"];
 function loadOwningSegments(db, turnIds) {
@@ -47466,6 +47551,9 @@ function renderSegmentLaneVocabulary(db, segmentId) {
   ].join("\n");
 }
 
+// src/mcp/note.ts
+init_turn_tag_gate();
+
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
   turn_id AS turnId,
@@ -47806,6 +47894,7 @@ function resolveClear(field, existing, mode) {
 
 // src/mcp/note.ts
 init_segment_era();
+init_topic_tag();
 init_type_vocabulary();
 init_turn_phase();
 var TURN_MODE_FIELDS = ["title", "content", "insight", "type", "tags"];
@@ -50710,6 +50799,7 @@ init_impressions();
 init_lanes();
 init_tag_namespace();
 init_write_gate();
+init_topic_tag();
 var REMEMBER_VERBS = [
   "create",
   "attach",

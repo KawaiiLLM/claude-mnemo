@@ -4,7 +4,7 @@
 
 **Blocked by:** 02.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2414 at fd0ee1af (merged f23daf49, no conflicts)**: tsc 0, 4793/0/264 (+6/+1 accounted), guards clean; my probe RED: the foreign-task conflict pre-check disabled. Clone: 98 → 0 tag-less members of named tasks, 185 unnamed members unchanged, 0 conflicts, ~3.5 s for 98 per-turn primitive calls (deliberately not set-based).
 
 - [x] A receipt-guarded one-shot in `initializeSchema` (the `migration_receipts` idiom, double-checked outside and inside the write transaction) that, through the ticket-02 primitive, adds the task tag to every member turn of a named task that lacks it. Production (read-only, 2026-09-02): 98 such members; 0 foreign-task conflicts. Report before/after counts on a clone and elapsed.
 - [x] Unnamed tasks (66; 185 members) untouched: assert row counts before/after are identical for them.

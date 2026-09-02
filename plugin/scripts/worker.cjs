@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjznpj4" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjzsckv" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2372,6 +2372,14 @@ function readNoteSettlementLaneMemberSnapshot(db, jobId) {
 function claimWriterId(jobId, generation, stage) {
   return `claim:${jobId}:${generation}:${stage}`;
 }
+var ANONYMOUS_WRITER = "unknown";
+function nextWriteGateSequence(db) {
+  return db.query(
+    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+       ON CONFLICT(id) DO UPDATE SET value = value + 1
+       RETURNING value`
+  ).get().value;
+}
 function snapshotWriteGateSequence(db) {
   const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
   return row?.value ?? 0;
@@ -2438,6 +2446,18 @@ function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
       epoch
     );
   }
+}
+function stampField(db, entityType, entityId, field, writer, nowEpoch) {
+  const writeSequence = nextWriteGateSequence(db);
+  db.query(
+    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+       writer = excluded.writer,
+       write_sequence = excluded.write_sequence,
+       written_at_epoch = excluded.written_at_epoch`
+  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
+  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
 }
 
 // src/db/segments.ts
@@ -2659,6 +2679,84 @@ function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch, operation = "no
   }
   return target;
 }
+function writeMembershipTags(db, input) {
+  const { operation, writes, nowEpoch } = input;
+  if (writes.length === 0) {
+    return { ok: true, operation, changedTurnIds: [], membership: [] };
+  }
+  const index = segmentTagIndex(db);
+  const refusals = [];
+  for (const write of writes) {
+    const target = derivedTarget(index, write.tags);
+    if (operation === "normal") {
+      const owner = frozenOwnerSegmentIds(db, write.turnId).find((id) => id !== target);
+      if (target !== null && owner !== void 0) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message: formatFrozenOwnerRefusal(db, write.turnId, owner, target)
+        });
+        continue;
+      }
+    }
+    if (operation === "thaw-owner" && input.thawingSegmentId !== void 0) {
+      if (target !== input.thawingSegmentId) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message: `thaw-owner may only move a member into E${input.thawingSegmentId}, the task being named \u2014 this write derives into ${target === null ? "no task" : `E${target}`}.`
+        });
+        continue;
+      }
+    }
+    const strandings = findMembershipLaneStrandings(db, [write.turnId], target);
+    if (strandings.length > 0) {
+      refusals.push({
+        turnId: write.turnId,
+        address: turnAddress(db, write.turnId),
+        message: formatMembershipLaneStrandingRejection(db, target, strandings)
+      });
+    }
+  }
+  if (refusals.length > 0) {
+    return {
+      ok: false,
+      refusals,
+      message: `${refusals.length} of ${writes.length} turn(s) refused; nothing was written. ` + refusals.map((entry) => `${entry.address}: ${entry.message}`).join(" ")
+    };
+  }
+  const readTags = db.query(
+    "SELECT tags FROM turns WHERE id = ?"
+  );
+  const updateTurnTags = db.query(
+    "UPDATE turns SET tags = ? WHERE id = ?"
+  );
+  const changedTurnIds = [];
+  const membership = [];
+  for (const write of writes) {
+    const raw = readTags.get(write.turnId)?.tags ?? "[]";
+    let stored;
+    try {
+      const parsed = JSON.parse(raw);
+      stored = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      stored = [];
+    }
+    const next = [...write.tags];
+    const moved = next.length !== stored.length || next.some((value, at) => value !== stored[at]);
+    if (moved) {
+      updateTurnTags.run(JSON.stringify(next), write.turnId);
+      stampField(db, "turn", write.turnId, "tags", input.writer ?? ANONYMOUS_WRITER, nowEpoch);
+      changedTurnIds.push(write.turnId);
+    }
+    const segmentId = deriveTurnSegmentMembership(db, write.turnId, next, nowEpoch, operation);
+    membership.push({ turnId: write.turnId, segmentId });
+    if (moved) {
+      recomputeSegmentFacetsForTurn(db, write.turnId);
+    }
+  }
+  return { ok: true, operation, changedTurnIds, membership };
+}
 function recomputeSegmentFacetsForTurn(db, turnId) {
   const rows = db.query(
     `SELECT segment_id AS segmentId FROM segment_members
@@ -2724,6 +2822,91 @@ function turnAddress(db, turnId) {
     "SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?"
   ).get(turnId);
   return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn #${turnId}`;
+}
+function findMembershipLaneStrandings(db, turnIds, targetSegmentId) {
+  const moving = new Set(turnIds);
+  if (moving.size === 0) {
+    return [];
+  }
+  const ids = [...moving];
+  const placeholders = ids.map(() => "?").join(",");
+  const edges = db.query(
+    `SELECT citing_id AS citingId, cited_id AS citedId, relation,
+              tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges
+        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+          AND relation IS NOT NULL
+          AND (tail_tag <> '' OR head_tag <> '')
+          AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`
+  ).all(...ids, ...ids);
+  if (edges.length === 0) {
+    return [];
+  }
+  const owningBefore = /* @__PURE__ */ new Map();
+  const segmentOf = (turnId, after) => {
+    if (after && moving.has(turnId)) {
+      return targetSegmentId;
+    }
+    if (!owningBefore.has(turnId)) {
+      owningBefore.set(turnId, getOwningSegmentId(db, turnId));
+    }
+    return owningBefore.get(turnId) ?? null;
+  };
+  const declaredCache = /* @__PURE__ */ new Map();
+  const declares = (segmentId, tag) => {
+    if (segmentId === null) {
+      return false;
+    }
+    let declared = declaredCache.get(segmentId);
+    if (declared === void 0) {
+      declared = new Set(
+        db.query("SELECT tag FROM lanes WHERE segment_id = ?").all(segmentId).map((row) => row.tag)
+      );
+      declaredCache.set(segmentId, declared);
+    }
+    return declared.has(tag);
+  };
+  const strandings = [];
+  for (const edge of edges) {
+    const sides = [
+      { endpoint: "citing", turnId: edge.citingId, tag: edge.tailTag },
+      { endpoint: "cited", turnId: edge.citedId, tag: edge.headTag }
+    ];
+    for (const side of sides) {
+      if (side.tag === "") {
+        continue;
+      }
+      const before = segmentOf(side.turnId, false);
+      const after = segmentOf(side.turnId, true);
+      if (before === after) {
+        continue;
+      }
+      if (!declares(before, side.tag)) {
+        continue;
+      }
+      if (declares(after, side.tag)) {
+        continue;
+      }
+      strandings.push({
+        citingTurnId: edge.citingId,
+        citedTurnId: edge.citedId,
+        relation: edge.relation,
+        tag: side.tag,
+        endpoint: side.endpoint,
+        segmentIdAfter: after
+      });
+    }
+  }
+  return strandings;
+}
+function formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings) {
+  const clauses = strandings.map((stranding) => {
+    const arrow = `${turnAddress(db, stranding.citingTurnId)} --${stranding.relation}--> ${turnAddress(db, stranding.citedTurnId)} {${stranding.tag}}`;
+    const where = stranding.segmentIdAfter === null ? `the ${stranding.endpoint} turn would belong to NO segment, and a lane is declared on a segment` : `E${stranding.segmentIdAfter} \u2014 the ${stranding.endpoint} turn's segment after this move \u2014 has not declared lane "${stranding.tag}"`;
+    return `${arrow}: ${where}`;
+  });
+  const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
+  return `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved \u2014 ${clauses.join("; ")}. Mint the lane in the destination segment first (remember create, id="E<n>/#<tag>"), or retract the edge.`;
 }
 function getSegmentsForTurn(db, turnId) {
   return db.query(
@@ -4213,6 +4396,30 @@ function runSegmentOneTagMigration(db, nowEpoch = Math.floor(Date.now() / 1e3)) 
     const receipt = { named, pendingNaming, retired };
     writeMigrationReceipt(db, SEGMENT_ONE_TAG_RECEIPT, nowEpoch, receipt);
   });
+}
+
+// src/shared/topic-tag.ts
+var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
+
+// src/db/turn-tag-gate.ts
+function loadSegmentTagIndex(db) {
+  const rows = db.query(
+    `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments
+        WHERE json_array_length(tags) >= 1`
+  ).all();
+  const index = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+  return index;
+}
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
 }
 
 // src/db/schema.ts
@@ -7051,6 +7258,7 @@ function initializeSchema(db) {
   ensureSegmentImpressionColumns(db);
   retireUntenantedSegmentContentFromSearch(db);
   ensureMemoryEdgesPruneStampsRelations(db);
+  cutoverNamedTaskMembershipTags(db);
 }
 function ensureMemoryEdgesPruneStampsRelations(db) {
   const existing = db.query(
@@ -7063,6 +7271,75 @@ function ensureMemoryEdgesPruneStampsRelations(db) {
   runWriteTransaction(db, () => {
     db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
     db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
+}
+var MEMBERSHIP_CUTOVER_MIGRATION_WRITER = "migration:membership-cutover";
+var MEMBERSHIP_CUTOVER_RECEIPT = "settlement-read-once-membership-cutover";
+function cutoverNamedTaskMembershipTags(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "segment_members") || !hasTable2(db, "segments") || !hasTable2(db, "turns")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+      return;
+    }
+    const rows = db.query(
+      `SELECT sm.turn_id AS turnId, sm.segment_id AS segmentId,
+                json_extract(s.tags, '$[0]') AS taskTag,
+                t.tags AS turnTags,
+                t.session_id AS sessionId, t.prompt_number AS promptNumber
+           FROM segment_members sm
+           JOIN segments s ON s.id = sm.segment_id
+           JOIN turns t ON t.id = sm.turn_id
+          WHERE json_array_length(s.tags) >= 1`
+    ).all();
+    const segmentTags = loadSegmentTagIndex(db);
+    const conflicts = [];
+    let candidates = 0;
+    let tagged = 0;
+    for (const row of rows) {
+      const taskTag = row.taskTag;
+      if (typeof taskTag !== "string" || taskTag === "") {
+        continue;
+      }
+      let turnTags;
+      try {
+        const parsed = JSON.parse(row.turnTags ?? "[]");
+        turnTags = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+      } catch {
+        turnTags = [];
+      }
+      if (turnTags.includes(taskTag)) {
+        continue;
+      }
+      candidates += 1;
+      const address = `S${row.sessionId}/T${row.promptNumber}`;
+      const foreign = turnTags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+      if (foreign !== void 0) {
+        conflicts.push({
+          address,
+          segmentId: row.segmentId,
+          message: `${address} is a member of E${row.segmentId} ("${taskTag}") but its stored tags already carry "${foreign}", E${segmentTags.get(foreign)}'s own task tag \u2014 left untouched.`
+        });
+        continue;
+      }
+      const written = writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId: row.turnId, tags: [...turnTags, taskTag] }],
+        writer: MEMBERSHIP_CUTOVER_MIGRATION_WRITER,
+        nowEpoch
+      });
+      if (!written.ok) {
+        conflicts.push({ address, segmentId: row.segmentId, message: written.message });
+        continue;
+      }
+      tagged += 1;
+    }
+    const receipt = { candidates, tagged, conflicts };
+    writeMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT, nowEpoch, receipt);
   });
 }
 function runLaneModelV12EdgeMigration(db) {
@@ -10029,16 +10306,6 @@ function deriveLaneInterpretation(turns, edges) {
     laneByToken.set(token, lane);
   }
   return { lanes, laneByToken, warnings };
-}
-
-// src/shared/topic-tag.ts
-var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
-
-// src/db/turn-tag-gate.ts
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
 }
 
 // src/db/lane-checker-load.ts

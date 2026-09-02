@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjznpj4" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjzsckv" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -3714,6 +3714,27 @@ function runSegmentOneTagMigration(db, nowEpoch = Math.floor(Date.now() / 1e3)) 
   });
 }
 
+// src/db/turn-tag-gate.ts
+function loadSegmentTagIndex(db) {
+  const rows = db.query(
+    `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments
+        WHERE json_array_length(tags) >= 1`
+  ).all();
+  const index = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+  return index;
+}
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
+}
+
 // src/db/schema.ts
 var MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -6550,6 +6571,7 @@ function initializeSchema(db) {
   ensureSegmentImpressionColumns(db);
   retireUntenantedSegmentContentFromSearch(db);
   ensureMemoryEdgesPruneStampsRelations(db);
+  cutoverNamedTaskMembershipTags(db);
 }
 function ensureMemoryEdgesPruneStampsRelations(db) {
   const existing = db.query(
@@ -6562,6 +6584,75 @@ function ensureMemoryEdgesPruneStampsRelations(db) {
   runWriteTransaction(db, () => {
     db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
     db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
+}
+var MEMBERSHIP_CUTOVER_MIGRATION_WRITER = "migration:membership-cutover";
+var MEMBERSHIP_CUTOVER_RECEIPT = "settlement-read-once-membership-cutover";
+function cutoverNamedTaskMembershipTags(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable2(db, "segment_members") || !hasTable2(db, "segments") || !hasTable2(db, "turns")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
+      return;
+    }
+    const rows = db.query(
+      `SELECT sm.turn_id AS turnId, sm.segment_id AS segmentId,
+                json_extract(s.tags, '$[0]') AS taskTag,
+                t.tags AS turnTags,
+                t.session_id AS sessionId, t.prompt_number AS promptNumber
+           FROM segment_members sm
+           JOIN segments s ON s.id = sm.segment_id
+           JOIN turns t ON t.id = sm.turn_id
+          WHERE json_array_length(s.tags) >= 1`
+    ).all();
+    const segmentTags = loadSegmentTagIndex(db);
+    const conflicts = [];
+    let candidates = 0;
+    let tagged = 0;
+    for (const row of rows) {
+      const taskTag = row.taskTag;
+      if (typeof taskTag !== "string" || taskTag === "") {
+        continue;
+      }
+      let turnTags;
+      try {
+        const parsed = JSON.parse(row.turnTags ?? "[]");
+        turnTags = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+      } catch {
+        turnTags = [];
+      }
+      if (turnTags.includes(taskTag)) {
+        continue;
+      }
+      candidates += 1;
+      const address = `S${row.sessionId}/T${row.promptNumber}`;
+      const foreign = turnTags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+      if (foreign !== void 0) {
+        conflicts.push({
+          address,
+          segmentId: row.segmentId,
+          message: `${address} is a member of E${row.segmentId} ("${taskTag}") but its stored tags already carry "${foreign}", E${segmentTags.get(foreign)}'s own task tag \u2014 left untouched.`
+        });
+        continue;
+      }
+      const written = writeMembershipTags(db, {
+        operation: "normal",
+        writes: [{ turnId: row.turnId, tags: [...turnTags, taskTag] }],
+        writer: MEMBERSHIP_CUTOVER_MIGRATION_WRITER,
+        nowEpoch
+      });
+      if (!written.ok) {
+        conflicts.push({ address, segmentId: row.segmentId, message: written.message });
+        continue;
+      }
+      tagged += 1;
+    }
+    const receipt = { candidates, tagged, conflicts };
+    writeMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT, nowEpoch, receipt);
   });
 }
 function runLaneModelV12EdgeMigration(db) {
@@ -9652,13 +9743,6 @@ function getObservation(db, observationId) {
 // src/shared/lane-interpretation.ts
 function canonicalTagSet(tags) {
   return [...new Set(tags)].sort();
-}
-
-// src/db/turn-tag-gate.ts
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
 }
 
 // src/db/lane-checker-load.ts
