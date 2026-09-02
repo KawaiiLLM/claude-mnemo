@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSessionToFTS } from "./search";
 
 // The 4-state lineage resolution status. Only `resolved`/`root` are terminal;

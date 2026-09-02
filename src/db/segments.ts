@@ -8,7 +8,6 @@ import {
   rekeyImpressionDebtsToSegment,
   type StoredImpression,
 } from "./impressions";
-import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import {
   findTagNamespaceHolder,
