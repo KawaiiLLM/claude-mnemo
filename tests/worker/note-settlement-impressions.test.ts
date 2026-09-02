@@ -1259,7 +1259,17 @@ describe("the writing law and both golden samples ship in the settlement prompt"
     // the synthesis form falls into, and is refused in the same breath.
     expect(teaching).toContain("DELETING the history");
     expect(teaching).toContain("NEVER keep it unmarked");
-    expect(teaching).toContain("OVERRIDE edges are the mechanical source of truth");
+    // main-agent-edges ticket 05 (spec D3): the mechanical source of truth is
+    // the WINDOW's correct/full edges, not "your own" — `computeAnchorInvalidations`
+    // scopes by writable turn and never by provenance, and the main agent now
+    // writes such rows. The retired possessive is pinned absent.
+    expect(teaching).toContain(
+      "The window's CORRECT/FULL edges are the mechanical source of",
+    );
+    expect(teaching).toContain("whoever wrote them");
+    expect(teaching).not.toContain("Your own OVERRIDE edges");
+    expect(teaching).toContain("an anchor CORRECTED in\nFULL by any edge in this window");
+    expect(teaching).not.toContain("an anchor your own edges CORRECTED");
   });
 
   test("REPAIR 1, ON THE SAMPLES — line 1 of each names the open boundary", () => {

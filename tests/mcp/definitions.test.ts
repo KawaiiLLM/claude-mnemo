@@ -453,19 +453,34 @@ describe("tool surface", () => {
     // to the Memory Rubric wholesale ([S15069/T933]/[T937]–[T939]). What
     // stays here is the call-level pointer plus the format facts a rubric
     // cannot state.
-    // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the seven
-    // relation fields are BACK on this surface (lane-model-v12 ticket 08 had
-    // deleted them on a misreading of this same ruling). The description
-    // still teaches only the common path — edges are settlement's normal
-    // business — and must never claim the parameters are unavailable.
-    expect(note).toContain("Edges (correct/verify/use");
-    expect(note).toContain("are settlement's whole business");
+    // main-agent-edges ticket 05 (spec D3): edge writing is the MAIN AGENT'S
+    // routine business again. The three sentences that sent a caller away
+    // from the parameters — "settlement's whole business", "rarely need
+    // them", and the hindsight framing — are asserted GONE, because a
+    // description that keeps any of them cancels the rubric's new duty on the
+    // one surface a caller reads at call time.
+    expect(note).toContain("this turn's EDGES");
+    expect(note).toContain("are ROUTINE here");
+    expect(note).toContain(
+      "name the earlier turns this turn used, corrected or verified",
+    );
+    expect(note).not.toContain("are settlement's whole business");
+    expect(note).not.toContain("rarely need them");
+    expect(note).not.toContain("hindsight");
+    // The new division, on the surface the caller reads: settlement fills and
+    // reviews, and declares only the ambiguous side.
+    expect(note).toContain("Settlement no longer originates them");
+    expect(note).toContain("fills what you missed and reviews");
     expect(note).not.toContain("sending one of those parameters is refused");
     expect(note.toLowerCase()).not.toContain("refused");
-    expect(note).toContain("rarely need them");
-    // The prose citation is NOT an edge and stays, which is the distinction a
-    // caller would otherwise have to guess at.
-    expect(note).toContain("it states no relation");
+    // PROSE IS NOT THE GRAPH (ticket 03's expected delta: only the inline
+    // `[T<dbid>]` grammar feeds `getEffectiveCitations`). The old hedge said
+    // a prose address "states no relation", which a caller could still read as
+    // a weak edge; the replacement says it is never read as one at all.
+    expect(note).toContain("a pointer for a human reader");
+    expect(note).toContain("NEVER read as an edge");
+    expect(note).not.toContain("it states no relation");
+    expect(note).not.toContain("REFERS to that one");
     expect(note).not.toContain("turn-only address lists");
     // ticket 02 (edge-mechanism-revision D1/D3): the C7 co-occurrence fact
     // this line used to state ("an uncited target rejects the call") is
@@ -847,10 +862,11 @@ describe("tool surface", () => {
     expect(note).not.toContain("refutes");
     expect(note).not.toContain("collects");
     expect(note).not.toContain("flow-membership check");
-    // lane-model-v12 ticket 08: the seven words appear only to say they are
-    // NOT this call's parameters, and the enforcement clause names what this
-    // surface actually still checks.
-    expect(note).toContain("are settlement's whole business");
+    // main-agent-edges ticket 05: the three classes appear as THIS call's own
+    // parameters now (lane-model-v12 ticket 08 had them named only to be
+    // disowned), and the enforcement clause still names what this surface
+    // actually checks.
+    expect(note).toContain("correct/verify/use (with their retract… mirrors) are ROUTINE here");
     expect(note).toContain(
       "this call enforces address shape, the tag vocabulary and your read grant",
     );

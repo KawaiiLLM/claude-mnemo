@@ -197,9 +197,14 @@ export function renderImpressionTeaching(): string {
     "SUPERSESSION: joining a dead path to the work that killed it with \"then\",",
     "\"later\" or a bare semicolon reads as chronology, and was measured reading",
     "exactly that way — five of five readers took the dead path for live",
-    "frontier. Your own OVERRIDE edges are the mechanical source of truth for",
-    "what a later decision killed; the losing side of one may never sit in a live",
-    "clause without its marker.",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3): "your own" was true only while
+    // settlement was the sole edge writer. `computeAnchorInvalidations`
+    // (`note-settlement-impressions.ts`) has always scoped by WRITABLE TURN,
+    // never by provenance, so a `correct/full` the main agent wrote on a turn
+    // in this window counts exactly as much — and now such rows exist.
+    "frontier. The window's CORRECT/FULL edges are the mechanical source of",
+    "truth for what a later decision killed, whoever wrote them; the losing",
+    "side of one may never sit in a live clause without its marker.",
     "",
     "The opposite repair is also wrong, and it is the one this form falls into:",
     "DELETING the history so only live work remains buys the reader's clarity by",
@@ -236,8 +241,10 @@ export function renderImpressionTeaching(): string {
     "only: the lines are prefix-coupled, and a partial patch leaves a half-new",
     "state.",
     "",
-    "One thing is not a judgment call: an anchor your own edges CORRECTED in",
-    "FULL this window forces you to revise or delete the sentence that rests on",
+    // TICKET 05 again: the same provenance-blind reading. The refusal fires
+    // on any `correct/full` edge whose CITER is in the writable set.
+    "One thing is not a judgment call: an anchor CORRECTED in",
+    "FULL by any edge in this window forces you to revise or delete the sentence that rests on",
     "it. A lane whose anchors you fully corrected may not be retained. A",
     "`correct` with coverage `partial` is a nudge — reread the sentence;",
     "nothing is mechanically required.",

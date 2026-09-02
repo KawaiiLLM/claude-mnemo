@@ -1264,7 +1264,16 @@ describe("ticket 04 — the settlement prompt's own four sections (D7)", () => {
     // refuses a turn's prose/type/tags from this stage. The frame states the
     // edge work instead, and the pins below hold that it does not relapse.
     expect(prompt).toContain("HINDSIGHT pass over this window");
-    expect(prompt).toContain("Write the EDGES between the");
+    // main-agent-edges ticket 05 (spec D3/D6): the frame no longer says this
+    // pass WRITES the window's edges from nothing. The writing side records
+    // what it used, corrected or verified as it goes, and this pass declares,
+    // fills and reviews. The originating sentence is pinned absent.
+    expect(prompt).toContain("Each turn's writer already");
+    expect(prompt).toContain("recorded the edges it knew about");
+    expect(prompt).toContain("DECLARE the lane side");
+    expect(prompt).toContain("FILL the edges that were");
+    expect(prompt).toContain("REVIEW what stands");
+    expect(prompt).not.toContain("Write the EDGES between the");
     expect(prompt).not.toContain("Check or rebuild the notes");
     expect(prompt).not.toContain("rebuild FROM ZERO");
     // Authority statement.

@@ -275,8 +275,15 @@ export function renderNoteSettlementUnifiedPrompt(
     "which lines need a lane that does not exist yet, and which lines have",
     "nowhere legal to live at all.",
     "",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3/D6): same revision as the staged
+    // stage-2 prompt's frame — the writing side records what it used,
+    // corrected or verified as it goes, so this pass DECLARES, FILLS and
+    // REVIEWS rather than originating. Frame sentence only; ticket 06 owns
+    // the procedure and the duties.
     "EDGE PASS (after `finalize` succeeds) — the HINDSIGHT question the topic",
-    "pass cannot ask: write the EDGES between the turns in your writable set.",
+    "pass cannot ask. Each turn's writer already recorded the edges it knew",
+    "about; you DECLARE the lane side of an edge whose endpoint sits in several",
+    "lanes, FILL the edges that were missed, and REVIEW what stands.",
     "You can see how each turn's claims actually turned out, which decision a",
     "later turn overturned, and which arc a turn belongs to — none of which the",
     "writing side could know at the time. Driven by the worklist `finalize`",
