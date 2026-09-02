@@ -4,7 +4,7 @@
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent (after 01)
+**Status:** SUPERSEDED — the user moved edge writing back to the main agent (S15069/T2408); the stage-two teaching and the delta formulas now live in `.scratch/main-agent-edges/issues/06-settlement-edge-pass-teaching.md`. Not to be dispatched.
 
 - [ ] `finalize` computes and prints `writableDelta = frozenWritableIds − initialWritableIds` (relation writes only — removed-side citers not already writable) and `contextDelta = ⋃ laneMembers − initialWritableIds − writableDelta`, deduplicated across lanes, as pasteable address lists. Tests: an address in the initial set never appears in either; a `contextDelta` member is read and a relation write on it is REFUSED; a `writableDelta` member accepts a relation write and refuses a note-field write.
 - [ ] The stage-2 teaching: read the union in one paginated sweep with the field union, each address once; then no read until the gate names a changed turn. The sentences "recall that lane's members with fields […relations]" and "before any edge write, recall the citing turn with relations" are removed; grep proves it.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01–06.
 
-**Status:** ready-for-agent (after 01–06)
+**Status:** SUPERSEDED — measurement is by provenance after the main-agent-edges batch; see `.scratch/main-agent-edges/issues/09-measure-by-provenance.md`. Not to be dispatched.
 
 - [ ] Before/after on the same reset window (S18993/T101–150 or a current one, stated): round trips per stage, `recall` calls per stage, finalize-delta page calls, `cut`/`dropped` re-reads, peak context, cache read/creation, dollars at the verified price sheet.
 - [ ] Work equivalence against the baseline run: commit succeeds; title/type/tags audit coverage equal; lanes, members, edges, E4/E6 counts equal or explained; one-placement-per-pair held.
