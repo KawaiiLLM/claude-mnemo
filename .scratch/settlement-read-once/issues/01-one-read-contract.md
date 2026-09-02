@@ -4,7 +4,7 @@
 
 **Blocked by:** 00, 06 (the `relations` budget is taken from 06's renderer).
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2420 at 35cb940b (merged 7f306ab3)**: two conflicts with ticket 04 in the unified prompt and its test resolved (01's step-1 rewrite wins; both new describe blocks kept; anchors moved); merged tree tsc 0, 4817/0/266 (+24/+2 accounted), guards clean; my probes RED (real mutations only): title render cap disabled (1); `relations` allowed in `boundedFields` via `parseBoundedFields` (1). Budget contract accepted incl. the stated judgment call (content sized to the non-compact p95 of 354 → 360; compact-synthetic rows report `content cut`); `turn` 1,625, `pageBudget` 23,000 (derived from the 100K-char envelope, below `MAX_PAGE_BUDGET`); GO at 15 turns/page (24,394 ≤ 25,000; real render 21,844 tokens / 93,074 chars).
 
 - [x] The segment-member routes (`E<n>/S/T..S/T`, `E<n>/T*`, `E<n>/#tag`) adopt the plain range's behaviour: `paginateByRenderedPageCost`, `fieldBudgets` forwarded, PER-MEMBER ledger marks (a member is granted when its block was delivered whole, not when the page was). Test: `prompt:50` is honoured on the task-scoped range; a member on a delivered page is granted, one on a cut page is not.
 - [x] `boundedFields: [<field>…]` on `recall` ONLY (not on the shared `MemoryFilterInput`; `timeline` refuses it by name). Subset rule: `boundedFields ⊆ selected ∩ keys(fieldBudgets)`, violator refused by name. `relations` is refused by name inside it. Gate semantics unchanged by intent: a bounded gated field that was shortened records `complete=false` and grants nothing (test: bounded metadata → tag write refused).

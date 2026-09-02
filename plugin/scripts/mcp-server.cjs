@@ -12569,7 +12569,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtjzsckv" : "dev";
+    BUILD_ID = true ? "0.29.0-mtk0yv2z" : "dev";
   }
 });
 
@@ -40360,6 +40360,9 @@ var RECALL_TURN_FIELD_NAMES = [
 var FIELD_BUDGET_ELIGIBLE_FIELD_NAMES = RECALL_TURN_FIELD_NAMES.filter(
   (field) => field !== "files" && field !== "observations"
 );
+var BOUNDED_FIELD_NAMES = FIELD_BUDGET_ELIGIBLE_FIELD_NAMES.filter(
+  (field) => field !== "relations"
+);
 function isRecallTurnField(value) {
   return RECALL_TURN_FIELD_NAMES.includes(value);
 }
@@ -40499,6 +40502,42 @@ function parseMemoryFilter(filter) {
     parsed.fieldBudgets = filter.fieldBudgets;
   }
   return { parsed };
+}
+function describeBoundedFieldGrammar() {
+  return `expected one of: ${BOUNDED_FIELD_NAMES.join(", ")}`;
+}
+function parseBoundedFields(boundedFields, selected, fieldBudgets) {
+  if (boundedFields === void 0) {
+    return {};
+  }
+  if (boundedFields.length === 0) {
+    return {
+      error: `boundedFields must not be empty \u2014 omit it, or ${describeBoundedFieldGrammar()}`
+    };
+  }
+  for (const field of boundedFields) {
+    if (field === "relations") {
+      return {
+        error: 'boundedFields must not name "relations" \u2014 the field is delivery-gated: a set the budget cut still grants the edge write, because you saw the set. There is nothing to declare intentional. Drop it; `filter.fieldBudgets.relations` still caps its size.'
+      };
+    }
+    if (!isRecallTurnField(field)) {
+      return {
+        error: `invalid boundedFields entry "${field}" \u2014 ${describeBoundedFieldGrammar()}`
+      };
+    }
+    if (!selected.has(field)) {
+      return {
+        error: `boundedFields entry "${field}" is not in filter.fields \u2014 a field this call never selected renders nothing, so it cannot be read intentionally short. Select it, or drop it here.`
+      };
+    }
+    if (fieldBudgets?.[field] === void 0) {
+      return {
+        error: `boundedFields entry "${field}" has no filter.fieldBudgets["${field}"] cap \u2014 "bounded" means "cut to its cap on purpose", so name the cap alongside the intent.`
+      };
+    }
+  }
+  return { parsed: [...boundedFields] };
 }
 function hasFilterCriteria(filter) {
   return filter.type !== void 0 || filter.tag !== void 0 || filter.file !== void 0 || filter.sessionId !== void 0 || filter.after !== void 0 || filter.before !== void 0;
@@ -40782,6 +40821,20 @@ var recallInputShape = {
   // a message naming its replacement, the same precedent `truncate` already
   // set. Detail is expressed entirely through `filter.fields` now.
   view: external_exports3.enum(["collapsed", "expanded"]).optional().describe("Retired \u2014 select which turn fields to show via `filter.fields` instead."),
+  // Settlement-read-once ticket 01 (spec D1): the INTENT half of the read
+  // contract, beside `filter.fieldBudgets`' numbers. Numeric budgets stay
+  // numeric; one extra list carries the bit.
+  //
+  // A TOP-LEVEL recall input on purpose, NOT a `filter` member: the filter
+  // object is shared verbatim with `timeline`, which refuses this by name
+  // (see `timelineInputShape`), and a shared wire shape must not grow a key
+  // one of its two tools rejects. `relations` is absent from the enum —
+  // delivery-gated, so a cut set already grants and there is nothing to
+  // declare intentional — and `parseBoundedFields` (mcp/memory-filter.ts)
+  // refuses it BY NAME with that reason before the enum's grammar echo.
+  boundedFields: external_exports3.array(external_exports3.enum(BOUNDED_FIELD_NAMES)).optional().describe(
+    'Which of `filter.fieldBudgets`\' capped fields you are reading INTENTIONALLY short \u2014 e.g. boundedFields:["prompt"] with fieldBudgets:{prompt:50}. A field named here reaching its cap is the contract: the turn reports it `bounded` and its `truncated:` footer stays silent. Every other budgeted field is required WHOLE \u2014 reaching its cap is a `cut` the footer names, and you re-read that field alone. Must be a subset of `filter.fields` \u2229 the fields `filter.fieldBudgets` caps; `relations` is refused (a cut relations set still licenses the edge write). Intent is not a grant: a bounded read of `metadata` still refuses a `type`/`tags` write.'
+  ),
   page: external_exports3.number().int().positive().optional(),
   pageSize: external_exports3.number().int().positive().max(MAX_PAGE_SIZE).optional(),
   // Ticket 04/11: `truncate` retires from the public surface (ticket 11 also
@@ -41118,7 +41171,14 @@ var timelineInputShape = {
   // carries, shared verbatim — AND-composed with the id selector's range.
   filter: memoryFilterSchema.optional().describe(
     "Structured scoping, shared with recall's `filter`: {type, tag, session, time, file}, AND-composed with the id selector's range."
-  )
+  ),
+  // Settlement-read-once ticket 01 (spec D1): DEFINED only so the superRefine
+  // below can refuse it BY NAME — the `truncate`/`view` precedent
+  // `recallInputSchema` already set, and the reason `boundedFields` is not a
+  // member of the SHARED `memoryFilterShape`. `.strict()` alone would reject
+  // it with zod's generic unrecognised-key text, which names no replacement
+  // and leaves a caller to guess whether the key is misspelt or unsupported.
+  boundedFields: external_exports3.array(external_exports3.string()).optional().describe("Not a timeline parameter \u2014 `boundedFields` is a `recall` input.")
 };
 var settlementNoteInputShape = {
   turn: external_exports3.string().min(1).optional(),
@@ -41175,7 +41235,15 @@ var recallInputSchema = external_exports3.object(recallInputShape).strict().supe
     });
   }
 });
-var timelineInputSchema = external_exports3.object(timelineInputShape).strict();
+var timelineInputSchema = external_exports3.object(timelineInputShape).strict().superRefine((data, ctx) => {
+  if (data.boundedFields !== void 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: "`boundedFields` is a `recall` input, not a timeline one \u2014 it declares which of recall's own per-field budgets were read intentionally short. This tool renders no per-turn `truncated:` report for it to speak to.",
+      path: ["boundedFields"]
+    });
+  }
+});
 var noteInputSchema = external_exports3.object(noteInputShape).omit({ segment: true }).strict().superRefine((data, ctx) => {
   const mode = data.mode;
   if (!mode) {
@@ -43360,6 +43428,39 @@ var DEFAULT_TURN_TOKEN_BUDGET = 150;
 var TURN_BUDGET_TRUNCATION_MARKER = "  \u2026";
 var RENDER_INDENT_STEP = "    ";
 var REWIND_MARKER = " [rewind]";
+var TURN_TITLE_RENDER_CAP_CHARS = 180;
+var REPORTABLE_TURN_FIELDS = [
+  "metadata",
+  "content",
+  "prompt",
+  "insight",
+  "relations"
+];
+var TRUNCATION_FOOTER_PREFIX = "truncated: ";
+function renderTruncationFooter(fieldIndent, cut, dropped) {
+  if (cut.length === 0 && dropped.length === 0) {
+    return "";
+  }
+  const parts = [];
+  if (cut.length > 0) {
+    parts.push(`${cut.join(", ")} cut`);
+  }
+  if (dropped.length > 0) {
+    parts.push(`${dropped.join(", ")} dropped`);
+  }
+  return `${fieldIndent}${TRUNCATION_FOOTER_PREFIX}${parts.join("; ")}`;
+}
+function worstCaseTruncationFooter(fieldIndent, fields) {
+  const reportable = REPORTABLE_TURN_FIELDS.filter((field) => fields.has(field));
+  const titleSelected = fields.has("title");
+  if (reportable.length === 0) {
+    return titleSelected ? renderTruncationFooter(fieldIndent, ["title"], []) : "";
+  }
+  if (!titleSelected) {
+    return reportable.length === 1 ? renderTruncationFooter(fieldIndent, [], reportable) : renderTruncationFooter(fieldIndent, [reportable[0]], reportable.slice(1));
+  }
+  return renderTruncationFooter(fieldIndent, ["title"], reportable);
+}
 function createTruncationSignal() {
   return { truncated: false, fieldCompleteness: [] };
 }
@@ -43566,10 +43667,10 @@ function capRenderToTokenBudget(rendered, budgetTokens, signal) {
 function capRenderWithOutcome(rendered, budgetTokens, signal) {
   const wholeLineCount = () => rendered.split("\n").length;
   if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
-    return { text: rendered, keptSourceLines: wholeLineCount() };
+    return { text: rendered, keptSourceLines: wholeLineCount(), lastLinePartial: false };
   }
   if (estimateTokens(rendered) <= budgetTokens) {
-    return { text: rendered, keptSourceLines: wholeLineCount() };
+    return { text: rendered, keptSourceLines: wholeLineCount(), lastLinePartial: false };
   }
   const lines = rendered.split("\n");
   const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
@@ -43582,7 +43683,7 @@ function capRenderWithOutcome(rendered, budgetTokens, signal) {
     if (remaining <= 0) {
       markTruncated(signal);
       kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-      return { text: kept.join("\n"), keptSourceLines: index };
+      return { text: kept.join("\n"), keptSourceLines: index, lastLinePartial: false };
     }
     if (lineTokens <= remaining) {
       kept.push(line);
@@ -43595,14 +43696,18 @@ function capRenderWithOutcome(rendered, budgetTokens, signal) {
     }
     markTruncated(signal);
     kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-    return { text: kept.join("\n"), keptSourceLines: partial2 ? index + 1 : index };
+    return {
+      text: kept.join("\n"),
+      keptSourceLines: partial2 ? index + 1 : index,
+      lastLinePartial: partial2.length > 0
+    };
   }
   if (kept.length === lines.length) {
-    return { text: rendered, keptSourceLines: lines.length };
+    return { text: rendered, keptSourceLines: lines.length, lastLinePartial: false };
   }
   markTruncated(signal);
   kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-  return { text: kept.join("\n"), keptSourceLines: kept.length - 1 };
+  return { text: kept.join("\n"), keptSourceLines: kept.length - 1, lastLinePartial: false };
 }
 var DEFAULT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
   "title",
@@ -43688,10 +43793,15 @@ function formatTurnLabel(turn, fields, {
   includeSessionPrefix = false
 }) {
   const prefix = `${indent}${renderTurnAddress(turn.promptNumber, sessionId, includeSessionPrefix)}`;
-  const titleText = fields.has("title") ? turn.title : null;
+  const storedTitle = fields.has("title") ? turn.title : null;
+  const titleCut = storedTitle !== null && storedTitle.length > TURN_TITLE_RENDER_CAP_CHARS;
+  const titleText = titleCut ? `${storedTitle.slice(0, TURN_TITLE_RENDER_CAP_CHARS)}${FIELD_TRUNCATION_SUFFIX}` : storedTitle;
   const titleSegment = titleText ? ` ${titleText}` : "";
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
-  return `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`;
+  return {
+    text: `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`,
+    titleCut
+  };
 }
 function formatObservationLabel(observation, indent, header) {
   return `${indent}[O${observation.id}] ${header ?? observation.title}`;
@@ -43786,24 +43896,44 @@ function formatTurnBody(turn, fields, options) {
   const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
-  const lines = [formatTurnLabel(turn, fields, options)];
+  const label = formatTurnLabel(turn, fields, options);
+  const lines = [label.text];
   const ownComplete = /* @__PURE__ */ new Map();
+  const marks = /* @__PURE__ */ new Map();
+  const markLines = (field, startLine, ownCut) => {
+    marks.set(
+      field,
+      lines.length > startLine ? { kind: "lines", startLine, endLine: lines.length - 1, ownCut } : { kind: "elided" }
+    );
+  };
   if (fields.has("metadata") && turn.metadata) {
     const cut = cutFieldText("metadata", turn.metadata, fieldBudgets, signal);
     ownComplete.set("metadata", cut.complete);
+    const startLine = lines.length;
     lines.push(`${fieldIndent}${cut.text}`);
+    markLines("metadata", startLine, !cut.complete);
+  } else if (fields.has("metadata")) {
+    marks.set("metadata", { kind: "nothing-to-render" });
   }
   if (fields.has("content") && turn.content) {
     const cut = cutFieldText("content", turn.content, fieldBudgets, signal);
     ownComplete.set("content", cut.complete);
+    const startLine = lines.length;
     lines.push(`${fieldIndent}- content: ${cut.text}`);
+    markLines("content", startLine, !cut.complete);
+  } else if (fields.has("content")) {
+    marks.set("content", { kind: "nothing-to-render" });
   }
   if (isTurnFieldActive("prompt", fields, options.matchedFields) && turn.promptPreview) {
     const cut = cutFieldText("prompt", turn.promptPreview, fieldBudgets, signal);
     ownComplete.set("prompt", cut.complete);
+    const startLine = lines.length;
     lines.push(
       `${fieldIndent}- prompt: "${collapseToSingleLine(cut.text)}"`
     );
+    markLines("prompt", startLine, !cut.complete);
+  } else if (isTurnFieldActive("prompt", fields, options.matchedFields)) {
+    marks.set("prompt", { kind: "nothing-to-render" });
   }
   if (fields.has("response") && turn.responsePreview) {
     const cut = cutFieldText("response", turn.responsePreview, fieldBudgets, signal);
@@ -43817,8 +43947,14 @@ function formatTurnBody(turn, fields, options) {
     ownComplete.set("insight", cut.complete);
     if (cut.lines.length > 0) {
       lines.push(`${fieldIndent}- insight:`);
+      const startLine = lines.length;
       pushBullets(lines, bulletIndent, cut.lines);
+      markLines("insight", startLine, !cut.complete);
+    } else {
+      marks.set("insight", { kind: "elided" });
     }
+  } else if (fields.has("insight")) {
+    marks.set("insight", { kind: "nothing-to-render" });
   }
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
     lines.push(`${fieldIndent}- files_read:`);
@@ -43838,23 +43974,31 @@ function formatTurnBody(turn, fields, options) {
       lines.push(childBlock);
     }
   }
-  let relations = fields.has("relations") ? { kind: "empty" } : { kind: "absent" };
+  if (fields.has("relations")) {
+    marks.set("relations", { kind: "empty-at-end" });
+  }
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
     const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
     ownComplete.set("relations", cut.complete);
     if (cut.lines.length > 0) {
-      relations = { kind: "atoms", labelLine: lines.length };
       lines.push(`${fieldIndent}- relations:`);
+      const startLine = lines.length;
       for (const line of cut.lines) {
         lines.push(`${bulletIndent}${line}`);
       }
+      markLines("relations", startLine, !cut.complete);
     } else {
-      relations = { kind: "elided" };
+      marks.set("relations", { kind: "elided" });
     }
   }
-  return { text: lines.join("\n"), ownComplete, relations };
+  return {
+    text: lines.join("\n"),
+    ownComplete,
+    titleCut: label.titleCut,
+    marks
+  };
 }
-function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete, relationsDelivered) {
+function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete, relationsDelivered, titleCut) {
   const fieldComplete = (field) => (ownComplete.get(field) ?? true) && bodyComplete;
   for (const field of GATED_TURN_FIELDS) {
     if (field === "relations" && !relationsDelivered) {
@@ -43874,19 +44018,35 @@ function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownCo
       "turn",
       turnId,
       field,
-      field === "title" ? true : fieldComplete(field)
+      field === "title" ? !titleCut : fieldComplete(field)
     );
   }
 }
-function relationsWereDelivered(relations, capped, body) {
-  switch (relations.kind) {
-    case "absent":
+function classifyFieldState(mark, capped, bodyWhole, bounded) {
+  switch (mark.kind) {
+    case "nothing-to-render":
+      return "complete";
     case "elided":
-      return false;
-    case "empty":
-      return capped.text === body;
-    case "atoms":
-      return capped.keptSourceLines > relations.labelLine + 1;
+      return "dropped";
+    case "empty-at-end":
+      return bodyWhole ? "complete" : "dropped";
+    case "lines": {
+      const ownState = mark.ownCut ? bounded ? "bounded" : "cut" : "complete";
+      if (bodyWhole) {
+        return ownState;
+      }
+      const kept = capped.keptSourceLines;
+      if (mark.startLine >= kept) {
+        return "dropped";
+      }
+      if (mark.endLine > kept - 1) {
+        return "cut";
+      }
+      if (mark.endLine === kept - 1 && capped.lastLinePartial) {
+        return "cut";
+      }
+      return ownState;
+    }
   }
 }
 function renderNode(node, options = {}) {
@@ -43900,21 +44060,62 @@ function renderNode(node, options = {}) {
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const { text: body, ownComplete, relations } = formatTurnBody(
+      const { text: body, ownComplete, titleCut, marks } = formatTurnBody(
         node.value,
         fields,
         options
       );
-      const capped = capRenderWithOutcome(body, budget, options.signal);
+      const indent = options.indent ?? "";
+      const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
+      const footerReserve = estimateTokens(worstCaseTruncationFooter(fieldIndent, fields));
+      const capped = capRenderWithOutcome(
+        body,
+        Math.max(0, budget - footerReserve),
+        options.signal
+      );
+      const bodyWhole = capped.text === body;
+      const cutFields = [];
+      const droppedFields = [];
+      if (titleCut) {
+        cutFields.push("title");
+      }
+      let relationsDelivered = false;
+      for (const field of REPORTABLE_TURN_FIELDS) {
+        const mark = marks.get(field);
+        if (!mark) {
+          continue;
+        }
+        const state = classifyFieldState(
+          mark,
+          capped,
+          bodyWhole,
+          options.boundedFields?.has(field) ?? false
+        );
+        if (field === "relations") {
+          relationsDelivered = state !== "dropped";
+        }
+        if (state === "cut") {
+          cutFields.push(field);
+        } else if (state === "dropped") {
+          droppedFields.push(field);
+        }
+      }
       recordTurnFieldCompleteness(
         node.value.id,
         fields,
-        capped.text === body,
+        bodyWhole,
         options.signal,
         ownComplete,
-        relationsWereDelivered(relations, capped, body)
+        relationsDelivered,
+        titleCut
       );
-      return capped.text;
+      const footer = renderTruncationFooter(fieldIndent, cutFields, droppedFields);
+      if (!footer) {
+        return capped.text;
+      }
+      markTruncated(options.signal);
+      return `${capped.text}
+${footer}`;
     }
     case "observation":
       return capRenderToTokenBudget(
@@ -44296,6 +44497,7 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
     return ordinals.length === 0 ? "(no members)" : "Segment member not found.";
   }
   const lines = [`[E${segment.id}] ${segment.title}`];
+  let cursor = lines[0].length;
   const seenSessionIds = /* @__PURE__ */ new Set();
   let runSessionId = options.precedingSessionId ?? null;
   let pageOpensMidSession = options.precedingSessionId !== void 0 && options.precedingSessionId !== null && options.precedingSessionId === resolved[0].sessionId;
@@ -44305,13 +44507,13 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
       continue;
     }
     if (member.sessionId !== runSessionId) {
-      lines.push(
-        renderSessionTransitionLine(
-          member.sessionId,
-          seenSessionIds.has(member.sessionId) ? null : getSession(db, member.sessionId)?.title ?? null,
-          RENDER_INDENT_STEP
-        )
+      const transition = renderSessionTransitionLine(
+        member.sessionId,
+        seenSessionIds.has(member.sessionId) ? null : getSession(db, member.sessionId)?.title ?? null,
+        RENDER_INDENT_STEP
       );
+      lines.push(transition);
+      cursor += 1 + transition.length;
       seenSessionIds.add(member.sessionId);
       runSessionId = member.sessionId;
     }
@@ -44337,19 +44539,22 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
       // `recall.ts`'s `buildTurnView` follows.
       relations: options.fields?.has("relations") ? buildTurnDirectRelationLines(db, turn) : void 0
     };
-    lines.push(
-      renderNode(
-        { type: "turn", value: view },
-        {
-          indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
-          fields: options.fields,
-          sessionId: member.sessionId,
-          includeSessionPrefix: pageOpensMidSession,
-          turnBudget: options.turnBudget,
-          signal: options.signal
-        }
-      )
+    const block = renderNode(
+      { type: "turn", value: view },
+      {
+        indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
+        fields: options.fields,
+        sessionId: member.sessionId,
+        includeSessionPrefix: pageOpensMidSession,
+        turnBudget: options.turnBudget,
+        signal: options.signal,
+        fieldBudgets: options.fieldBudgets,
+        boundedFields: options.boundedFields
+      }
     );
+    lines.push(block);
+    cursor += 1 + block.length;
+    options.ledger?.mark(cursor, [{ entityType: "turn", entityId: member.turnId }]);
     options.emittedTurnIds?.push(member.turnId);
     pageOpensMidSession = false;
   }
@@ -49220,7 +49425,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
+function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets, boundedFields) {
   const view = buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -49246,7 +49451,8 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
         sessionId: session.id,
         turnBudget,
         signal,
-        fieldBudgets
+        fieldBudgets,
+        boundedFields
       }
     );
     lines.push(turnLines);
@@ -49256,7 +49462,10 @@ function renderSession(db, session, fields, turnSelector, eraCutoffEpoch = null,
   }
   return { text: lines.join("\n") };
 }
-function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger, fieldBudgets) {
+function boundedFieldsOf(filter) {
+  return filter.boundedFields ? new Set(filter.boundedFields) : void 0;
+}
+function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnBudget, ledger, fieldBudgets, boundedFields) {
   const lines = [];
   let cursor = 0;
   const appendLine = (line) => {
@@ -49298,7 +49507,8 @@ function renderTurnScope(db, turns, fields, eraCutoffEpoch = null, signal, turnB
             sessionId: session.id,
             signal,
             turnBudget,
-            fieldBudgets
+            fieldBudgets,
+            boundedFields
           }
         )
       );
@@ -49421,7 +49631,7 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets) {
+function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signal, turnBudget, fieldBudgets, boundedFields) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
@@ -49431,7 +49641,8 @@ function renderSessionDetail(db, sessionId, fields, eraCutoffEpoch = null, signa
     eraCutoffEpoch,
     signal,
     turnBudget,
-    fieldBudgets
+    fieldBudgets,
+    boundedFields
   ) : { text: "Session not found." };
 }
 function isVisibleObservation(observation) {
@@ -49818,23 +50029,30 @@ function renderGroupedSearchResults(db, results, fields, turnBudget, eraCutoffEp
   }
   return blocks.join("\n");
 }
-function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOrdinals, fields, page, pageSize, eraCutoffEpoch, signal, turnBudget, routeCheckpoint, ledger, emittedTurnIds) {
-  const paged = paginateItems2(wantedOrdinals, page, pageSize);
-  const firstOrdinal = paged.items[0];
-  const precedingSessionId = firstOrdinal !== void 0 && firstOrdinal > 1 ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null : null;
-  const body = renderSegmentMembersByOrdinal(db, segment.id, paged.items, {
+function renderSegmentMemberOrdinals(db, segment, chronologicalMembers, wantedOrdinals, fields, page, pageSize, eraCutoffEpoch, signal, pageBudget, turnBudget, fieldBudgets, boundedFields, routeCheckpoint, ledger, emittedTurnIds) {
+  const renderOrdinalPage = (ordinals, trial, precedingSessionId2) => renderSegmentMembersByOrdinal(db, segment.id, ordinals, {
     fields,
     turnBudget,
     eraCutoffEpoch,
-    signal,
-    precedingSessionId,
-    ...emittedTurnIds ? { emittedTurnIds } : {}
+    fieldBudgets,
+    boundedFields,
+    precedingSessionId: precedingSessionId2,
+    ...trial ? {} : { signal },
+    ...trial || !ledger ? {} : { ledger },
+    ...trial || !emittedTurnIds ? {} : { emittedTurnIds }
   });
+  const paged = paginateByRenderedPageCost(
+    wantedOrdinals,
+    page,
+    pageSize,
+    pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+    (pageItems) => renderOrdinalPage(pageItems, true, null)
+  );
+  const firstOrdinal = paged.items[0];
+  const precedingSessionId = firstOrdinal !== void 0 && firstOrdinal > 1 ? chronologicalMembers[firstOrdinal - 2]?.sessionId ?? null : null;
+  const body = renderOrdinalPage(paged.items, false, precedingSessionId);
   if (paged.items.length > 0) {
-    ledger?.mark(body.length, [
-      { entityType: "segment", entityId: segment.id },
-      ...paged.items.map((ordinal) => chronologicalMembers[ordinal - 1]).filter((member) => member !== void 0).map((member) => ({ entityType: "turn", entityId: member.turnId }))
-    ]);
+    ledger?.mark(body.length, [{ entityType: "segment", entityId: segment.id }]);
   }
   const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -49878,7 +50096,7 @@ function selectAddressedTurns(db, sessionId, promptNumbers, after, before, filte
     return turnMatchesFilter(turn, filter);
   });
 }
-function renderTurnAddressPage(db, turns, fields, page, pageSize, eraCutoffEpoch, signal, pageBudget, turnBudget, fieldBudgets, routeCheckpoint, ledger) {
+function renderTurnAddressPage(db, turns, fields, page, pageSize, eraCutoffEpoch, signal, pageBudget, turnBudget, fieldBudgets, boundedFields, routeCheckpoint, ledger) {
   const paged = paginateByRenderedPageCost(
     turns,
     page,
@@ -49892,7 +50110,8 @@ function renderTurnAddressPage(db, turns, fields, page, pageSize, eraCutoffEpoch
       void 0,
       turnBudget,
       void 0,
-      fieldBudgets
+      fieldBudgets,
+      boundedFields
     )
   );
   const body = renderTurnScope(
@@ -49903,7 +50122,8 @@ function renderTurnAddressPage(db, turns, fields, page, pageSize, eraCutoffEpoch
     signal,
     turnBudget,
     ledger,
-    fieldBudgets
+    fieldBudgets,
+    boundedFields
   );
   const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
   ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
@@ -49927,7 +50147,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
         eraCutoffEpoch,
         signal,
         turnBudget,
-        filter.fieldBudgets
+        filter.fieldBudgets,
+        boundedFieldsOf(filter)
       );
       if (texts.length > 0) {
         cursor += 1;
@@ -49998,7 +50219,10 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger
     );
@@ -50030,7 +50254,10 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger,
       emittedLaneMemberIds
@@ -50083,7 +50310,10 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       pageSize,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
+      filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger
     );
@@ -50100,6 +50330,7 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       pageBudget,
       turnBudget,
       filter.fieldBudgets,
+      boundedFieldsOf(filter),
       routeCheckpoint,
       ledger
     );
@@ -50117,7 +50348,8 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
       signal,
       turnBudget,
       ledger,
-      filter.fieldBudgets
+      filter.fieldBudgets,
+      boundedFieldsOf(filter)
     );
   }
   if (routed.kind === "observation-list") {
@@ -50593,6 +50825,17 @@ function recallMemoryBody(db, input, signal, ledger) {
   if (filterError) {
     return formatParameterError(filterError);
   }
+  const { parsed: boundedFields, error: boundedError } = parseBoundedFields(
+    input.boundedFields,
+    fields,
+    filter.fieldBudgets
+  );
+  if (boundedError) {
+    return formatParameterError(boundedError);
+  }
+  if (boundedFields) {
+    filter.boundedFields = boundedFields;
+  }
   if (input.id) {
     const idItems = input.id.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
     if (idItems.length <= 1) {
@@ -50696,6 +50939,7 @@ function recallMemoryBody(db, input, signal, ledger) {
         pageBudget,
         turnBudget,
         filter.fieldBudgets,
+        boundedFieldsOf(filter),
         listCheckpoint,
         ledger
       );
@@ -52235,6 +52479,11 @@ function createDatabaseBackedHandlers(database, options = {}) {
         // `depth` mapping and the `truncate`/`truncateCap` forwarding
         // below it are both gone).
         filter: args.filter,
+        // Settlement-read-once ticket 01 (spec D1): the intent half of the
+        // read contract — a top-level input beside `filter`, never inside
+        // it (the filter object is shared with `timeline`, which refuses
+        // this key by name).
+        boundedFields: args.boundedFields,
         page: args.page,
         pageSize: args.pageSize,
         pageBudget: args.pageBudget,
