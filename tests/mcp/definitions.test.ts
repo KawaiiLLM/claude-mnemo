@@ -375,13 +375,30 @@ describe("tool surface", () => {
   it("the recall description teaches the direct edge set and no longer teaches the tree", () => {
     const recall = MNEMO_TOOL_DESCRIPTIONS.recall;
     expect(recall).toContain("THIS turn's own direct edges");
-    expect(recall).toContain("`<words> -> <addr>`");
-    expect(recall).toContain("`<- <addr> <words>`");
+    expect(recall).toContain("`<class> -> <addr>`");
+    expect(recall).toContain("`<- <addr> <class>`");
     expect(recall).toContain("No downstream hops, no branch cap, no `+N more`");
-    expect(recall).toContain("`[unplaced]` when neither did");
-    expect(recall).toContain("one pair placed two ways is two lines");
+    expect(recall).toContain("one pair attributed two ways is two lines");
     expect(recall).toContain("ONE legend line for the whole response");
-    // The tree's own notation, retired from this surface entirely.
+    // main-agent-edges ticket 07: the description teaches the RESOLVED
+    // attribution, in the same five words the renderer prints, and the class
+    // vocabulary the field's only relation word comes from.
+    expect(recall).toContain(
+      "it is the only relation word this field prints",
+    );
+    for (const outcome of [
+      "`#lane derived`",
+      "`#lane declared`",
+      "`ambiguous`",
+      "`none`",
+      "`invalid (stored #tag)`",
+    ]) {
+      expect(recall).toContain(outcome);
+    }
+    expect(recall).toContain("resolved from the endpoints' CURRENT tasks at read time and are ADVISORY");
+    // The retired side vocabulary, and the tree's own notation, gone from
+    // this surface entirely.
+    expect(recall).not.toContain("[unplaced]");
     expect(recall).not.toContain("`^`");
     expect(recall).not.toContain("-word->");
     expect(recall).not.toContain("`… +N more`");

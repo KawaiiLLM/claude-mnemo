@@ -3606,8 +3606,16 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
       initializeSchema(db);
       seedTagContainers(db);
       const sessionDbId = seedPullSession(db, "settlement-pull-relations");
-      const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["lane"]' });
-      const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["lane"]' });
+      const t1 = insertTypedTurn(db, sessionDbId, 1, { tags: '["pull-lane"]' });
+      const t2 = insertTypedTurn(db, sessionDbId, 2, { tags: '["pull-lane"]' });
+      // main-agent-edges D2: the side resolves against the endpoint's own
+      // lanes, so the task and its lane have to exist for the pull agent to
+      // read `declared` rather than `invalid`. (`lane` itself is already a
+      // SEGMENT tag in this file's shared container fixture, and the two share
+      // one namespace.)
+      const pullTaskId = createSegment(db, { title: "pull task", nowEpoch: NOW }).id;
+      insertLane(db, pullTaskId, "pull-lane", NOW);
+      addSegmentMembers(db, pullTaskId, [t1, t2], NOW);
       writeMemoryEdges(
         db,
         [
@@ -3616,7 +3624,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
             cited: { kind: "turn", id: t1 },
             relation: "extends",
             provenance: "asserted",
-            ...deriveSideTags(["lane"]),
+            ...deriveSideTags(["pull-lane"]),
           },
         ],
         NOW,
@@ -3639,8 +3647,8 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
           // 01 was accepted against. Settlement-read-once spec D8: each turn
           // shows its OWN direct edge, T1's as an incoming row and T2's as an
           // outgoing one, in the same grammar on both sides.
-          expect(text).toContain("<- T2 extends (#lane)");
-          expect(text).toContain("extends -> T1 (#lane)");
+          expect(text).toContain("<- T2 use (#pull-lane declared)");
+          expect(text).toContain("use -> T1 (#pull-lane declared)");
           // One legend for the whole two-turn response, not one per turn.
           expect(text.split("relations legend:")).toHaveLength(2);
           // And the range selector really paged BOTH turns.

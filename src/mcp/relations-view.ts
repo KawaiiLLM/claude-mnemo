@@ -1,11 +1,22 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  loadEndpointLaneFacts,
+  resolveEdgeSide,
+  type EdgeSide,
+  type EdgeSideResolution,
+  type EndpointLaneFacts,
+  type ResolvableEdgeSides,
+} from "../db/edge-side-resolution";
+import {
   getTurnRelationEdges,
   type TurnRelationEdgeView,
 } from "../db/memory-edges";
-import { getOwningSegmentId } from "../db/segments";
-import { displayEdgeRelation } from "../shared/relation-class";
+import {
+  edgeRelationClass,
+  formatRelationClass,
+  type RelationClassBearingRow,
+} from "../shared/relation-class";
 import {
   defaultRelationRank,
   groupHopEdges,
@@ -30,9 +41,10 @@ import {
  *     tree data model + renderer (`./relation-tree`, tickets 12/13's common
  *     ground). One caller left: `timeline(id="S<n>/T<m>")`'s node route.
  *   - `buildTurnDirectRelationLines` — the DIRECT SET (spec D8): this node's
- *     own outgoing rows then its own incoming rows, both raw lane sides on
- *     each, nothing elided. This is what `recall`'s `relations` field and the
- *     task card's member blocks render.
+ *     own outgoing rows then its own incoming rows, each side carrying its
+ *     RESOLVED lane attribution (main-agent-edges D2), nothing elided. This is
+ *     what `recall`'s `relations` field and the task card's member blocks
+ *     render.
  *
  * Kept separate from `format.ts` (the DB-free pure renderer) and from
  * `recall.ts`/`segment-card.ts` (so neither has to duplicate either format).
@@ -46,6 +58,40 @@ function formatRelationAddress(
   return currentSessionId === otherSessionId
     ? `T${otherPromptNumber}`
     : `S${otherSessionId}/T${otherPromptNumber}`;
+}
+
+/**
+ * THE ONLY RELATION WORD EITHER SHAPE IN THIS FILE RENDERS
+ * (main-agent-edges ticket 07): the row's CLASS — `correct(full)`,
+ * `correct(partial)`, `verify`, `use` — and never the seven-word storage
+ * value, on any of the three surfaces this module feeds (`recall`'s
+ * `relations` field, the task card's member blocks, `timeline(id="S<n>/T<m>")`'s
+ * node tree).
+ *
+ * `shared/relation-class.ts`'s `displayEdgeRelation` is what this replaces
+ * HERE, and only here. That accessor still prints a legacy row's stored word
+ * unchanged, which was the right answer while the class columns were being
+ * filled and a reader had to be able to see what a row actually said; it is
+ * the wrong answer for a surface a WRITER reads its own edges back through,
+ * because the writer is taught three classes and must not be shown
+ * `override`/`extends` for what it just wrote. Rows written before the class
+ * columns existed are classified in place by `schema.ts`'s
+ * `classifyLegacyMemoryEdgeRelations` backfill, so `edgeRelationClass` answers
+ * every stored row a live database holds; `''` is reachable only for a stored
+ * word outside `EDGE_RELATIONS` (production: 0, counted by that backfill's own
+ * receipt), which has no class to name and is not given an invented one.
+ *
+ * The remaining `displayEdgeRelation` call sites are OTHER surfaces, listed
+ * here so the next reader does not mistake this for a global retirement:
+ * `mcp/timeline.ts`'s lane view and frontier label, and
+ * `worker/console-api.ts`'s graph payload. Ticket 01's release gate is what
+ * closes the union.
+ */
+function renderRelationClassWord(row: RelationClassBearingRow): string {
+  const resolved = edgeRelationClass(row);
+  return resolved === null
+    ? ""
+    : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
 }
 
 /**
@@ -104,13 +150,12 @@ function buildCandidates(rows: readonly TurnRelationEdgeView[]): AddressedHop[] 
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
-      // written under, and the stored seven-word value only for a row written
-      // before that vocabulary existed (`displayEdgeRelation`). This is the
-      // surface settlement reads its own edges back through, so a writer taught
-      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
-      // what it just wrote.
-      relation: displayEdgeRelation(row),
+      // main-agent-edges ticket 07: the tree renders the row's CLASS and
+      // nothing else — see `renderRelationClassWord`. `defaultRelationRank`
+      // is itself class-keyed (`correct(full)` > `correct(partial)` > `verify`
+      // > `use`, ticket 02), so feeding it the class also puts a legacy row
+      // back on the ladder instead of at its defensive last rank.
+      relation: renderRelationClassWord(row),
       tailTag: row.tailTag,
       headTag: row.headTag,
     })),
@@ -388,7 +433,8 @@ export function buildTurnRelationView(
 /**
  * Spec D8: `recall`'s `relations` field stopped being a 3-hop tree and became
  * THIS NODE'S OWN EDGES — every outgoing row first, every incoming row after,
- * each showing both raw lane sides, nothing elided and nothing expanded.
+ * each side showing the lane attribution it RESOLVES to, nothing elided and
+ * nothing expanded.
  *
  * Why the tree left. The settlement writer is the field's real reader, and
  * what it must see before it may write an edge is the set the write gate
@@ -407,55 +453,139 @@ export function buildTurnRelationView(
  * is carried by the two-sided suffix, not by a second arrow glyph — spec D8's
  * own grammar spells a crossing `word -> T<n> (#tail -> #head)` with the
  * plain stroke, and T2388 ruled out inventing notation on top of it.
+ *
+ * MAIN-AGENT-EDGES TICKET 07 changed what a side SAYS, not the grammar around
+ * it: the two stored tags became the two RESOLVED attributions
+ * (`formatResolvedSide` below), so the field now answers the question its real
+ * reader asks — which side must I declare, which one is contradicted — instead
+ * of reprinting a column that is blank on 69% of production's edges.
  */
 
-/** One rendered row: a distinct (other endpoint, tailTag, headTag) placement, carrying every relation word stored on it. */
+/** One rendered row: a distinct (other endpoint, resolved tail, resolved head) attribution, carrying every relation class stored on it. */
 interface DirectRelationRow {
-  otherTurnId: number;
   otherSessionId: number;
   otherPromptNumber: number;
-  tailTag: string;
-  headTag: string;
+  /** The tail side, already rendered — the grouping key and the printed text are the same string, so two rows can never look identical and group apart. */
+  tail: string;
+  head: string;
   words: string[];
 }
 
 /**
- * Rows grouped by `(other endpoint, tailTag, headTag)` — never by endpoint
- * pair alone (spec D8). Storage identity is `(relation, tail_tag, head_tag)`
- * and production holds 109 turn pairs carrying more than one PLACEMENT (e.g.
- * `extends #a->#a` beside `indexes #b->#b`); folding those onto one row would
- * have to pick one suffix and would lose which word sits where. Several
- * relations DO merge onto one row when their sides are identical, which is
- * the only case a single suffix describes truthfully.
+ * ONE SIDE'S RESOLVED ATTRIBUTION (main-agent-edges spec D2), in the five
+ * words the resolver itself uses:
  *
- * Output order is by ADDRESS first (`otherSessionId`, `otherPromptNumber`),
- * then by the placement's own two tags — so a pair's several placements land
- * adjacent and a reader scanning for one address finds all of it in one
- * place. The DB hands rows in `relation ASC, tail_tag ASC, head_tag ASC`
- * order, which is deterministic but scatters an endpoint across the block.
+ *   `#lane derived`            the endpoint is in exactly one lane, so the
+ *                              attribution needed no declaration
+ *   `#lane declared`           the endpoint is in several, and this is the one
+ *                              a writer named
+ *   `ambiguous`                several lanes, nothing declared — the finding
+ *                              settlement's edge pass owes a declaration for
+ *   `none`                     the endpoint is in no lane at all (legal)
+ *   `invalid (stored #tag)`    the declaration is not among the endpoint's
+ *                              current lane tags — E4, and it never falls back
+ *                              to the derivation, however unambiguous the
+ *                              endpoint looks now
+ *
+ * What this replaces is the RAW STORED TAG. The old suffix printed
+ * `tail_tag`/`head_tag` verbatim and had a `[unplaced]` marker for `''` on
+ * both sides — a spelling that was already wrong under D2 and got worse the
+ * more of the corpus went undeclared: 69% of production's edges have both
+ * endpoints uniquely laned and no stored side, so `[unplaced]` was printed
+ * over the majority of a corpus whose attribution is in fact perfectly
+ * determined. The reader that matters here is settlement's edge pass, and the
+ * question it asks is exactly the resolver's: which side do I owe a
+ * declaration for, which one is contradicted, which one is already answered.
+ *
+ * The outcome words are the spec's own, not abbreviations: a surface that
+ * invented `~#lane` or `#lane?` would be teaching a private notation for a
+ * vocabulary the writer is taught in prose everywhere else (T2388).
  */
-function groupDirectRows(rows: readonly TurnRelationEdgeView[]): DirectRelationRow[] {
-  const byPlacement = new Map<string, DirectRelationRow>();
+function formatResolvedSide(
+  resolution: EdgeSideResolution,
+  viewerSegmentId: number | null,
+): string {
+  if (resolution.lane !== null) {
+    // The task qualifier is exactly the lane view's `E<n>/#tag` form and
+    // carries the same meaning: a bare `#tag` is only an address inside ONE
+    // task. It is resolved from the endpoint's CURRENT owning task, which is
+    // why the legend calls it advisory.
+    const lane =
+      resolution.lane.segmentId === viewerSegmentId
+        ? `#${resolution.lane.tag}`
+        : `E${resolution.lane.segmentId}/#${resolution.lane.tag}`;
+    return `${lane} ${resolution.outcome}`;
+  }
+  if (resolution.outcome === "invalid") {
+    // Named WITHOUT the `E<n>/` qualifier: the stored tag is not one of the
+    // endpoint's lanes, so there is no task in which it is an address.
+    return `invalid (stored #${resolution.storedTag})`;
+  }
+  return resolution.outcome;
+}
+
+/** The between-sides arrow inside an attribution suffix — the same glyph the lane tag pair uses everywhere else in this codebase. */
+const SIDE_ARROW = "→";
+
+/** The row's trailing attribution clause: printed ONCE when both sides resolve to the same thing (`(#lane derived)`, `(none)`), as a pair otherwise. */
+function formatSides(tail: string, head: string): string {
+  return tail === head ? `(${tail})` : `(${tail} ${SIDE_ARROW} ${head})`;
+}
+
+/**
+ * Rows grouped by `(other endpoint, RESOLVED tail, RESOLVED head)` — never by
+ * endpoint pair alone.
+ *
+ * The key moved from the two STORED tags to the two resolved attributions,
+ * which is the same rule read at the level the reader actually sees: two rows
+ * that render one suffix are one row, two rows that would need different
+ * suffixes stay apart. Production holds 109 turn pairs carrying more than one
+ * physical row; until ticket 01's rebuild folds them, such a pair renders one
+ * line per physical row whenever its rows resolve differently (a stored `#a`
+ * beside a stored `#b`), and one merged line when they do not — with no
+ * legacy-pair machinery of any kind, because the grouping key is the whole
+ * mechanism.
+ *
+ * Output order is by ADDRESS first, then by the rendered sides — so a pair's
+ * several attributions land adjacent and a reader scanning for one address
+ * finds all of it in one place. The DB hands rows in
+ * `relation ASC, tail_tag ASC, head_tag ASC` order, which is deterministic but
+ * scatters an endpoint across the block.
+ */
+function groupDirectRows(
+  rows: readonly TurnRelationEdgeView[],
+  resolvableOf: (row: TurnRelationEdgeView) => ResolvableEdgeSides,
+  endpointLaneFacts: ReadonlyMap<number, EndpointLaneFacts>,
+  viewerSegmentId: number | null,
+): DirectRelationRow[] {
+  const byAttribution = new Map<string, DirectRelationRow>();
   for (const row of rows) {
-    const key = `${row.otherTurnId} ${row.tailTag} ${row.headTag}`;
-    const existing = byPlacement.get(key);
-    const word = displayEdgeRelation(row);
+    const resolvable = resolvableOf(row);
+    const sideOf = (side: EdgeSide): string =>
+      formatResolvedSide(resolveEdgeSide(resolvable, side, endpointLaneFacts), viewerSegmentId);
+    const tail = sideOf("tail");
+    const head = sideOf("head");
+    // JSON, not a delimiter string: a rendered side contains spaces, arrows
+    // and parentheses, so any hand-picked separator could be produced by a
+    // lane tag and make two different attributions share one key.
+    const key = JSON.stringify([row.otherTurnId, tail, head]);
+    const word = renderRelationClassWord(row);
+    const existing = byAttribution.get(key);
     if (existing) {
       if (!existing.words.includes(word)) {
         existing.words.push(word);
       }
       continue;
     }
-    byPlacement.set(key, {
-      otherTurnId: row.otherTurnId,
+    byAttribution.set(key, {
       otherSessionId: row.otherSessionId,
       otherPromptNumber: row.otherPromptNumber,
-      tailTag: row.tailTag,
-      headTag: row.headTag,
+      tail,
+      head,
       words: [word],
     });
   }
-  const grouped = [...byPlacement.values()];
+  const grouped = [...byAttribution.values()];
   for (const group of grouped) {
     group.words.sort();
   }
@@ -466,60 +596,11 @@ function groupDirectRows(rows: readonly TurnRelationEdgeView[]): DirectRelationR
     if (left.otherPromptNumber !== right.otherPromptNumber) {
       return left.otherPromptNumber - right.otherPromptNumber;
     }
-    if (left.tailTag !== right.tailTag) return left.tailTag < right.tailTag ? -1 : 1;
-    if (left.headTag !== right.headTag) return left.headTag < right.headTag ? -1 : 1;
+    if (left.tail !== right.tail) return left.tail < right.tail ? -1 : 1;
+    if (left.head !== right.head) return left.head < right.head ? -1 : 1;
     return 0;
   });
   return grouped;
-}
-
-/**
- * The whole-row marker for a relation-carrying row whose BOTH sides hold the
- * `''` sentinel. The canonical word is "unplaced" (spec D8): not "draft",
- * which names a note's status, and not "bare", which this codebase already
- * uses for the relation-NULL prose row that never reaches this renderer.
- */
-const UNPLACED_MARKER = "[unplaced]";
-
-/** The one-character stand-in for a side nobody has settled, beside a partner that IS settled. */
-const UNSETTLED_SIDE_MARK = "·";
-
-/** The between-sides arrow inside a placement suffix — the same glyph the lane tag pair uses everywhere else in this codebase. */
-const SIDE_ARROW = "→";
-
-/**
- * One side's rendered lane, task-qualified when the endpoint owning that side
- * sits in a task other than the viewed turn's own.
- *
- * The qualifier is exactly the lane view's `E<n>/#tag` form and carries the
- * same meaning: a bare `#tag` is only an address inside ONE task, so a side
- * belonging to another task has to name it or the reader cannot resolve it.
- * A homeless endpoint has no task to name, so the bare tag is all that can
- * honestly be printed.
- */
-function formatSide(
-  tag: string,
-  endpointTaskId: number | null,
-  viewerTaskId: number | null,
-): string | null {
-  if (tag === "") {
-    return null;
-  }
-  if (endpointTaskId !== null && endpointTaskId !== viewerTaskId) {
-    return `E${endpointTaskId}/#${tag}`;
-  }
-  return `#${tag}`;
-}
-
-/** The row's trailing side clause: `[unplaced]`, `(#lane)`, `(#tail -> ·)`, `(· -> #head)` or `(#tail -> #head)`. */
-function formatSides(tail: string | null, head: string | null): string {
-  if (tail === null && head === null) {
-    return UNPLACED_MARKER;
-  }
-  if (tail !== null && tail === head) {
-    return `(${tail})`;
-  }
-  return `(${tail ?? UNSETTLED_SIDE_MARK} ${SIDE_ARROW} ${head ?? UNSETTLED_SIDE_MARK})`;
 }
 
 /**
@@ -527,33 +608,49 @@ function formatSides(tail: string | null, head: string | null): string {
  * line per response"), appended once by the response assembler rather than
  * repeated under every turn block.
  *
- * Its last clause is D0's own advisory line, and it is load-bearing rather
- * than decorative: the write gate fences a turn's OUTGOING ROWS. The lane
- * sides shown here are the rows' stored tags, but the `E<n>/` qualifier in
- * front of one is resolved from the endpoint's CURRENT owning task at read
- * time and is not fenced — a task merge or a membership move re-resolves it
- * without staling anything. A reader who mistook the qualifier for part of
- * the fenced fact would re-read for nothing.
+ * Its last clause is D0/D3's own advisory line, and it is load-bearing rather
+ * than decorative: the write gate fences a turn's OUTGOING ROWS, and D3 says
+ * in as many words that a RENDERED ATTRIBUTION MARK is not covered by the
+ * relations grant — the authority for a declaration is the post-stage-1
+ * endpoint facts inside settlement's own finalize snapshot, never a mark this
+ * renderer printed. Every mark here, the `E<n>/` qualifier included, is
+ * recomputed from the endpoints' CURRENT tasks at read time: a task merge or a
+ * membership move changes what this field prints without staling anything a
+ * writer read.
  */
 export const RELATIONS_FIELD_LEGEND =
-  "relations legend: `<words> -> <addr>` is an edge this turn cites OUT, `<- <addr> <words>` one cited IN; " +
+  "relations legend: `<class> -> <addr>` is an edge this turn cites OUT, `<- <addr> <class>` one cited IN; " +
   "this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. " +
-  "The trailing `(#tail → #head)` is the edge's two stored lane sides — `(#lane)` when both settle in one, " +
-  "`·` a side nobody settled, `[unplaced]` neither. An `E<n>/` before a lane names that endpoint's " +
-  "CURRENT task, resolved at read time and advisory: it is not part of what an edge write is checked against.";
+  "The class is `correct(full)`, `correct(partial)`, `verify` or `use`. The trailing " +
+  "`(tail → head)` is each side's RESOLVED lane attribution, printed once when both sides read alike: " +
+  "`#lane derived` (that endpoint is in exactly one lane, so nothing had to be declared), " +
+  "`#lane declared` (several lanes, and this is the declared one), `ambiguous` (several lanes, none declared " +
+  "— the declaration settlement owes), `none` (that endpoint is in no lane), " +
+  "`invalid (stored #tag)` (the declaration is not among that endpoint's current lane tags). " +
+  "An `E<n>/` before a lane names that endpoint's CURRENT task. Attributions and qualifiers alike are " +
+  "resolved from the endpoints' CURRENT tasks at read time and are ADVISORY: they are not part of what an " +
+  "edge write is checked against, and they are not the authority for a declaration.";
 
 /**
- * The turn's direct edge set as rendered lines (spec D8) — outgoing first,
- * incoming after, one line per `(other endpoint, tailTag, headTag)`
- * placement, `[]` when the turn neither cites nor is cited by anything
- * (relation-carrying and Law-8-live; a `relation IS NULL` prose row is not an
- * edge and `getTurnRelationEdges` never hands one over).
+ * The turn's direct edge set as rendered lines (spec D8, marks per D2) —
+ * outgoing first, incoming after, one line per
+ * `(other endpoint, resolved tail, resolved head)` attribution, `[]` when the
+ * turn neither cites nor is cited by anything (relation-carrying and Law-8
+ * live; a `relation IS NULL` prose row is not an edge and
+ * `getTurnRelationEdges` never hands one over).
  *
  * Never elides: no `… +N more`, no page ledger, no downstream hop. The COUNT
  * is bounded by the attach-side degree caps (20 out, 20 in), so the whole set
  * fits the field's budget at today's atom widths; a caller who nevertheless
  * hands a smaller budget gets a `cut` report from the render layer, and the
  * gate does not care (D0: delivered suffices, not delivered whole).
+ *
+ * ONE endpoint load for the whole node (`loadEndpointLaneFacts`, spec D2's
+ * single shared read): a 40-atom node pays two queries plus one lane-registry
+ * read for its whole field, not a membership lookup per row. This replaced a
+ * memoized per-endpoint `getOwningSegmentId`, which could answer which TASK
+ * owned a side but never which lanes it was in, and so could not have resolved
+ * an attribution at all.
  *
  * Callers gate the QUERY on whether `relations` was actually requested
  * (`filter.fields`) — this function has no opinion on that, exactly as the
@@ -568,40 +665,48 @@ export function buildTurnDirectRelationLines(
     return [];
   }
 
-  // One membership lookup per DISTINCT endpoint, memoized: a 40-atom node
-  // whose edges land on far fewer distinct turns pays per turn, not per row.
-  const taskCache = new Map<number, number | null>();
-  const taskOf = (turnId: number): number | null => {
-    const cached = taskCache.get(turnId);
-    if (cached !== undefined) {
-      return cached;
-    }
-    const resolved = getOwningSegmentId(db, turnId);
-    taskCache.set(turnId, resolved);
-    return resolved;
-  };
-  const viewerTaskId = taskOf(turn.id);
+  const endpointLaneFacts = loadEndpointLaneFacts(db, [
+    turn.id,
+    ...edges.outbound.map((row) => row.otherTurnId),
+    ...edges.inbound.map((row) => row.otherTurnId),
+  ]);
+  const viewerSegmentId = endpointLaneFacts.get(turn.id)?.segmentId ?? null;
+
+  // An arc's TAIL is at its CITING turn and its HEAD at the cited one, so the
+  // viewed node is the tail of every outgoing row and the head of every
+  // incoming one. `edgeSideEndpointId` is the same rule the resolver applies;
+  // these two shapes are what feed it.
+  const outgoingSides = (row: TurnRelationEdgeView): ResolvableEdgeSides => ({
+    citingId: turn.id,
+    citedId: row.otherTurnId,
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+  });
+  const incomingSides = (row: TurnRelationEdgeView): ResolvableEdgeSides => ({
+    citingId: row.otherTurnId,
+    citedId: turn.id,
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+  });
 
   const lines: string[] = [];
-  for (const row of groupDirectRows(edges.outbound)) {
-    // Outgoing: THIS turn is the citing side, so the tail is the viewer's own
-    // side and the head belongs to the other endpoint.
-    const sides = formatSides(
-      formatSide(row.tailTag, viewerTaskId, viewerTaskId),
-      formatSide(row.headTag, taskOf(row.otherTurnId), viewerTaskId),
-    );
+  for (const row of groupDirectRows(
+    edges.outbound,
+    outgoingSides,
+    endpointLaneFacts,
+    viewerSegmentId,
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`${row.words.join(",")} -> ${address} ${sides}`);
+    lines.push(`${row.words.join(",")} -> ${address} ${formatSides(row.tail, row.head)}`);
   }
-  for (const row of groupDirectRows(edges.inbound)) {
-    // Incoming: the OTHER endpoint is the citing side, so the tail is theirs
-    // and the head is the viewer's own.
-    const sides = formatSides(
-      formatSide(row.tailTag, taskOf(row.otherTurnId), viewerTaskId),
-      formatSide(row.headTag, viewerTaskId, viewerTaskId),
-    );
+  for (const row of groupDirectRows(
+    edges.inbound,
+    incomingSides,
+    endpointLaneFacts,
+    viewerSegmentId,
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`<- ${address} ${row.words.join(",")} ${sides}`);
+    lines.push(`<- ${address} ${row.words.join(",")} ${formatSides(row.tail, row.head)}`);
   }
   return lines;
 }

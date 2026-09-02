@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
@@ -1649,6 +1650,24 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     const deletedSourceId = getTurn(db, sessionId, 5)!.id;
     const foreignId = getTurn(db, otherSessionId, 21)!.id;
 
+    // main-agent-edges D2: a stored side tag means "this endpoint is in
+    // SEVERAL lanes and this is the one", so the fixture has to give the
+    // endpoints real lanes for a declaration to be anything but `invalid`.
+    // The subject sits in BOTH lanes (its declarations are load-bearing, and
+    // its blank sides are the `ambiguous` finding); each target sits in one.
+    const taskId = createSegment(db, { title: "relations task", nowEpoch: 500_000 }).id;
+    insertLane(db, taskId, "rule-ledger-tickets", 500_000);
+    insertLane(db, taskId, "watchdog-liveness", 500_000);
+    addSegmentMembers(db, taskId, [subjectId, outboundTargetId, inboundSourceId], 500_000);
+    const memberships: Array<[number, string[]]> = [
+      [subjectId, ["rule-ledger-tickets", "watchdog-liveness"]],
+      [outboundTargetId, ["rule-ledger-tickets"]],
+      [inboundSourceId, ["watchdog-liveness"]],
+    ];
+    for (const [turnId, tags] of memberships) {
+      db.query("UPDATE turns SET tags = ? WHERE id = ?").run(JSON.stringify(tags), turnId);
+    }
+
     writeMemoryEdges(
       db,
       [
@@ -1717,26 +1736,35 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     expect(output).not.toContain("←");
   });
 
-  // Settlement-read-once spec D8 (user rulings T2388/T2404): the 3-hop tree
-  // is replaced by this node's DIRECT edge set — outgoing rows first,
-  // incoming after, both raw lane sides on each, nothing elided.
-  test("requested: the direct set carries every direction's word + lane, Law-8 filtered, cross-session qualified", () => {
+  // Settlement-read-once spec D8 (user rulings T2388/T2404) plus
+  // main-agent-edges ticket 07: the 3-hop tree is replaced by this node's
+  // DIRECT edge set — outgoing rows first, incoming after, each side carrying
+  // its RESOLVED attribution, nothing elided.
+  test("requested: the direct set carries every direction's class + resolved attribution, Law-8 filtered, cross-session qualified", () => {
     const output = recallMemory(db, {
       id: `S${sessionId}/T1`,
       filter: { fields: ["title", "relations"] },
     });
 
     expect(output).toContain("- relations:");
-    expect(output).toContain("override -> T2 (#rule-ledger-tickets)");
+    expect(output).toContain("correct(full) -> T2 (#rule-ledger-tickets declared)");
     // A crossing names BOTH lanes rather than collapsing them into one.
-    expect(output).toContain("consume -> T3 (#rule-ledger-tickets → #watchdog-liveness)");
-    // Incoming: address first, then the word, then the same side rules.
-    expect(output).toContain("<- T3 narrows [unplaced]");
-    expect(output).toContain(`grounds -> S${otherSessionId}/T21 [unplaced]`);
+    expect(output).toContain(
+      "use -> T3 (#rule-ledger-tickets declared → #watchdog-liveness declared)",
+    );
+    // Incoming: address first, then the class, then the same side rules — and
+    // the subject's own blank side is the `ambiguous` finding, because the
+    // subject is in two lanes and declared neither here.
+    expect(output).toContain("<- T3 correct(partial) (#watchdog-liveness derived → ambiguous)");
+    expect(output).toContain(`use -> S${otherSessionId}/T21 (ambiguous → none)`);
+    // The CLASS is the only relation word anywhere in the field.
+    for (const retired of ["override", "narrows", "extends", "consume", "grounds", "indexes", "verifies"]) {
+      expect(output).not.toContain(retired);
+    }
     // The tree's own notation is gone with the tree: no root-address line, no
     // labelled arrow, no brace suffix, no branch glyph, no elision marker.
-    expect(output).not.toContain("-override->");
-    expect(output).not.toContain("=consume=>");
+    expect(output).not.toContain("-correct(full)->");
+    expect(output).not.toContain("=use=>");
     expect(output).not.toContain("{rule-ledger-tickets}");
     expect(output).not.toContain("└");
     expect(output).not.toContain("more");
@@ -1751,12 +1779,12 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     // calls below stay on `buildBrowseFeed`'s global chronological path, not
     // the search/listing one `filter.session` would trigger.
     const unrequested = recallMemory(db, {});
-    expect(unrequested).not.toContain("override ->");
+    expect(unrequested).not.toContain("correct(full) ->");
 
     const requested = recallMemory(db, {
       filter: { fields: ["title", "relations"] },
     });
-    expect(requested).toContain("override -> T2 (#rule-ledger-tickets)");
+    expect(requested).toContain("correct(full) -> T2 (#rule-ledger-tickets declared)");
   });
 });
 
