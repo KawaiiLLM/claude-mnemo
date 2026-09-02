@@ -4,7 +4,7 @@
 
 **Blocked by:** None. **BLOCKS 02, 03, 04, 05** — none of them may start until this returns (spec ruling 1, user S15069/T2332).
 
-**Status:** PRICING PHASE RUN, 2026-09-02 — three arms built and each run once ($5.03 total). **The three bills DO NOT PRICE THE TREATMENT**: the chosen window was already settled, so all three arms' edge pass was a no-op (0 new edges in every arm), and arm B's write path was blocked by one un-remapped allowlist. Two fixes named below; the sizing call is still the user's and the battery is NOT RUN. Original scope line follows: ready-for-agent — SIZING QUESTION OPEN, see "Before you spend anything".
+**Status:** PRICING PHASE RE-RUN, 2026-09-02 (round 2) — round 1's two defects fixed and the same window settled once more under each arm, with a LIVE edge pass this time: 49 / 40 / 59 edges written, all three done on one attempt, $5.65. Nominal, n=1 and not an effect estimate: A→B +7.1% dollars, B→C +17.9% — and B→C's money is cache READ (+62%), not output tokens (−2.7%). Within-window $ CV drops 0.252 → 0.122, but on 2 df its own upper bound is 0.77, so the smallest N spans 2–71/arm at +45% and 99–3,874/arm at +5%. **The sizing call is still the user's**; the cheapest thing that would make any N load-bearing is one arm replicated 3–4× on this same reset window (~$25), and it was NOT run. Battery and quality arm NOT RUN. Original scope line follows: ready-for-agent — SIZING QUESTION OPEN, see "Before you spend anything".
 
 ## Why this exists, and why ticket 01 was not enough
 
@@ -342,3 +342,288 @@ Per-arm SDK transcripts (the billing source of record) are under
 arm-B attempt (killed at 585 s by a wait-loop timeout in my own harness that took the worker's
 process group with it — not the ceiling, not the arm; re-run clean from a fresh clone). Production
 `~/.claude-mnemo/` was opened read-only exactly once and never written.
+
+---
+
+# PRICING PHASE, ROUND 2 — THE SAME WINDOW, WITH A LIVE EDGE PASS
+
+Round 1's two defects are fixed and the same window was settled once more under each arm.
+**This time the treatment fired.** All three arms wrote real edges (49 / 40 / 59), all three
+committed on one attempt, none came near the ceiling, and arm B's write path took the class
+vocabulary with zero edge-field refusals. Total spend: **$5.65** (A $1.6966 + B $1.8163 +
+C $2.1406). Nothing else was run: no battery, no quality arm, no fourth settlement.
+
+## 1. Fix 1 — the window is edge-less when each arm starts
+
+Round 1 re-settled a `done` window and every arm's edge pass found the graph already complete.
+The reset below runs on each arm's OWN fresh clone of `snapshot.db`, once per arm, from one
+script (`round2_reset.sh`):
+
+```sql
+CREATE TEMP TABLE win AS
+  SELECT id FROM turns WHERE session_id=18993 AND prompt_number BETWEEN 101 AND 150;
+CREATE TEMP TABLE doomed AS
+  SELECT id FROM memory_edges WHERE citing_kind='turn' AND citing_id IN (SELECT id FROM win);
+DELETE FROM memory_edge_side_tags WHERE edge_row_id IN (SELECT id FROM doomed);
+DELETE FROM memory_edges          WHERE id IN (SELECT id FROM doomed);
+DELETE FROM note_settlement_jobs  WHERE session_id=18993 AND window_start=101;
+```
+
+Deleted per arm, IDENTICAL in all three (the script prints these and they matched exactly):
+
+| | A | B | C |
+|---|---|---|---|
+| window turns | 50 | 50 | 50 |
+| `memory_edges` rows deleted (citing turn in window) | **58** | **58** | **58** |
+| `memory_edge_side_tags` rows deleted | 116 | 116 | 116 |
+| production job rows deleted (job 162) | 1 | 1 | 1 |
+| edges citing the window, after | 0 | 0 | 0 |
+| edges citing the window FROM OUTSIDE, kept | 39 | 39 | 39 |
+| `memory_edges` total, after | 5,548 | 5,548 | 5,548 |
+
+Snapshot total is 5,606, so exactly the 58 went and nothing else. The 39 inbound edges whose
+citing turn lies outside T101–150 were deliberately kept — the instruction was to strip the
+window's own edge pass, not its neighbourhood.
+
+**What else had to be reset, and what did not.** The job row (162, `done`/`edges`/2 attempts) is
+the only stage/status mark, and deleting it takes with it, by `ON DELETE CASCADE`,
+`note_settlement_proposals`, `note_settlement_debts` and `lane_run_touches` — every per-job
+record that says this window's edge pass already happened. There is **no per-edge and no per-turn
+settlement mark**: `memory_edges` carries only `provenance` and the two lane columns, and `turns`
+has no settled/era column that an edge pass reads. `memory_edge_tags` was named in the plan and
+**does not exist** — ticket 09 dropped it; `memory_edge_side_tags` is the only edge side index
+left. `note_settlement_cursors.last_settled_prompt_number` (388) was left alone: it gates
+scheduling, not the edge pass, the explicit `/settle` enqueue clears it via `allow_pre_era`, and
+it is identical across arms either way.
+
+Each arm's preflight, printed by the run script before its own enqueue, read
+`edges citing window: 0` / `job rows: 0`. The clone is fresh (`cp -c` off `snapshot.db` with
+`db.sqlite{,-wal,-shm}` removed together first) and the data root is a new empty `dataroot2/`, so
+round 1's databases, transcripts and bills all survive untouched.
+
+## 2. Fix 2 — the arm-B/C allowlist now reads the arm's own vocabulary
+
+`worker/note-settlement-sdk-query.ts` derives `STAGE_TWO_TURN_NOTE_FIELDS` — the edge-pass
+allowlist — and the stage-1 pre-`finalize` denylist from `db/citations.ts`'s two entry tables.
+The round-1 patch aliased those imports in the facade but not here, so `use` / `correctFull` /
+`correctPartial` / `verify` fell outside the allowlist and were classified as note fields.
+One import, identical in both arms:
+
+```diff
+--- arm-A/src/worker/note-settlement-sdk-query.ts
++++ arm-B/src/worker/note-settlement-sdk-query.ts
+@@ -53,7 +53,10 @@
+   type RunLaneTouches,
+ } from "../db/lane-disposition";
+ import { getTurnById } from "../db/turns";
+-import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
++import {
++  V13_RELATION_FIELD_ENTRIES as RELATION_FIELD_ENTRIES,
++  V13_RETRACTION_FIELD_ENTRIES as RETRACTION_FIELD_ENTRIES,
++} from "../db/citations";
+ import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
+```
+
+It covers both consumers in that file — the allowlist at line 234 and the pre-`finalize` refusal
+at line 3104 — so the two cannot disagree. `note-settlement-stage1.ts` imports the same names but
+never uses them (a dead import); nothing else in either arm reads the shipped entry tables from a
+settlement path.
+
+**Proof before spending, in process, in each arm's own build.** A throwaway test drives the arm's
+real stage-2 `note` handler through the existing `runStageTwo` seam (`toolImpl` capture,
+`queryImpl` stub — no API call), writes one `use` relation, and reads the storage row back:
+
+```
+arm B: accepted   "Landed 1 relation(s)."      stored rows (relation='extends'): 1
+       refusedOld "Parameter error: extends is refused on the edge pass — …"
+arm C: accepted   "Landed 1 relation(s)."      stored rows (relation='extends'): 1
+       refusedOld "Parameter error: extends is refused on the edge pass — …"
+```
+
+Both directions matter: `use` is now accepted AND lands as the shipped `extends` word (the
+mapping layer intact), while the retired seven-word key is the one now refused — which is what
+shows the allowlist really moved rather than merely widened. Arms B and C were rebuilt
+(`settlement-child.cjs` 4,482,971 → 4,482,987 bytes in both).
+
+`diff -rq arm-A/src arm-B/src` and `… arm-C/src` still return exactly the ten treatment files
+plus `shared/v13-display.ts` — `note-settlement-sdk-query.ts` was already in the set, so the fix
+added no file. Arm A's `src/` differs from HEAD only in the two harness lines.
+
+**Harness defect fixed too.** Round 1's arm-B abort at 585 s was not the harness's own wait loop
+but the foreground shell it ran in timing out and taking the process group with it. Round 2's
+runs are launched detached (`nohup … &`, immediate return) and polled from outside; a 600 s
+foreground timeout landed on arm A mid-run and the arm was verified still alive on its port
+immediately afterwards. **The only kill in the script is the ceiling**, raised to 35 minutes /
+$15 per round 1's finding that 20 minutes sits below the median settlement. No arm came within
+20 minutes of it.
+
+## 3. The three bills, round 2, with round 1 beside them
+
+Same snapshot, same window, same model (`claude-sonnet-5`), same budgets, same price sheet
+(input $2.00 / output $10.00 / cache-write-5m $2.50 / cache-write-1h $4.00 / cache-read $0.20 per
+1M), same `cost.py` and `measure.py`, deduped by `messageId:requestId` and attributed by message
+timestamp. Ports 37811/2/3, data roots `dataroot2/`. Production's worker on 37778 was never
+touched.
+
+| | **A** r2 | *A r1* | **B** r2 | *B r1* | **C** r2 | *C r1* |
+|---|---|---|---|---|---|---|
+| status | done, 1 attempt | *done, 1* | done, 1 attempt | *done, 1* | done, 1 attempt | *done, 1* |
+| output tokens | 78,400 | *56,749* | 84,694 | *79,605* | 82,425 | *42,020* |
+| cache read | 2,391,386 | *2,092,170* | 2,595,142 | *2,538,915* | 4,203,352 | *1,538,474* |
+| cache creation (5m) | 173,699 | *148,336* | 180,091 | *167,443* | 190,233 | *122,051* |
+| input tokens | 46 | *44* | 42 | *48* | 66 | *36* |
+| API calls | 23 | *22* | 21 | *24* | 33 | *18* |
+| wall clock | 827 s | *625 s* | 908 s | *847 s* | 868 s | *444 s* |
+| **edges WRITTEN** | **49** | *0* | **40** | *0* | **59** | *0* |
+| edge rows after / start | 49 / 0 | *58 / 58* | 40 / 0 | *58 / 58* | 59 / 0 | *58 / 58* |
+| pairs after | 49 | *55* | 40 | *55* | 59 | *55* |
+| **rows per pair (ruling 2)** | **1.000** | *1.055* | **1.000** | *1.055* | **1.000** | *1.055* |
+| new empty-sided rows | 0 | *0* | 0 | *0* | 0 | *0* |
+| refusals, READ_GRANT | 0 | *0* | 1 | *0* | 3 | *0* |
+| refusals, LANE_SIDE | 0 | *0* | 0 | *0* | 0 | *0* |
+| refusals, edge-field (harness) | 0 | *0* | **0** | *6* | 0 | *0* |
+| refusals, other | 1 (membership) | *2* | 2 (membership, note mode) | *2* | 1 (note mode) | *2* |
+| `commit` attempts | 1 | *1* | 1 | *1* | 1 | *1* |
+| **dollars** | **$1.6966** | *$1.3569* | **$1.8163** | *$1.7225* | **$2.1406** | *$1.0331* |
+
+Relation fields actually reached for, from each arm's own transcripts — the vocabulary under test,
+exercised:
+
+```
+arm A  grounds 19 · extends 10 · verifies 8 · override 5 · indexes 7 · narrows 1     (50 entries, 6 of 7 words)
+arm B  use 20 · verify 12 · correctPartial 6 · correctFull 4                          (42 entries, all 4 classes)
+arm C  use 46 · verify 8 · correctPartial 5 · correctFull 4                           (63 entries, all 4 classes)
+```
+
+**Ruling 2 held itself in every arm, unenforced: 1.000 rows per pair, all three.** Production's
+own settlement of this same window ran 1.055. The lane-side refusal family stayed at ZERO under
+ruling 3 as well — the predicted cost of "place both endpoints or do not write the edge" did not
+appear on this window, which is one window's evidence and not a general result.
+
+## 4. Nominal A→B and B→C, n=1, NOT an effect estimate
+
+One run per arm on one window. These are the two differences that happened, not estimates of
+anything, and the width of the interval around each of them is larger than the difference itself.
+
+| | dollars | output tokens | wall | edges written |
+|---|---|---|---|---|
+| **A→B** (vocabulary) | **+7.1%** | +8.0% | +9.8% | −18.4% |
+| **B→C** (citation policy) | **+17.9%** | −2.7% | −4.4% | +47.5% |
+
+A→B landed within shouting distance of the ~+5% the ticket named — with n=1 that is a coincidence
+worth noting and nothing more.
+
+B→C is the interesting shape and it is not the one the ticket predicted. C wrote **47.5% more
+edges for 2.7% FEWER output tokens**; its extra $0.32 is almost entirely cache read
+(2.60M → 4.20M, **+62%**) carried by 57% more API calls (21 → 33, including 7 `timeline` calls no
+other arm made). Under complete direct-use citation the arm did not write more per turn — it
+LOOKED more, and looking is billed at $0.20/M against a context that grows with every turn of the
+run. If that shape survives replication, the cost of ruling 3 is a search cost, not a write cost,
+and the endpoint that sees it is cache read, not output tokens.
+
+## 5. The variance anchor, updated — and what round 1 is and is not good for
+
+**Round 1 is NOT a second replicate of these runs.** Its edge pass was inert; its three bills
+price a no-op re-settlement of a complete graph. Round 1 and round 2 are two different processes,
+so "n=3 per arm across two rounds" does not exist — what exists is **n=1 per arm of the priced
+thing** and n=1 per arm of a degenerate one. Pooling all six runs gives $ CV 0.236, and that
+number should not be used for anything: it is mostly the gap between the two processes
+(arm C alone moved +107% between rounds, arm B +5%).
+
+Round 1 remains usable for exactly two things: the between-window production variance it measured
+from `note_settlement_jobs` and the transcripts (untouched by any of this), and as the control
+that says the harness settles and commits correctly with nothing to do.
+
+**The within-window anchor, re-measured on round 2's three live runs** (same window, same
+material, treatment live — still containing whatever real arm effect exists, so an upper bound on
+noise as much as a measure of it):
+
+| endpoint | n | min → max | mean | sd | **CV** |
+|---|---|---|---|---|---|
+| dollars | 3 | 1.697 → 2.141 (1.26×) | 1.885 | 0.230 | **0.122** |
+| output tokens | 3 | 78,400 → 84,694 (1.08×) | 81,840 | 3,188 | **0.039** |
+| wall clock | 3 | 827 → 908 s | 868 s | 40.5 | 0.047 |
+
+Round 1's same measurement was $ CV 0.252 / output CV 0.319 — **round 2's spread is half of it on
+dollars and an eighth on output tokens.** That is the fix showing up in the variance: with the
+edge pass live, all three arms do the same amount of real work, and round 1's spread was largely
+three agents improvising differently over an empty worklist.
+
+**Two df. Say it out loud.** A CV from n=3 carries a 95% interval of roughly ×0.52 to ×6.28 on
+the standard deviation, so the honest anchor is **CV 0.06 – 0.77 with a point estimate of 0.12**,
+and the sizing has to be read across that whole range:
+
+| anchor, dollars | +5% (A→B) | +45% (B→C) |
+|---|---|---|
+| CI low, CV 0.063 | 27 /arm | 1 /arm |
+| **point, CV 0.122** | **99 /arm** | **2 /arm** |
+| CI high, CV 0.766 | 3,874 /arm | 71 /arm |
+| production per-window, CV 0.537 (unpaired) | 1,904 /arm | 35 /arm |
+| output tokens, round-2 CV 0.039 (point) | 11 /arm | 1 /arm |
+
+(α=0.05 two-sided, power 0.80, `(z₀.₉₇₅+z₀.₈₀)² = 7.849`; unpaired
+`N = 7.849·CV²·[1+(1+δ)²]/δ²`, paired-if-independent `N = 7.849·2·CV²/δ²`, which is within a few
+percent of the unpaired number at these CVs and is not tabulated separately.)
+
+3N budget at the current regime's per-window median $3.452 / mean $4.108:
+
+| | 3N runs | @median | @mean |
+|---|---|---|---|
+| +45%, CV 0.122 (point) | 6 | $21 | $25 |
+| +45%, CV 0.766 (CI high) | 213 | $735 | $875 |
+| +5%, CV 0.122 (point) | 297 | $1,025 | $1,220 |
+| +5%, CV 0.766 (CI high) | 11,622 | $40,119 | $47,743 |
+
+Multiply by ≈1.36 for the abandoned-job tax (unchanged: 4 abandoned jobs in 14 days, $29.74,
+done rate 11/15).
+
+**What changed against round 1's conclusion.** Round 1 said +45% is affordable and +5% is not,
+sized off a contaminated CV of 0.252. Round 2's cleaner within-window CV moves BOTH down by about
+4× at the point estimate — +45% becomes nearly free and +5% becomes a few hundred runs rather
+than a few thousand — **but the point estimate rests on two degrees of freedom, and its own upper
+confidence bound puts +5% back at $40K.** The right next step, if the sizing question is to be
+answered rather than guessed, is the cheap one: **replicate one arm on this same reset window
+three or four times to get a real within-arm CV** (~$7 per run, ~$25 for four). That number, not
+this one, is what a battery should be sized on. It is a run of the same shape as these three and
+was NOT taken, because this phase's scope was three runs.
+
+## 6. What turned out false, and what is still NOT RUN
+
+1. **`memory_edge_tags` does not exist** — the plan named it as a table to sweep alongside
+   `memory_edges`; ticket 09 dropped it and `memory_edge_side_tags` (`ON DELETE CASCADE`, but
+   swept explicitly here) is the only edge side index left.
+2. **Round 1's "my wait loop killed arm B at 585 s" is not quite right.** The wait loop's own
+   ceiling was 1200 s and never fired; what killed the run was the foreground shell it was
+   launched in hitting a 600 s tool timeout and taking the process group. The fix is detachment,
+   not a longer loop — and it was verified under a real 600 s timeout during arm A.
+3. **Round 1's within-window CV (0.252) overstates the noise by ~2×** on dollars and ~8× on
+   output tokens, because it was measured with the edge pass inert.
+4. **"Ruling 3 will grow the lane-side refusal family" did not show up.** Zero LANE_SIDE refusals
+   in all three arms, including arm C, which wrote the most edges. One window.
+5. **B→C's cost is not where the ticket assumed.** It predicted the cost of complete citation in
+   edge VOLUME and therefore output tokens; on this window output tokens went DOWN and the money
+   went to cache read (§4).
+
+NOT RUN, and why:
+
+- **The full battery** — the sizing call is the user's, per the ticket's own stop rule, and §5
+  argues it should be preceded by one cheap within-arm replication rather than sized off n=3.
+- **The quality arm** (blind zero-tool reader over each arm's rendered lane view) — part of the
+  battery, not the pricing phase. Note that it is now actually RUNNABLE: three arms' worth of
+  genuinely different graphs exist (49 / 40 / 59 edges over the same 50 turns), which round 1
+  could not supply.
+- **A fourth settlement** — the task's stop rule.
+- **A within-arm replication** — see §5; it is one arm, three or four runs, ~$25, and it is the
+  single cheapest thing that would make any of the N figures above load-bearing.
+
+## 7. Where round 2's artefacts are
+
+Scratch root unchanged. New this round, all alongside round 1's, which survives intact:
+`round2_reset.sh`, `run_arm2.sh`, `measure2.py`, `fields2.py`, `round2_stats.py`;
+`out2/arm-{A,B,C}/{run.log,bill.json,span.txt,tdir.txt,worker.err,DONE}`,
+`out2/measure-{A,B,C}.json`, `out2/arm{A,B,C}.nohup`;
+`patches/fix2-arm-{B,C}.diff`; `ticket06.round1.bak`.
+Each arm's `db.sqlite` now holds that arm's own settled graph, and `dataroot2/` its data root.
+Round 2's SDK transcripts (the billing source of record) are under
+`~/.claude/projects/-private-tmp-…-v13ab-arm-{A,B,C}-dataroot2/`; round 1's, under the
+`-dataroot` names, are untouched.
