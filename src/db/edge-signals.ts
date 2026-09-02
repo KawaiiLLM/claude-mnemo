@@ -1,10 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import {
-  phasesForTypes,
-  type TurnEdgeRelation,
-  type TurnPhase,
-} from "../shared/turn-phase";
+import { phasesForTypes, type TurnPhase } from "../shared/turn-phase";
 import { liveTurnSql } from "./turn-liveness";
 
 /**
@@ -80,16 +76,66 @@ function zeroSignals(): TurnEdgeSignals {
  * `override`), so its key goes with it. The value is unchanged for stored
  * legacy rows either way — an out-of-vocabulary relation reads `undefined`
  * here, which is falsy, exactly what `refutes: false` meant.
+ *
+ * RELATION-VOCABULARY-V13 TICKET 05a re-keys it: `RELATION_IS_SCORED`, keyed on
+ * the seven retired words, becomes `RELATION_CLASS_IS_SCORED`, keyed on the
+ * three classes plus the coverage bit (`formatRelationClass`'s own spelling).
+ * `override` -> `correct(full)`, `narrows` -> `correct(partial)`, `verifies` ->
+ * `verify` are FORCED — one source word each. `use` reads `true` because the
+ * class DOES score (as `refines`, the interim equivalence): which of the three
+ * things a pre-v13 `use` row scored is the retired-word residue below, not a
+ * property of the class.
  */
-export const RELATION_IS_SCORED: Record<TurnEdgeRelation, boolean> = {
-  override: true,
-  narrows: false,
-  extends: true,
-  indexes: true,
-  consume: false,
-  grounds: true,
-  verifies: false,
+export const RELATION_CLASS_IS_SCORED: Record<string, boolean> = {
+  "correct(full)": true,
+  "correct(partial)": false,
+  verify: false,
+  use: true,
 };
+
+/**
+ * RELATION-VOCABULARY-V13 TICKET 05a: the RETIRED-WORD RESIDUE inside `use`.
+ *
+ * `use` absorbed four words this module treated three different ways —
+ * `extends` fed `refines`, `grounds` and `indexes` fed `encodes`, `consume` fed
+ * nothing — so the class alone cannot say which signal a pre-v13 row carries.
+ * It does not have to: no write surface can produce `consume`, `grounds` or
+ * `indexes` any more (`shared/relation-class.ts`'s `RETIRED_RELATION_FIELDS`
+ * refuses all three, and `interimLegacyRelation` maps `use` to `extends`), so a
+ * row carrying one is necessarily pre-v13 stock and this table is corpus
+ * HISTORY, not live vocabulary.
+ *
+ * A NEW `use` row takes `DEFAULT_USE_SIGNAL` — `refines`, which is exactly what
+ * the interim fill produces today by landing it as `extends`. `encodesCount` is
+ * therefore FROZEN at whatever the retired corpus already carries: the
+ * curation signal `indexes` fed has no live source any more, which is ruling
+ * S15069/T2306's own consequence (`indexes` is deleted; convergence is rebuilt
+ * on shape by ticket 05b, not resurrected here).
+ */
+export const RETIRED_USE_WORD_SIGNAL: Record<string, "refines" | "encodes" | null> = {
+  extends: "refines",
+  consume: null,
+  grounds: "encodes",
+  indexes: "encodes",
+};
+
+/** What a `use` row with no retired word feeds — the interim equivalence, made explicit. */
+export const DEFAULT_USE_SIGNAL: "refines" = "refines";
+
+/**
+ * The three signals' SQL, keyed on the class columns with the accessor's own
+ * fallback spelled out: a row whose class column is still `''` (a database
+ * opened before ticket 03's sweep runs) answers from its stored word, exactly
+ * as `edgeRelationClass` does in TypeScript.
+ */
+const CORRECT_FULL_SQL =
+  "((e.relation_class = 'correct' AND e.relation_coverage = 'full') OR (e.relation_class = '' AND e.relation = 'override'))";
+const USE_CLASS_SQL =
+  "((e.relation_class = 'use') OR (e.relation_class = '' AND e.relation IN ('extends', 'consume', 'grounds', 'indexes')))";
+/** `use` MINUS the retired words that fed `encodes` or nothing — i.e. `refines`. */
+const REFINES_SQL = `${USE_CLASS_SQL} AND (e.relation IS NULL OR e.relation NOT IN ('consume', 'grounds', 'indexes'))`;
+/** The retired curation words. No live source; see `RETIRED_USE_WORD_SIGNAL`. */
+const ENCODES_SQL = "e.relation IN ('grounds', 'indexes')";
 
 function parseTypeArray(value: string | null): string[] {
   if (!value) {
@@ -192,7 +238,7 @@ export function getTurnEdgeSignals(
        JOIN turns citing ON citing.id = e.citing_id
        JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'override'
+         AND ${CORRECT_FULL_SQL}
          AND ${liveTurnSql("citing")}
          AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})`,
@@ -218,7 +264,7 @@ export function getTurnEdgeSignals(
        JOIN turns citing ON citing.id = e.citing_id
        JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation IN ('grounds', 'indexes')
+         AND ${ENCODES_SQL}
          AND ${liveTurnSql("citing")}
          AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})
@@ -246,7 +292,7 @@ export function getTurnEdgeSignals(
        JOIN turns citing ON citing.id = e.citing_id
        JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-         AND e.relation = 'extends'
+         AND ${REFINES_SQL}
          AND ${liveTurnSql("citing")}
          AND ${liveTurnSql("cited")}
          AND e.cited_id IN (${placeholders})

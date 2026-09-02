@@ -3,9 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  DEFAULT_USE_SIGNAL,
   getTurnEdgeSignals,
   getTurnEdgeSignalsForTurn,
-  RELATION_IS_SCORED,
+  RELATION_CLASS_IS_SCORED,
+  RETIRED_USE_WORD_SIGNAL,
   type TurnEdgeSignals,
 } from "../../src/db/edge-signals";
 import { writeMemoryEdges, type CitationRelation } from "../../src/db/memory-edges";
@@ -365,25 +367,34 @@ describe("edge scoring signals", () => {
     expect(signals.get(dependsOnTarget)).toEqual(ZERO);
   });
 
-  test("guard: RELATION_IS_SCORED classifies exactly override/extends/grounds/indexes as scored (indexes-rescope ticket 02, ruled S15069/T1240 — indexes joins the curation key), everything else in the SEVEN-word closed set as not — compile-time exhaustive over EDGE_RELATIONS", () => {
-    expect(RELATION_IS_SCORED).toEqual({
-      override: true,
-      narrows: false,
-      extends: true,
-      indexes: true,
-      consume: false,
-      grounds: true,
-      verifies: false,
+  // relation-vocabulary-v13 ticket 05a: the guard moves off the seven retired
+  // words onto the three classes. What it pins is unchanged in substance —
+  // `override`'s successor scores, `narrows`'/`verifies`' do not, and the
+  // three-way split INSIDE `use` (refines / encodes / nothing) is now stated
+  // as the retired-word residue rather than as three of seven word keys.
+  test("guard: RELATION_CLASS_IS_SCORED scores exactly correct(full) and use; the retired-word residue keeps the three-way split `use` absorbed", () => {
+    expect(RELATION_CLASS_IS_SCORED).toEqual({
+      "correct(full)": true,
+      "correct(partial)": false,
+      verify: false,
+      use: true,
     });
-    // Lane-model v12 ticket 02: `refutes` left the vocabulary, so its key
-    // left this table. A stored legacy row reads `undefined` — falsy, exactly
-    // what its `false` entry meant, so no scoring behaviour moved with it.
-    expect(RELATION_IS_SCORED).not.toHaveProperty("refutes");
-    expect((RELATION_IS_SCORED as Record<string, boolean | undefined>).refutes).toBeUndefined();
-    // Every current closed-set word has an entry (TypeScript already enforces
-    // this at compile time via the Record type; this is the runtime mirror).
+    // A new `use` row scores as `refines` — exactly what the INTERIM fill
+    // produces today by landing it in `relation` as `extends`. When ticket
+    // 05a's successor deletes that fill, this is the equivalence that must
+    // still hold.
+    expect(DEFAULT_USE_SIGNAL).toBe("refines");
+    expect(RETIRED_USE_WORD_SIGNAL).toEqual({
+      extends: "refines",
+      consume: null,
+      grounds: "encodes",
+      indexes: "encodes",
+    });
+    // The residue covers every retired word that is not its own class:
+    // `override`/`narrows`/`verifies` map 1:1 onto a class and need no entry.
     for (const relation of EDGE_RELATIONS) {
-      expect(RELATION_IS_SCORED[relation]).toBeDefined();
+      const isOwnClass = relation === "override" || relation === "narrows" || relation === "verifies";
+      expect(Object.hasOwn(RETIRED_USE_WORD_SIGNAL, relation)).toBe(!isOwnClass);
     }
   });
 

@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjvjrvt" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjwsjiu" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -712,6 +712,18 @@ var INTERIM_LEGACY_RELATION = Object.freeze([
   { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
   { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
 ]);
+function edgeRelationClass(row) {
+  if (isRelationClass(row.relationClass)) {
+    return {
+      relationClass: row.relationClass,
+      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    };
+  }
+  if (row.relation === null) {
+    return null;
+  }
+  return LEGACY_RELATION_CLASS[row.relation] ?? null;
+}
 function formatRelationClass(relationClass, relationCoverage) {
   return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
 }
@@ -13974,6 +13986,64 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/shared/election-relation-weights.ts
+var FROZEN_ELECTION_RELATION_PARAMETERS = Object.freeze({
+  use: Object.freeze({ kind: "retired-words" }),
+  convergence: Object.freeze({ kind: "retired-indexes" })
+});
+var RETIRED_USE_WORDS = ["extends", "consume", "grounds", "indexes"];
+var RETIRED_USE_WORD_WEIGHTS = Object.freeze({
+  extends: Object.freeze({ out: 0, in: 0 }),
+  consume: Object.freeze({ out: 0, in: 0 }),
+  grounds: Object.freeze({ out: 1, in: 2 }),
+  indexes: Object.freeze({ out: 2, in: 1 })
+});
+function retiredUseWord(edge) {
+  const word = edge.relation;
+  return RETIRED_USE_WORDS.includes(word ?? "") ? word : null;
+}
+var FORCED_CLASS_WEIGHTS = Object.freeze({
+  "correct(full)": Object.freeze({ out: 2, in: 0 }),
+  "correct(partial)": Object.freeze({ out: 1, in: 1 }),
+  verify: Object.freeze({ out: 1, in: 2 })
+});
+function classKeyOf(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function electionEdgeClass(edge) {
+  return edgeRelationClass({
+    relation: edge.relation,
+    relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+  });
+}
+function useWeights(edge, parameters) {
+  if (parameters.use.kind === "uniform") {
+    return { out: parameters.use.out, in: parameters.use.in };
+  }
+  const word = retiredUseWord(edge);
+  return word === null ? RETIRED_USE_WORD_WEIGHTS.extends : RETIRED_USE_WORD_WEIGHTS[word];
+}
+function weightsFor(edge, parameters) {
+  const resolved = electionEdgeClass(edge);
+  if (resolved === null) {
+    return { out: 0, in: 0 };
+  }
+  if (resolved.relationClass === "use") {
+    return useWeights(edge, parameters);
+  }
+  return FORCED_CLASS_WEIGHTS[classKeyOf(resolved.relationClass, resolved.relationCoverage)] ?? {
+    out: 0,
+    in: 0
+  };
+}
+function electionOutEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+  return weightsFor(edge, parameters).out;
+}
+function electionInEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+  return weightsFor(edge, parameters).in;
+}
+
 // src/shared/transcript-parser.ts
 var import_node_fs5 = require("node:fs");
 function normalizeAssistantText(text) {
@@ -14556,19 +14626,6 @@ var FRONTIER_TYPE_WEIGHTS = {
   correction: 2,
   measure: 1
 };
-var FRONTIER_OUT_EDGE_WEIGHTS = {
-  override: 2,
-  indexes: 2,
-  grounds: 1,
-  verifies: 1,
-  narrows: 1
-};
-var FRONTIER_IN_EDGE_WEIGHTS = {
-  verifies: 2,
-  grounds: 2,
-  indexes: 1,
-  narrows: 1
-};
 var FRONTIER_RECENCY_WINDOW = 3;
 var COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
 function isCompactSyntheticTagList(tags) {
@@ -14629,17 +14686,19 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
-    // `relation` stays the STORED word: it is the SCORING key here
-    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
-    // owns re-keying those onto the class. What renders is `relationLabel`
-    // below — the two are kept apart on purpose, because conflating them would
-    // have made a vocabulary change silently move the frontier weights.
+    // `relation` stays the STORED word, but since ticket 05a it is no longer
+    // the scoring key: the two class columns below are, and the word survives
+    // here only as the retired-word residue inside `use` and as the
+    // latest-override pointer's own filter. What renders is `relationLabel` —
+    // kept apart from both on purpose.
     relation: row.relation,
     relationLabel: displayEdgeRelation({
       relation: row.relation,
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
       relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
     }),
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -14845,7 +14904,7 @@ function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse
     return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
   };
 }
-function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
   const segmentId = segment.id;
   const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
   const laneRecords = universe.laneRecords;
@@ -14903,10 +14962,10 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
       }
       for (const edge of edges) {
         if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionOutEdgeWeight(edge, parameters);
         }
         if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionInEdgeWeight(edge, parameters);
         }
       }
       scores.set(member.turnId, score);
@@ -14952,14 +15011,14 @@ function compareFrontierDisplayOrder(left, right) {
   }
   return left.tag < right.tag ? -1 : 1;
 }
-function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, readerId, now, hostCharLimit) {
+function buildSegmentFrontierSection(db, segmentId, eraCutoffEpoch, pageBudget, readerId, now, hostCharLimit, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
   const sequence = snapshotWriteGateSequence(db);
   try {
     const segment = getSegment(db, segmentId);
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters);
     const displayLanes = [...lanes].sort(compareFrontierDisplayOrder);
     const taskTag = segmentTagOf(segment);
     const header = taskTag === null ? `E${segment.id}` : `E${segment.id} #${taskTag}`;

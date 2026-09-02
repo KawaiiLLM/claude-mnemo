@@ -49,11 +49,12 @@
  *    the final CANDIDATE list.
  * 2. **Identity tiers**, read off the edge set directly — this module holds no
  *    lane derivation of its own and, since lane state was retired, needs none:
- *      ① UNSETTLED-`indexes` writers (cross-lane aggregation — releases):
- *        an `indexes` edge whose two SIDE tags (`tailTag`/`headTag`,
+ *      ① UNSETTLED CONVERGENCE-DECLARING writers (cross-lane aggregation —
+ *        releases): a declaring edge (ticket 05a: under the frozen parameters
+ *        exactly a stored `indexes` word) whose two SIDE tags (`tailTag`/`headTag`,
  *        lane-model-v12 D1) are both the unsettled sentinel. Read off the
  *        side columns, never the retired merged `tags` set (ticket 07);
- *      ② this node writes an `indexes` edge, any tag state
+ *      ② this node writes a convergence-declaring edge, any tag state
  *        (lane-state-retirement ticket 02). Re-based on the NODE, not the
  *        lane: ticket 01 emptied this tier because its old qualification ("a
  *        CLOSED lane's terminus") had no input once lane state was deleted;
@@ -83,18 +84,23 @@
  *        no tier-④ seats to anyone. The RULE is unchanged by ticket 01; its
  *        population simply shrank to what tier ① seeds, and grows again when
  *        02 refills tier ②;
- *      ⑤ correctors — a node that wrote an `override` edge, or that cites
+ *      ⑤ correctors — a node that wrote a FULL correction (`override`'s
+ *        re-keyed successor), or that cites
  *        (any relation) a turn with `wasRolledBack: true`;
  *      ⑥ everything else.
  *    `budget` is used ONLY to define this stage-1/"elected" boundary for
  *    tier ④ — it never truncates this module's own return value. The
  *    renderer (ticket 03) decides the final displayed row count, which may
  *    or may not reuse the same number.
- * 3. **Within a tier**: positive in-degree over six words — `narrows`,
- *    `extends`, `consume`, `indexes`, `grounds`, `verifies` — +1 PER EDGE,
+ * 3. **Within a tier**: positive in-degree over every class EXCEPT a full
+ *    correction (ticket 05a's re-key of the six words `narrows`, `extends`,
+ *    `consume`, `indexes`, `grounds`, `verifies`) — +1 PER EDGE,
  *    self-edges included (no `citingId !== citedId` filter anywhere below;
  *    T1180's self-`grounds` prices a real declared convergence). Ties break
- *    by out-degree (ALL eight relation words, unfiltered). Remaining ties
+ *    by out-degree, which reads NO relation at all — every edge in the set
+ *    counts, whatever it says (the header used to claim "all eight relation
+ *    words": there were only ever seven after `refutes` retired, and the tally
+ *    never filtered on any of them). Remaining ties
  *    break by the LATER turn (`LaneOrderKey` compare, never raw `id` alone —
  *    same backfill-safety discipline `lane-interpretation.ts` already
  *    established).
@@ -117,6 +123,13 @@
  *    decides the order — which IS recency ordering.
  */
 
+import {
+  convergenceDeclarationPredicate,
+  countsTowardInDegree,
+  type ElectionRelationParameters,
+  FROZEN_ELECTION_RELATION_PARAMETERS,
+  isCorrectionEdge,
+} from "./election-relation-weights";
 import {
   compareOrderKeyAcrossSessions,
   type LaneEdgeInput,
@@ -199,7 +212,7 @@ export interface MilestoneCandidate {
   reason: MilestoneTierReason;
   /** Positive in-degree, six words, self-edges included (point 3 above). */
   inDegree: number;
-  /** Out-degree, all eight relation words, self-edges included. */
+  /** Out-degree — every edge, self-edges included; the tally reads no relation word at all. */
   outDegree: number;
   order: LaneOrderKey;
   /** `MilestoneTurnInput.createdAtEpoch`, informational — also what `rankCompare` falls back to for a cross-session `order` tie (R1 #6). `undefined` when the caller never supplied it. */
@@ -236,30 +249,25 @@ export interface MilestoneElectionResult {
 }
 
 /**
- * The spec's "six words" — positive in-degree domain. `override`/`refutes` stay
- * out of it (they are corrections, not endorsements), but they are no longer
- * candidacy killers either: ticket 04 deleted the repudiation arm entirely.
+ * RELATION-VOCABULARY-V13 TICKET 05a — the four word-keyed reads in this module
+ * (positive in-degree, tiers ①/②/④'s `indexes` feeder, tier ⑤'s `override`)
+ * now go through `shared/election-relation-weights.ts`, keyed on
+ * `(class, coverage)`. Ticket 02 deliberately left them frozen so that a
+ * vocabulary change and an election retune could not land in one release; this
+ * ticket moves the key and NOTHING else, with the two unforced choices
+ * (`use`'s weight, the convergence rule) exposed as parameters whose defaults
+ * reproduce today exactly.
  *
- * RELATION-VOCABULARY-V13 TICKET 02 LEFT THIS TABLE, AND EVERY OTHER WEIGHT IN
- * THIS MODULE, EXACTLY AS FROZEN. The write vocabulary moved to three classes,
- * and a new edge still lands in `memory_edges.relation` under one of these
- * seven words via `shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION` —
- * correct/full as `override`, correct/partial as `narrows`, verify as
- * `verifies`, use as `extends`. That equivalence is what keeps a three-class
- * edge VISIBLE here with no change at this seam, and it is deliberately
- * labelled INTERIM: ticket 05a re-keys these tables onto (class, coverage) and
- * deletes it. Re-keying them HERE, ahead of that ticket, would have retuned the
- * election in the same release as a vocabulary change, with no way to tell the
- * two effects apart in production.
+ * What each old key became:
+ *   - the "six words" in-degree domain (`narrows`/`extends`/`consume`/
+ *     `indexes`/`grounds`/`verifies`) -> `countsTowardInDegree`: every class
+ *     EXCEPT a full correction. The four `use` sources all agreed here, so this
+ *     key is forced;
+ *   - tiers ①/②/④'s `indexes` -> `convergenceDeclarationPredicate`, which under
+ *     the frozen parameters still means exactly a stored `indexes` word;
+ *   - tier ⑤'s `override` -> `isCorrectionEdge`, i.e. `correct`/`full`, forced;
+ *   - out-degree counts every edge and never read a word at all.
  */
-const IN_DEGREE_RELATIONS: ReadonlySet<string> = new Set([
-  "narrows",
-  "extends",
-  "consume",
-  "indexes",
-  "grounds",
-  "verifies",
-]);
 
 interface RankKey {
   tier: MilestoneTier;
@@ -298,6 +306,13 @@ function rankCompare(a: RankKey, b: RankKey): number {
  * two-stage fill's "elected ①②" boundary only (point 2 above) — it never
  * truncates the returned `candidates` array.
  *
+ * `parameters` (relation-vocabulary-v13 ticket 05a, optional, default
+ * `FROZEN_ELECTION_RELATION_PARAMETERS` = today's behaviour exactly): the two
+ * keys the seven-to-three re-key could NOT force — what a `use` edge weighs,
+ * and what declares a convergence for tiers ①/②/④. See
+ * `shared/election-relation-weights.ts` for why they are open and everything
+ * else is not.
+ *
  * `rolledBackCiterIds` (R1 #7, optional, default none): ids — already known
  * to be real, eligible turns — that cite (any relation) a rolled-back turn
  * whose own edge `getRelationEdgesAmongTurns` never surfaces into `edges` at
@@ -312,6 +327,7 @@ export function electMilestones(
   edges: readonly LaneEdgeInput[],
   budget: number,
   rolledBackCiterIds: readonly number[] = [],
+  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): MilestoneElectionResult {
   const orderOf = new Map<number, LaneOrderKey>();
   const rolledBackOf = new Map<number, boolean>();
@@ -354,7 +370,7 @@ export function electMilestones(
   const inDegree = new Map<number, number>();
   const outDegree = new Map<number, number>();
   for (const edge of edges) {
-    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+    if (countsTowardInDegree(edge)) {
       inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
     }
     outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
@@ -374,10 +390,11 @@ export function electMilestones(
   // it is an attribution in progress, carrying an E6 error that asks
   // settlement to complete or retract it. Seating it would hand a milestone
   // to a row whose own report says it is unresolved.
+  const declaresConvergence = convergenceDeclarationPredicate(edges, parameters);
   const tier1 = new Set<number>();
   for (const edge of edges) {
     if (
-      edge.relation === "indexes" &&
+      declaresConvergence(edge) &&
       edge.tailTag === UNSETTLED_LANE_TAG &&
       edge.headTag === UNSETTLED_LANE_TAG
     ) {
@@ -409,7 +426,7 @@ export function electMilestones(
   // `MilestoneTurnInput.laneTags` still feeds nothing.
   const tier2 = new Map<number, MilestoneTierReason>();
   for (const edge of edges) {
-    if (edge.relation === "indexes") {
+    if (declaresConvergence(edge)) {
       tier2.set(edge.citingId, "declares-index");
     }
   }
@@ -451,7 +468,7 @@ export function electMilestones(
   // ---- tier ④ — indexed by an elected ①/② node (any tag state) ----
   const indexedByElected = new Set<number>();
   for (const edge of edges) {
-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+    if (declaresConvergence(edge) && electedIds.has(edge.citingId)) {
       indexedByElected.add(edge.citedId);
     }
   }
@@ -459,7 +476,7 @@ export function electMilestones(
   // ---- tier ⑤ — correctors: override writers, or citers (any relation) of a rolled-back turn ----
   const correctors = new Set<number>();
   for (const edge of edges) {
-    if (edge.relation === "override") {
+    if (isCorrectionEdge(edge)) {
       correctors.add(edge.citingId);
     }
     if (rolledBackOf.get(edge.citedId) === true) {

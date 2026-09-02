@@ -19,6 +19,12 @@ import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
 import { isSegmentEra } from "../segment-era";
+import {
+  type ElectionRelationParameters,
+  electionInEdgeWeight,
+  electionOutEdgeWeight,
+  FROZEN_ELECTION_RELATION_PARAMETERS,
+} from "../shared/election-relation-weights";
 import { type LaneKey } from "../shared/lane-interpretation";
 import {
   DECISION_TIER_SHARE_WARN_THRESHOLD,
@@ -1567,6 +1573,8 @@ export function selectMilestoneTurns(view: {
   laneTagsByTurnId?: ReadonlyMap<number, readonly string[]>;
   /** R1 #7: window ids that cite a rolled-back turn — `db/memory-edges.ts`'s `getRolledBackCiterIds`, fed straight through to `electMilestones`. */
   rolledBackCiterIds?: readonly number[];
+  /** relation-vocabulary-v13 ticket 05a — the two unforced election keys; default = today. */
+  electionParameters?: ElectionRelationParameters;
 }): MilestoneSelection {
   // Main-row candidates: ticket 06's exclusion (rolled-back/skipped) plus a
   // compact marker, structural noise the arc view spends no row on.
@@ -1602,6 +1610,7 @@ export function selectMilestoneTurns(view: {
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     view.rolledBackCiterIds ?? [],
+    view.electionParameters ?? FROZEN_ELECTION_RELATION_PARAMETERS,
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
   // The election's own return spans every node its `laneEdges` touched; a
@@ -3831,6 +3840,8 @@ export function selectSegmentMilestonesByEdgeSignals(
   pageBudget: number,
   /** Retired from candidacy (era gating leaves the election path) — accepted for schema stability with callers that still set it, never read. */
   _taskCausalityEraCutoffEpoch?: number,
+  /** relation-vocabulary-v13 ticket 05a — the two unforced election keys; default = today. */
+  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): SegmentMilestoneEdgeSelection {
   // Ticket 06 (view-render-repair, ruling [S15069/T1084]): a rolled-back or
   // skipped member is dropped before ordinal numbering or election ever sees
@@ -3861,6 +3872,7 @@ export function selectSegmentMilestonesByEdgeSignals(
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
     rolledBackCiterIds,
+    parameters,
   );
   // Share sentinel (phase-connectivity ticket 03, decision 2): one call to
   // this function IS one segment side (old/recent split, or the plain
@@ -4670,22 +4682,22 @@ const FRONTIER_TYPE_WEIGHTS: Record<string, number> = {
   measure: 1,
 };
 
-/** FROZEN lane-local OUT-edge weights (edge counted only where the edge's qualified TAIL lane is the scoring lane). `extends`/`consume` weigh 0 on both sides. */
-const FRONTIER_OUT_EDGE_WEIGHTS: Record<string, number> = {
-  override: 2,
-  indexes: 2,
-  grounds: 1,
-  verifies: 1,
-  narrows: 1,
-};
-
-/** FROZEN lane-local IN-edge weights (qualified HEAD lane is the scoring lane). Note `override` is deliberately ABSENT here — overrider signal lives in out-degree. */
-const FRONTIER_IN_EDGE_WEIGHTS: Record<string, number> = {
-  verifies: 2,
-  grounds: 2,
-  indexes: 1,
-  narrows: 1,
-};
+/**
+ * FROZEN lane-local OUT/IN edge weights — RE-KEYED onto `(class, coverage)` by
+ * relation-vocabulary-v13 ticket 05a and moved to
+ * `shared/election-relation-weights.ts`, where the milestone election's own
+ * word-keyed reads went too. Same numbers, same seam: an edge counts on the OUT
+ * side only where its qualified TAIL lane is the scoring lane, on the IN side
+ * only where its qualified HEAD lane is, and `override`'s successor
+ * (`correct`/`full`) is deliberately weightless on the IN side — the overrider
+ * signal lives in out-degree.
+ *
+ * The one number the re-key could not force is what a `use` edge weighs: the
+ * four words it absorbed scored 0/0 (`extends`, `consume`), 1/2 (`grounds`) and
+ * 2/1 (`indexes`). It is a PARAMETER
+ * (`ElectionRelationParameters`), and its default reproduces today exactly by
+ * reading each retired word's own frozen pair.
+ */
 
 /** Event-step recency: the lane's newest settled member gets +3, then +2, +1, 0 — `max(0, 3 − steps_from_lane_end)`. */
 const FRONTIER_RECENCY_WINDOW = 3;
@@ -4702,10 +4714,13 @@ const COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
  * lanes, so no comparison below ever reads a bare tag string alone.
  */
 interface FrontierEdge {
-  /** The STORED seven-word value — the SCORING key (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer). Never rendered; see `relationLabel`. */
+  /** The STORED word. Since ticket 05a it is no longer the scoring key — it is read only as the retired-word residue inside `use` (`shared/election-relation-weights.ts`) and by the latest-override pointer. Never rendered; see `relationLabel`. */
   relation: string;
-  /** relation-vocabulary-v13 ticket 02: what a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older. Split from `relation` so the vocabulary change cannot move a frozen weight (ticket 05a owns that remap). */
+  /** relation-vocabulary-v13 ticket 02: what a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older. Split from `relation` so the vocabulary change cannot move a frozen weight. */
   relationLabel: string;
+  /** relation-vocabulary-v13 ticket 05a: the two stored class columns, the SCORING key. Read through `edgeRelationClass`, never directly — a database opened before ticket 03's sweep still answers from the word. */
+  relationClass: RelationClassValue;
+  relationCoverage: RelationCoverageValue;
   tailTurnId: number;
   headTurnId: number;
   tailTag: string;
@@ -4860,17 +4875,19 @@ function loadFrontierEdges(
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId])),
   ]);
   return canonicalRows.map((row) => ({
-    // `relation` stays the STORED word: it is the SCORING key here
-    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
-    // owns re-keying those onto the class. What renders is `relationLabel`
-    // below — the two are kept apart on purpose, because conflating them would
-    // have made a vocabulary change silently move the frontier weights.
+    // `relation` stays the STORED word, but since ticket 05a it is no longer
+    // the scoring key: the two class columns below are, and the word survives
+    // here only as the retired-word residue inside `use` and as the
+    // latest-override pointer's own filter. What renders is `relationLabel` —
+    // kept apart from both on purpose.
     relation: row.relation,
     relationLabel: displayEdgeRelation({
       relation: row.relation,
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
       relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     }),
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -5271,6 +5288,7 @@ function assembleFrontierLanes(
   db: Database,
   segment: SegmentRecord,
   eraCutoffEpoch: number | null,
+  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): FrontierLane[] {
   const segmentId = segment.id;
 
@@ -5354,10 +5372,10 @@ function assembleFrontierLanes(
       }
       for (const edge of edges) {
         if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionOutEdgeWeight(edge, parameters);
         }
         if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionInEdgeWeight(edge, parameters);
         }
       }
       scores.set(member.turnId, score);
@@ -5468,6 +5486,7 @@ export function buildSegmentFrontierSection(
   readerId?: string | null,
   now?: () => number,
   hostCharLimit?: number | null,
+  parameters: ElectionRelationParameters = FROZEN_ELECTION_RELATION_PARAMETERS,
 ): string {
   const sequence = snapshotWriteGateSequence(db);
   try {
@@ -5475,7 +5494,7 @@ export function buildSegmentFrontierSection(
     if (!segment) {
       throw new Error(`timeline: segment E${segmentId} not found`);
     }
-    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch);
+    const lanes = assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters);
     const displayLanes = [...lanes].sort(compareFrontierDisplayOrder);
 
     const taskTag = segmentTagOf(segment);
@@ -5804,16 +5823,16 @@ const LANE_ARROW_LEGEND =
   "arrows: -> in-lane · => cross-lane out · <= cross-lane in · <- cross-page in";
 
 /**
- * Branch ordering (USER RULED T2218): the election's OUT-edge weight TABLE
- * (`FRONTIER_OUT_EDGE_WEIGHTS` — override/indexes 2 > grounds/verifies/
- * narrows 1 > extends/consume 0), then newer TARGET under the pinned total
- * order (`created_at_epoch desc, id desc` over the head). The trailing
+ * Branch ordering (USER RULED T2218): the election's OUT-edge weight
+ * (`electionOutEdgeWeight` — correct/full and the retired `indexes` 2 >
+ * the retired `grounds`, verify, correct/partial 1 > `use` 0), then newer
+ * TARGET under the pinned total order (`created_at_epoch desc, id desc` over the head). The trailing
  * relation-word compare only ever fires on a same-weight multi-relation pair
  * over one (tail, head) — determinism, not a ranking claim.
  */
 function compareLaneBranchEdges(left: FrontierEdge, right: FrontierEdge): number {
-  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
-  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  const weightLeft = electionOutEdgeWeight(left);
+  const weightRight = electionOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -5828,8 +5847,8 @@ function compareLaneBranchEdges(left: FrontierEdge, right: FrontierEdge): number
 
 /** Mirror ordering: the SAME weight table, newer SOURCE first (spec: "mirrors after all branches, same sort" — honestly named a reuse of the OUT-edge table, not the incoming scorer). */
 function compareLaneMirrorEdges(left: FrontierEdge, right: FrontierEdge): number {
-  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
-  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  const weightLeft = electionOutEdgeWeight(left);
+  const weightRight = electionOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }

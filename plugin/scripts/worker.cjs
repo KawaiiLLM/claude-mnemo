@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjvjrvt" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjwsjiu" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -426,6 +426,18 @@ var INTERIM_LEGACY_RELATION = Object.freeze([
   { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
   { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
 ]);
+function edgeRelationClass(row) {
+  if (isRelationClass(row.relationClass)) {
+    return {
+      relationClass: row.relationClass,
+      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    };
+  }
+  if (row.relation === null) {
+    return null;
+  }
+  return LEGACY_RELATION_CLASS[row.relation] ?? null;
+}
 function formatRelationClass(relationClass, relationCoverage) {
   return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
 }
@@ -10817,16 +10829,93 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/shared/election-relation-weights.ts
+var FROZEN_ELECTION_RELATION_PARAMETERS = Object.freeze({
+  use: Object.freeze({ kind: "retired-words" }),
+  convergence: Object.freeze({ kind: "retired-indexes" })
+});
+var RETIRED_USE_WORDS = ["extends", "consume", "grounds", "indexes"];
+var RETIRED_USE_WORD_WEIGHTS = Object.freeze({
+  extends: Object.freeze({ out: 0, in: 0 }),
+  consume: Object.freeze({ out: 0, in: 0 }),
+  grounds: Object.freeze({ out: 1, in: 2 }),
+  indexes: Object.freeze({ out: 2, in: 1 })
+});
+function retiredUseWord(edge) {
+  const word = edge.relation;
+  return RETIRED_USE_WORDS.includes(word ?? "") ? word : null;
+}
+var FORCED_CLASS_WEIGHTS = Object.freeze({
+  "correct(full)": Object.freeze({ out: 2, in: 0 }),
+  "correct(partial)": Object.freeze({ out: 1, in: 1 }),
+  verify: Object.freeze({ out: 1, in: 2 })
+});
+function classKeyOf(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function electionEdgeClass(edge) {
+  return edgeRelationClass({
+    relation: edge.relation,
+    relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+  });
+}
+function useWeights(edge, parameters) {
+  if (parameters.use.kind === "uniform") {
+    return { out: parameters.use.out, in: parameters.use.in };
+  }
+  const word = retiredUseWord(edge);
+  return word === null ? RETIRED_USE_WORD_WEIGHTS.extends : RETIRED_USE_WORD_WEIGHTS[word];
+}
+function weightsFor(edge, parameters) {
+  const resolved = electionEdgeClass(edge);
+  if (resolved === null) {
+    return { out: 0, in: 0 };
+  }
+  if (resolved.relationClass === "use") {
+    return useWeights(edge, parameters);
+  }
+  return FORCED_CLASS_WEIGHTS[classKeyOf(resolved.relationClass, resolved.relationCoverage)] ?? {
+    out: 0,
+    in: 0
+  };
+}
+function electionOutEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+  return weightsFor(edge, parameters).out;
+}
+function electionInEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+  return weightsFor(edge, parameters).in;
+}
+function countsTowardInDegree(edge) {
+  const resolved = electionEdgeClass(edge);
+  if (resolved === null) {
+    return false;
+  }
+  return !(resolved.relationClass === "correct" && resolved.relationCoverage === "full");
+}
+function isCorrectionEdge(edge) {
+  const resolved = electionEdgeClass(edge);
+  return resolved !== null && resolved.relationClass === "correct" && resolved.relationCoverage === "full";
+}
+function isUseEdge(edge) {
+  return electionEdgeClass(edge)?.relationClass === "use";
+}
+function convergenceDeclarationPredicate(edges, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+  if (parameters.convergence.kind === "retired-indexes") {
+    return (edge) => edge.relation === "indexes";
+  }
+  const threshold = parameters.convergence.threshold;
+  const useOutDegree = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    if (isUseEdge(edge)) {
+      useOutDegree.set(edge.citingId, (useOutDegree.get(edge.citingId) ?? 0) + 1);
+    }
+  }
+  return (edge) => isUseEdge(edge) && (useOutDegree.get(edge.citingId) ?? 0) >= threshold;
+}
+
 // src/shared/milestone-election.ts
 var DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
-var IN_DEGREE_RELATIONS = /* @__PURE__ */ new Set([
-  "narrows",
-  "extends",
-  "consume",
-  "indexes",
-  "grounds",
-  "verifies"
-]);
 function rankCompare(a, b) {
   if (a.tier !== b.tier) return a.tier - b.tier;
   if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
@@ -10838,7 +10927,7 @@ function rankCompare(a, b) {
   if (orderCmp !== 0) return orderCmp;
   return b.id - a.id;
 }
-function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
+function electMilestones(turns, edges, budget, rolledBackCiterIds = [], parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
   const orderOf = /* @__PURE__ */ new Map();
   const rolledBackOf = /* @__PURE__ */ new Map();
   const epochOf = /* @__PURE__ */ new Map();
@@ -10866,20 +10955,21 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
   const inDegree = /* @__PURE__ */ new Map();
   const outDegree = /* @__PURE__ */ new Map();
   for (const edge of edges) {
-    if (IN_DEGREE_RELATIONS.has(edge.relation)) {
+    if (countsTowardInDegree(edge)) {
       inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
     }
     outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
   }
+  const declaresConvergence = convergenceDeclarationPredicate(edges, parameters);
   const tier1 = /* @__PURE__ */ new Set();
   for (const edge of edges) {
-    if (edge.relation === "indexes" && edge.tailTag === UNSETTLED_LANE_TAG && edge.headTag === UNSETTLED_LANE_TAG) {
+    if (declaresConvergence(edge) && edge.tailTag === UNSETTLED_LANE_TAG && edge.headTag === UNSETTLED_LANE_TAG) {
       tier1.add(edge.citingId);
     }
   }
   const tier2 = /* @__PURE__ */ new Map();
   for (const edge of edges) {
-    if (edge.relation === "indexes") {
+    if (declaresConvergence(edge)) {
       tier2.set(edge.citingId, "declares-index");
     }
   }
@@ -10910,13 +11000,13 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = []) {
   const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
   const indexedByElected = /* @__PURE__ */ new Set();
   for (const edge of edges) {
-    if (edge.relation === "indexes" && electedIds.has(edge.citingId)) {
+    if (declaresConvergence(edge) && electedIds.has(edge.citingId)) {
       indexedByElected.add(edge.citedId);
     }
   }
   const correctors = /* @__PURE__ */ new Set();
   for (const edge of edges) {
-    if (edge.relation === "override") {
+    if (isCorrectionEdge(edge)) {
       correctors.add(edge.citingId);
     }
     if (rolledBackOf.get(edge.citedId) === true) {
@@ -14173,7 +14263,8 @@ function selectMilestoneTurns(view) {
     [...electionTurns, ...view.externalTurns ?? []],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
-    view.rolledBackCiterIds ?? []
+    view.rolledBackCiterIds ?? [],
+    view.electionParameters ?? FROZEN_ELECTION_RELATION_PARAMETERS
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
   const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
@@ -15323,7 +15414,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -15344,7 +15435,8 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     [...electionTurns, ...externalElectionTurns],
     laneEdges,
     DEFAULT_TIMELINE_PAGE_SIZE,
-    rolledBackCiterIds
+    rolledBackCiterIds,
+    parameters
   );
   if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
     timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
@@ -15716,19 +15808,6 @@ var FRONTIER_TYPE_WEIGHTS = {
   correction: 2,
   measure: 1
 };
-var FRONTIER_OUT_EDGE_WEIGHTS = {
-  override: 2,
-  indexes: 2,
-  grounds: 1,
-  verifies: 1,
-  narrows: 1
-};
-var FRONTIER_IN_EDGE_WEIGHTS = {
-  verifies: 2,
-  grounds: 2,
-  indexes: 1,
-  narrows: 1
-};
 var FRONTIER_RECENCY_WINDOW = 3;
 var COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
 function isCompactSyntheticTagList(tags) {
@@ -15789,17 +15868,19 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
-    // `relation` stays the STORED word: it is the SCORING key here
-    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
-    // owns re-keying those onto the class. What renders is `relationLabel`
-    // below — the two are kept apart on purpose, because conflating them would
-    // have made a vocabulary change silently move the frontier weights.
+    // `relation` stays the STORED word, but since ticket 05a it is no longer
+    // the scoring key: the two class columns below are, and the word survives
+    // here only as the retired-word residue inside `use` and as the
+    // latest-override pointer's own filter. What renders is `relationLabel` —
+    // kept apart from both on purpose.
     relation: row.relation,
     relationLabel: displayEdgeRelation({
       relation: row.relation,
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
       relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
     }),
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -15960,7 +16041,7 @@ function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse
     return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
   };
 }
-function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
+function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
   const segmentId = segment.id;
   const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
   const laneRecords = universe.laneRecords;
@@ -16018,10 +16099,10 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
       }
       for (const edge of edges) {
         if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-          score += FRONTIER_OUT_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionOutEdgeWeight(edge, parameters);
         }
         if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-          score += FRONTIER_IN_EDGE_WEIGHTS[edge.relation] ?? 0;
+          score += electionInEdgeWeight(edge, parameters);
         }
       }
       scores.set(member.turnId, score);
@@ -16069,8 +16150,8 @@ function parseSegmentLaneTagId(id) {
 }
 var LANE_ARROW_LEGEND = "arrows: -> in-lane \xB7 => cross-lane out \xB7 <= cross-lane in \xB7 <- cross-page in";
 function compareLaneBranchEdges(left, right) {
-  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
-  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  const weightLeft = electionOutEdgeWeight(left);
+  const weightRight = electionOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -16083,8 +16164,8 @@ function compareLaneBranchEdges(left, right) {
   return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
 }
 function compareLaneMirrorEdges(left, right) {
-  const weightLeft = FRONTIER_OUT_EDGE_WEIGHTS[left.relation] ?? 0;
-  const weightRight = FRONTIER_OUT_EDGE_WEIGHTS[right.relation] ?? 0;
+  const weightLeft = electionOutEdgeWeight(left);
+  const weightRight = electionOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
