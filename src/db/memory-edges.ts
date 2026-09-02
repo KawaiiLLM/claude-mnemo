@@ -9,6 +9,8 @@ import { runWriteTransaction } from "./database";
 import { liveTurnSql } from "./turn-liveness";
 import { EDGE_RELATIONS } from "../shared/turn-phase";
 import {
+  isRelationClass,
+  LEGACY_RELATION_CLASS,
   NO_RELATION_CLASS,
   NO_RELATION_COVERAGE,
   type RelationClassValue,
@@ -524,6 +526,8 @@ export function writeMemoryEdges(
       string,
       string,
       number,
+      string,
+      string,
     ]
   >(
     `
@@ -552,12 +556,28 @@ export function writeMemoryEdges(
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
-        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
-        -- assigned here either. A restatement leaves an existing row exactly as
-        -- stored, so re-asserting a class over a legacy row does not
-        -- retroactively classify it -- classifying the existing corpus is
-        -- ticket 03's migration, which owns the reversibility story for it.
-        DO UPDATE SET relation = memory_edges.relation
+        --
+        -- relation-vocabulary-v13 ticket 03 closes the gap ticket 02 left
+        -- here. The class columns ARE assigned now, but ONLY onto a row that
+        -- carries no class yet, and only the value that row already READS AS:
+        -- the last two parameters are the write's own class when it carries
+        -- one, and otherwise LEGACY_RELATION_CLASS of this very word (the
+        -- conflict target pins the relation column, so the stored word and incoming
+        -- word are the same word). So this is the migration's materialization
+        -- reaching one more row, not a correction: edgeRelationClass answered
+        -- the same before and after. A row that is ALREADY classified is left
+        -- exactly as stored -- D2 still holds, a restatement never overwrites a
+        -- claim, and correcting a class is still retract-then-write.
+        DO UPDATE SET
+          relation = memory_edges.relation,
+          relation_class = CASE
+            WHEN memory_edges.relation_class = '' THEN ?
+            ELSE memory_edges.relation_class
+          END,
+          relation_coverage = CASE
+            WHEN memory_edges.relation_class = '' THEN ?
+            ELSE memory_edges.relation_coverage
+          END
       RETURNING ${EDGE_COLUMNS}
     `,
   );
@@ -686,6 +706,22 @@ export function writeMemoryEdges(
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
       const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
       const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
+      // relation-vocabulary-v13 ticket 03: what an UNCLASSIFIED pre-existing
+      // row gains when this write conflicts with it. The write's own class when
+      // it carries one; otherwise the class that row ALREADY READS AS through
+      // `edgeRelationClass`'s legacy fallback, so the conflict path can only
+      // ever materialize an answer, never invent one. A word outside
+      // `EDGE_RELATIONS` maps to nothing and leaves the row `''` — the same
+      // "unknown word stays unclassified" the migration records.
+      const conflictLegacyClass = LEGACY_RELATION_CLASS[
+        edge.relation as keyof typeof LEGACY_RELATION_CLASS
+      ];
+      const fillClass = isRelationClass(relationClass)
+        ? relationClass
+        : conflictLegacyClass?.relationClass ?? NO_RELATION_CLASS;
+      const fillCoverage = isRelationClass(relationClass)
+        ? relationCoverage
+        : conflictLegacyClass?.relationCoverage ?? NO_RELATION_COVERAGE;
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -698,6 +734,8 @@ export function writeMemoryEdges(
         relationClass,
         relationCoverage,
         createdAtEpoch,
+        fillClass,
+        fillCoverage,
       );
       dropBarePairRow.run(
         edge.citing.kind,

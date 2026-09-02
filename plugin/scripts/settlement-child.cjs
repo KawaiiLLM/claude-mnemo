@@ -36373,12 +36373,28 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
-        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
-        -- assigned here either. A restatement leaves an existing row exactly as
-        -- stored, so re-asserting a class over a legacy row does not
-        -- retroactively classify it -- classifying the existing corpus is
-        -- ticket 03's migration, which owns the reversibility story for it.
-        DO UPDATE SET relation = memory_edges.relation
+        --
+        -- relation-vocabulary-v13 ticket 03 closes the gap ticket 02 left
+        -- here. The class columns ARE assigned now, but ONLY onto a row that
+        -- carries no class yet, and only the value that row already READS AS:
+        -- the last two parameters are the write's own class when it carries
+        -- one, and otherwise LEGACY_RELATION_CLASS of this very word (the
+        -- conflict target pins the relation column, so the stored word and incoming
+        -- word are the same word). So this is the migration's materialization
+        -- reaching one more row, not a correction: edgeRelationClass answered
+        -- the same before and after. A row that is ALREADY classified is left
+        -- exactly as stored -- D2 still holds, a restatement never overwrites a
+        -- claim, and correcting a class is still retract-then-write.
+        DO UPDATE SET
+          relation = memory_edges.relation,
+          relation_class = CASE
+            WHEN memory_edges.relation_class = '' THEN ?
+            ELSE memory_edges.relation_class
+          END,
+          relation_coverage = CASE
+            WHEN memory_edges.relation_class = '' THEN ?
+            ELSE memory_edges.relation_coverage
+          END
       RETURNING ${EDGE_COLUMNS}
     `
   );
@@ -36438,6 +36454,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
       const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
       const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
+      const conflictLegacyClass = LEGACY_RELATION_CLASS[edge.relation];
+      const fillClass = isRelationClass(relationClass) ? relationClass : conflictLegacyClass?.relationClass ?? NO_RELATION_CLASS;
+      const fillCoverage = isRelationClass(relationClass) ? relationCoverage : conflictLegacyClass?.relationCoverage ?? NO_RELATION_COVERAGE;
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -36449,7 +36468,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         headTag,
         relationClass,
         relationCoverage,
-        createdAtEpoch
+        createdAtEpoch,
+        fillClass,
+        fillCoverage
       );
       dropBarePairRow.run(
         edge.citing.kind,

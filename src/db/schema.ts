@@ -32,6 +32,8 @@ import { canonicalizeSettlementProposalAddresses } from "./note-settlement-propo
 import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex, reindexAllSegments } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets } from "./segments";
+import { LEGACY_RELATION_CLASS } from "../shared/relation-class";
+import { EDGE_RELATIONS } from "../shared/turn-phase";
 import { ERA_GRANT_COLUMN } from "../segment-era";
 
 const MEMORY_FTS_DDL = `
@@ -4241,6 +4243,166 @@ function ensureMemoryEdgesRelationClassColumns(db: Database): void {
   );
 }
 
+export const MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT =
+  "relation-vocabulary-v13-relation-class-backfill";
+
+export interface MemoryEdgesRelationClassBackfillReceipt {
+  /**
+   * Rows classified, keyed by the LEGACY WORD they were stored under. One
+   * UPDATE per word, so this is also the statement-by-statement account of
+   * what the sweep ran.
+   */
+  classifiedByRelation: Record<string, number>;
+  /** The sum of the above — every worded row this sweep materialized. */
+  classified: number;
+  /**
+   * BARE rows (`relation IS NULL`) left at `''` DELIBERATELY. See the
+   * docstring: a row that asserts no relation is not classified as anything,
+   * and `edgeRelationClass` answers `null` for it before and after.
+   */
+  bareRowsLeftUnclassified: number;
+  /**
+   * Worded rows still at `''` when the sweep finished: a stored word outside
+   * `EDGE_RELATIONS` — pre-vocabulary-narrowing stock that no reader admits to
+   * the graph. Expected 0; recorded rather than assumed, because a nonzero
+   * value is the one shape that would make `relation_class = ''` ambiguous.
+   */
+  unknownWordRowsLeftUnclassified: number;
+}
+
+/**
+ * Relation-vocabulary-v13 ticket 03 — the seven-to-three MATERIALIZATION.
+ *
+ * Every existing edge lands in the new vocabulary by PURE MAPPING: one UPDATE
+ * per legacy word, driven by `LEGACY_RELATION_CLASS` (shared/relation-class.ts),
+ * with the full/partial bit derived from which old word it was. Nothing is
+ * re-judged, nothing is dropped, no edge needs a model to look at it.
+ *
+ * IT CHANGES NO READER'S ANSWER. `edgeRelationClass` already falls back to
+ * `LEGACY_RELATION_CLASS[row.relation]` when `relation_class` is `''`, so this
+ * sweep writes down what every class-reader was already computing. That is the
+ * whole reason it may run unattended in `initializeSchema`: the before/after
+ * answer for every row is identical by construction, and a database that has
+ * not yet run it reads the same as one that has.
+ *
+ * WHY IT IMPORTS THE MAPPING rather than restating the words as literals, which
+ * is what `MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS` above does for its own
+ * migration target. That literal exists because a migration TARGET must not
+ * move when a vocabulary constant moves — it would rewrite history. This is the
+ * opposite case: the migration is a materialization of a LIVE READER's
+ * fallback, so it must use the same table that reader uses or the two would
+ * disagree the day the table moved, and rows migrated on different days would
+ * hold different answers.
+ *
+ * `relation` IS NEVER TOUCHED. Rollback is a READ-SIDE switch — stop reading
+ * the two class columns, or clear them (`UPDATE memory_edges SET
+ * relation_class = '', relation_coverage = ''`) — never a data restore. Every
+ * row keeps the word it was written under until a later release retires the
+ * column.
+ *
+ * THE WORDLESS POPULATION — `relation IS NULL`, 1,883 rows in production
+ * (1,187 `text-ref`, 696 `judged`) — STAYS `''`, and this is a decision, not an
+ * oversight. Ticket 03's brief singles out settlement's 696 and asks whether
+ * they should become `use`, the spec's fallback class. They should not:
+ *
+ *   - A bare row is not an unclassified relation, it is the PAIR'S EXISTENCE
+ *     RECORD (db/memory-edges.ts's own contract: "records only that this pair
+ *     exists"). `use` is a claim — "the cited output was a direct input to this
+ *     new output" — and settlement never made it. Writing it here would MINT a
+ *     truth-state assertion out of a migration, which is exactly what "nothing
+ *     is re-judged" forbids.
+ *   - It would break the reader-equivalence this sweep rests on:
+ *     `edgeRelationClass` returns `null` for a bare row today, and would return
+ *     `use` after. The migration would stop being a materialization.
+ *   - It would corrupt the retraction address. `retractMemoryEdges` addresses
+ *     the bare row as `relation: null` precisely because "this citation was
+ *     never classified" and "this classification is wrong" are different
+ *     retractions; a classified bare row would answer to both.
+ *
+ * SO WHAT DOES `relation_class = ''` MEAN AFTER THIS RUNS, and how does a
+ * reader tell "pre-v13, never classified" from "classified as nothing"? Three
+ * states, all decidable from the row plus the receipt, none of them a guess:
+ *
+ *   1. NO RECEIPT for this database -> every `''` is "pre-v13, not yet swept".
+ *      `hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)`
+ *      is the question, and it is per-database and durable.
+ *   2. RECEIPT PRESENT, `relation IS NULL` -> "classified as nothing", by
+ *      construction and permanently: a bare row carries no relation to
+ *      classify. This is the population above.
+ *   3. RECEIPT PRESENT, `relation IS NOT NULL` and still `''` -> a stored word
+ *      outside `EDGE_RELATIONS`. `edgeRelationClass` already answers `null` for
+ *      it and the lane checker already reports it as a warning. The receipt's
+ *      `unknownWordRowsLeftUnclassified` counts them, so this state is
+ *      observable rather than inferred (production: 0).
+ *
+ * Guarded on the receipt INSIDE the write transaction as well as outside it —
+ * the `retireUntenantedSegmentContentFromSearch` idiom, for the same reason:
+ * two hook processes open the database concurrently for a single Claude Code
+ * event, and the loser of the insert must not report a sweep the winner already
+ * did. Re-running would be harmless (each UPDATE is `WHERE relation_class = ''`,
+ * so it is a no-op on a classified row) but a receipt nobody can attribute is
+ * not worth writing.
+ *
+ * SET-BASED, not a row loop: seven UPDATEs over ~5,700 rows, single-digit
+ * milliseconds on the production-sized table, on a path (`initializeSchema`)
+ * that every hook process walks.
+ */
+function classifyLegacyMemoryEdgeRelations(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "memory_edges")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)) {
+    return;
+  }
+
+  runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)) {
+      return;
+    }
+
+    const classify = db.query<unknown, [string, string, string]>(
+      `UPDATE memory_edges
+          SET relation_class = ?, relation_coverage = ?
+        WHERE relation = ? AND relation_class = ''`,
+    );
+
+    const classifiedByRelation: Record<string, number> = {};
+    let classified = 0;
+    for (const word of EDGE_RELATIONS) {
+      const { relationClass, relationCoverage } = LEGACY_RELATION_CLASS[word];
+      const changes = classify.run(relationClass, relationCoverage, word).changes;
+      classifiedByRelation[word] = changes;
+      classified += changes;
+    }
+
+    const leftovers = db
+      .query<{ bare: number; unknown: number }, []>(
+        `SELECT COALESCE(SUM(relation IS NULL), 0) AS bare,
+                COALESCE(SUM(relation IS NOT NULL), 0) AS unknown
+           FROM memory_edges
+          WHERE relation_class = ''`,
+      )
+      .get() ?? { bare: 0, unknown: 0 };
+
+    const receipt: MemoryEdgesRelationClassBackfillReceipt = {
+      classifiedByRelation,
+      classified,
+      bareRowsLeftUnclassified: leftovers.bare,
+      unknownWordRowsLeftUnclassified: leftovers.unknown,
+    };
+
+    writeMigrationReceipt(
+      db,
+      MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT,
+      nowEpoch,
+      receipt,
+    );
+  });
+}
+
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
 function countUnsettledEdges(db: Database): number {
   return (
@@ -4533,6 +4695,12 @@ export function initializeSchema(db: Database): void {
   // on the one open that runs them. ADD COLUMN is additive and idempotent, so
   // running it last costs nothing and cannot lose data.
   ensureMemoryEdgesRelationClassColumns(db);
+  // Relation-vocabulary-v13 ticket 03, immediately after the two columns it
+  // fills and — like them — strictly after every `memory_edges` rebuild above:
+  // a rebuild's explicit copy list would carry the values across, but the
+  // receipt would then describe a sweep of a table that no longer exists in
+  // that shape. Additive and idempotent; `relation` is not touched.
+  classifyLegacyMemoryEdgeRelations(db);
   // Lane-model-v12 ticket 14 (spec D3e), strictly LAST and strictly after
   // `runLaneRegistryMigration`: that migration's M3 reads `segments.tags` as
   // the CURATED vocabulary and stamps members from it, against a hardcoded
