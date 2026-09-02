@@ -69,7 +69,7 @@ import {
   type RecallTurnField,
 } from "./memory-filter";
 import { estimateTokens } from "../utils/token-estimate";
-import { buildTurnRelationLines } from "./relations-view";
+import { buildTurnDirectRelationLines, RELATIONS_FIELD_LEGEND } from "./relations-view";
 import { renderSegmentHeaderLines } from "./segment-spine";
 import {
   chronologicalSegmentMembers,
@@ -900,7 +900,7 @@ export function buildTurnView(
     // when not requested" is enforced here, at the query boundary, not just
     // at render time (unlike `insight`/`filesRead`/etc. above, which are
     // already-loaded `TurnRecord` columns with no extra query to skip).
-    relations: fields?.has("relations") ? buildTurnRelationLines(db, turn) : undefined,
+    relations: fields?.has("relations") ? buildTurnDirectRelationLines(db, turn) : undefined,
   };
 }
 
@@ -2364,6 +2364,94 @@ function collectLaneReadReceiptForRoute(
   });
 }
 
+
+/**
+ * The `S<n>/T<m>` / `S<n>/T<a>..T<b>` / `S<n>/T*` route's own turn list —
+ * the addressed turns, narrowed by the call's time window and structured
+ * filter. Split out of `renderRoutedId` so the comma-list assembly below can
+ * build ONE list out of several addresses and hand it to the same renderer
+ * (settlement-read-once spec D8's outer grouping) instead of rendering, and
+ * re-heading, each address on its own.
+ */
+function selectAddressedTurns(
+  db: Database,
+  sessionId: number,
+  promptNumbers: number[] | undefined,
+  after: number | undefined,
+  before: number | undefined,
+  filter: ParsedMemoryFilter,
+): TurnRecord[] {
+  return applyTurnSelector(db, sessionId, promptNumbers).filter((turn) => {
+    if (after !== undefined && turn.createdAtEpoch < after) {
+      return false;
+    }
+    if (before !== undefined && turn.createdAtEpoch > before) {
+      return false;
+    }
+    return turnMatchesFilter(turn, filter);
+  });
+}
+
+/**
+ * One page of turn blocks, however many addresses named them.
+ *
+ * Ticket 03: pageBudget can force an earlier split than `pageSize` alone —
+ * measured by trial-rendering candidate pages with `signal` suppressed
+ * (`renderTurnScope` has no other side effect), then the real render below
+ * (with the real `signal`) runs once against the chosen page's items.
+ *
+ * `renderTurnScope` marks the ledger per TURN as it renders (peer round
+ * P1-6): this route records no grant for the whole page up front, since half
+ * a page is exactly what the envelope can deliver. It also emits ONE session
+ * header per session group, which is what makes the grouped comma-list read
+ * (spec D8) cheaper than the per-address one it replaces rather than merely
+ * differently arranged.
+ */
+function renderTurnAddressPage(
+  db: Database,
+  turns: TurnRecord[],
+  fields: TurnRenderFields,
+  page: number,
+  pageSize: number,
+  eraCutoffEpoch: number | null,
+  signal: TruncationSignal | undefined,
+  pageBudget: number | undefined,
+  turnBudget: number | undefined,
+  fieldBudgets: Partial<Record<RecallTurnField, number>> | undefined,
+  routeCheckpoint: number,
+  ledger?: DeliveryLedger,
+): string {
+  const paged = paginateByRenderedPageCost(
+    turns,
+    page,
+    pageSize,
+    pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+    (pageItems) =>
+      renderTurnScope(
+        db,
+        pageItems,
+        fields,
+        eraCutoffEpoch,
+        undefined,
+        turnBudget,
+        undefined,
+        fieldBudgets,
+      ),
+  );
+  const body = renderTurnScope(
+    db,
+    paged.items,
+    fields,
+    eraCutoffEpoch,
+    signal,
+    turnBudget,
+    ledger,
+    fieldBudgets,
+  );
+  const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
+  ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+  return joinPage(header, body, paged.pageCount);
+}
 function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
@@ -2642,53 +2730,20 @@ function renderRoutedId(
   }
 
   if (routed.kind === "turns") {
-    const turns = applyTurnSelector(db, routed.sessionId, routed.promptNumbers).filter((turn) => {
-      if (after !== undefined && turn.createdAtEpoch < after) {
-        return false;
-      }
-      if (before !== undefined && turn.createdAtEpoch > before) {
-        return false;
-      }
-      return turnMatchesFilter(turn, filter);
-    });
-    // Ticket 03: pageBudget can now force an earlier split than `pageSize`
-    // alone — measured by trial-rendering candidate pages with `signal`
-    // suppressed (`renderTurnScope` has no other side effect), then the
-    // real render below (with the real `signal`) runs once against the
-    // chosen page's items.
-    const paged = paginateByRenderedPageCost(
-      turns,
+    return renderTurnAddressPage(
+      db,
+      selectAddressedTurns(db, routed.sessionId, routed.promptNumbers, after, before, filter),
+      fields,
       page,
       pageSize,
-      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) =>
-        renderTurnScope(
-          db,
-          pageItems,
-          fields,
-          eraCutoffEpoch,
-          undefined,
-          turnBudget,
-          undefined,
-          filter.fieldBudgets,
-        ),
-    );
-    // `renderTurnScope` marks the ledger per TURN as it renders (peer round
-    // P1-6) — this route no longer records a grant for the whole page up
-    // front, since half a page is exactly what the envelope can deliver.
-    const body = renderTurnScope(
-      db,
-      paged.items,
-      fields,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
-      ledger,
       filter.fieldBudgets,
+      routeCheckpoint,
+      ledger,
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
-    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
-    return joinPage(header, body, paged.pageCount);
   }
 
   if (routed.kind === "turn-by-id") {
@@ -2911,7 +2966,7 @@ function browseFieldText(
       // convention `insight` uses above — the browse row is one field line
       // per field, never a nested bullet list the way the unified renderer's
       // turn body can afford.
-      const lines = buildTurnRelationLines(db, turn);
+      const lines = buildTurnDirectRelationLines(db, turn);
       return lines.length > 0 ? lines.join("; ") : null;
     }
     case "metadata":
@@ -3621,9 +3676,9 @@ export function recallMemoryDelivery(db: Database, input: RecallInput): RecallDe
   // Anything the routes did not claim belongs to the response's very end: it
   // survives only when the envelope cut nothing at all.
   ledger?.sealAt(body.length);
-  // The legend appends BELOW the body, so every offset above still names the
+  // Both legends append BELOW the body, so every offset above still names the
   // same character in the returned text.
-  const text = appendNavigationLegend(body, signal);
+  const text = appendNavigationLegend(appendRelationsLegend(body, input), signal);
   const readerId = input.readerId;
   return {
     text,
@@ -3637,6 +3692,39 @@ export function recallMemoryDelivery(db: Database, input: RecallInput): RecallDe
   };
 }
 
+
+/**
+ * Settlement-read-once spec D8: the `relations` grammar is explained ONCE per
+ * response, here, instead of once per turn block. A settlement window read of
+ * fifteen turns used to be able to repeat a notation legend fifteen times;
+ * one response-scoped line is the same information at a fifteenth of the
+ * bytes, and it is exactly where `appendNavigationLegend` already puts the
+ * response's other once-per-response notice.
+ *
+ * The condition is the caller's own SELECTION of the field, not whether some
+ * turn on this page happened to carry an edge. Two reasons, in order:
+ *
+ *   - A caller that asked for `relations` and got a block with no arrow lines
+ *     has learned something (this turn cites nothing and nothing cites it),
+ *     and it learns it correctly only if it knows what the field would have
+ *     looked like. An empty set is an answer, not an absence.
+ *   - "Did any line render" is not a fact this assembler can read honestly.
+ *     The page packers TRIAL-RENDER candidate pages while deciding a
+ *     boundary, so a flag set during a render would fire for rows that never
+ *     reach the reader. Selection is known before a single row is read and
+ *     cannot drift from what the response contains.
+ *
+ * A parameter error is not a render: it names no field and gets no legend.
+ */
+function appendRelationsLegend(body: string, input: RecallInput): string {
+  if (body.startsWith(RECALL_PARAMETER_ERROR_PREFIX)) {
+    return body;
+  }
+  if (!resolveTurnFields(input.filter?.fields).has("relations")) {
+    return body;
+  }
+  return body ? `${body}\n\n${RELATIONS_FIELD_LEGEND}` : RELATIONS_FIELD_LEGEND;
+}
 function recallMemoryBody(
   db: Database,
   input: RecallInput,
@@ -3771,6 +3859,66 @@ function recallMemoryBody(
     if (routedItems.some((routed) => routed.kind !== firstKind)) {
       return formatParameterError(
         `mixed id kinds in comma list "${input.id}" — ${ID_SELECTOR_GRAMMAR_HINT}`,
+      );
+    }
+
+    // Settlement-read-once spec D8's OUTER assembly: a comma list of TURN
+    // addresses is one page of turn blocks, not N pages stapled together.
+    // Rendered item by item, `recall(id="S1/T4, S1/T9, S2/T2")` printed a
+    // session header above every single one — three headers for two sessions,
+    // and the `relations` legend would have followed them once per item. One
+    // list, one `renderTurnScope`, so the header appears once per SESSION
+    // GROUP and the legend once per response (`appendRelationsLegend`).
+    //
+    // What is deliberately unchanged: every addressed turn still earns its
+    // own per-turn ledger mark, at the offset where ITS block ends, because
+    // `renderTurnScope` is what marks them and it is now doing so over the
+    // whole list instead of once per item. The grants a fully-delivered list
+    // records are therefore the same set as before, and a list the envelope
+    // cuts mid-way still credits exactly the turns whose blocks survived.
+    //
+    // Only the `turns` kind groups. The other list kinds address whole
+    // records (a session, a task, a lane) whose renders carry their own
+    // headers and their own receipts; there is no shared header to fold.
+    if (firstKind === "turns") {
+      const listCheckpoint = ledger?.checkpoint() ?? 0;
+      const listed: TurnRecord[] = [];
+      const seenTurnIds = new Set<number>();
+      for (const routed of routedItems) {
+        if (routed.kind !== "turns") {
+          continue;
+        }
+        for (const turn of selectAddressedTurns(
+          db,
+          routed.sessionId,
+          routed.promptNumbers,
+          filter.after,
+          filter.before,
+          filter,
+        )) {
+          // An address named twice (`S1/T4, S1/T4`, or a range overlapping a
+          // point) is one turn, read once and granted once — the pre-D8
+          // per-item render would have printed and granted it twice.
+          if (seenTurnIds.has(turn.id)) {
+            continue;
+          }
+          seenTurnIds.add(turn.id);
+          listed.push(turn);
+        }
+      }
+      return renderTurnAddressPage(
+        db,
+        listed,
+        fields,
+        page,
+        pageSize,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter.fieldBudgets,
+        listCheckpoint,
+        ledger,
       );
     }
 

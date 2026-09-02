@@ -3567,12 +3567,14 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
           const text = receipt.content[0]!.text;
 
           // Both directions, the relation word, the counterpart address and
-          // the canonical tag set — the completeness bar edge-read-surface
-          // ticket 01 was accepted against. Fork-tree spec (ticket 12): T1's
-          // own edge renders as an in-branch under its own root address; T2's
-          // is its main out-chain.
-          expect(text).toContain("└<-extends- T2 {lane}");
-          expect(text).toContain("S1/T2 -extends-> T1 {lane}");
+          // both lane sides — the completeness bar edge-read-surface ticket
+          // 01 was accepted against. Settlement-read-once spec D8: each turn
+          // shows its OWN direct edge, T1's as an incoming row and T2's as an
+          // outgoing one, in the same grammar on both sides.
+          expect(text).toContain("<- T2 extends (#lane)");
+          expect(text).toContain("extends -> T1 (#lane)");
+          // One legend for the whole two-turn response, not one per turn.
+          expect(text.split("relations legend:")).toHaveLength(2);
           // And the range selector really paged BOTH turns.
           expect(text).toContain("T1 ");
           expect(text).toContain("T2 ");

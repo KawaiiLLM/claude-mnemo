@@ -33,7 +33,7 @@ import {
   type TurnRenderFields,
 } from "./format";
 import { taskImpressionDisplay, type ImpressionDisplay } from "./impression-display";
-import { buildTurnRelationLines } from "./relations-view";
+import { buildTurnDirectRelationLines } from "./relations-view";
 
 /**
  * The segment card (ticket 03, spec "Tools"/ADR-0006): `recall(id="E<n>")`'s
@@ -932,7 +932,7 @@ export function renderSegmentMembersByOrdinal(
       // `fields` selection, same "costs nothing when not requested" contract
       // `recall.ts`'s `buildTurnView` follows.
       relations: options.fields?.has("relations")
-        ? buildTurnRelationLines(db, turn)
+        ? buildTurnDirectRelationLines(db, turn)
         : undefined,
     };
     lines.push(

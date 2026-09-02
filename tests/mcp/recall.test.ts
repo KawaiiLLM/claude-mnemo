@@ -1717,24 +1717,29 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     expect(output).not.toContain("←");
   });
 
-  // Fork-tree spec (ticket 12): the flat `→`/`←` one-hop lines are replaced
-  // by a tree rooted at the viewed turn — this fixture's own T1<->T3
-  // cross-lane `consume`/`narrows` pair round-trips back to the root, which
-  // doubles as a real (if synthetic) exercise of the `^` dedupe rule.
-  test("requested: the tree carries every direction's word + lane, Law-8 filtered, cross-session qualified", () => {
+  // Settlement-read-once spec D8 (user rulings T2388/T2404): the 3-hop tree
+  // is replaced by this node's DIRECT edge set — outgoing rows first,
+  // incoming after, both raw lane sides on each, nothing elided.
+  test("requested: the direct set carries every direction's word + lane, Law-8 filtered, cross-session qualified", () => {
     const output = recallMemory(db, {
       id: `S${sessionId}/T1`,
       filter: { fields: ["title", "relations"] },
     });
 
     expect(output).toContain("- relations:");
-    expect(output).toContain(`S${sessionId}/T1`);
-    expect(output).toContain("-override-> T2 {rule-ledger-tickets}");
-    // A crossing names BOTH lanes rather than collapsing them into one set,
-    // and doubles the arrow's stroke (edge-atom ticket 11 decision 4).
-    expect(output).toContain("=consume=> T3 {rule-ledger-tickets→watchdog-liveness}");
-    expect(output).toContain("<-narrows- T3");
-    expect(output).toContain(`-grounds-> S${otherSessionId}/T21`);
+    expect(output).toContain("override -> T2 (#rule-ledger-tickets)");
+    // A crossing names BOTH lanes rather than collapsing them into one.
+    expect(output).toContain("consume -> T3 (#rule-ledger-tickets → #watchdog-liveness)");
+    // Incoming: address first, then the word, then the same side rules.
+    expect(output).toContain("<- T3 narrows [unplaced]");
+    expect(output).toContain(`grounds -> S${otherSessionId}/T21 [unplaced]`);
+    // The tree's own notation is gone with the tree: no root-address line, no
+    // labelled arrow, no brace suffix, no branch glyph, no elision marker.
+    expect(output).not.toContain("-override->");
+    expect(output).not.toContain("=consume=>");
+    expect(output).not.toContain("{rule-ledger-tickets}");
+    expect(output).not.toContain("└");
+    expect(output).not.toContain("more");
     // Law 8: the dormant target and the deleted source never appear.
     expect(output).not.toContain("T4");
     expect(output).not.toContain("T5");
@@ -1746,12 +1751,12 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
     // calls below stay on `buildBrowseFeed`'s global chronological path, not
     // the search/listing one `filter.session` would trigger.
     const unrequested = recallMemory(db, {});
-    expect(unrequested).not.toContain("-override->");
+    expect(unrequested).not.toContain("override ->");
 
     const requested = recallMemory(db, {
       filter: { fields: ["title", "relations"] },
     });
-    expect(requested).toContain("-override-> T2 {rule-ledger-tickets}");
+    expect(requested).toContain("override -> T2 (#rule-ledger-tickets)");
   });
 });
 
