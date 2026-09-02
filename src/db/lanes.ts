@@ -409,8 +409,8 @@ export class LaneMergeInvariantError extends Error {}
 export interface LaneMergeCollision {
   citingAddress: string;
   citedAddress: string;
-  /** `null` only for a bare pair row, which carries no side tag and therefore never collides here. */
-  relation: string | null;
+  /** The surviving row's stored class (`''` only for a deferral-window bare row, which carries no side tag and therefore never collides here). */
+  relationClass: string;
   /** The surviving row's post-merge sides — the last two components of the key the rows collided on. */
   tailTag: string;
   headTag: string;
@@ -527,7 +527,7 @@ interface LaneMergeEdgeRow {
   citingId: number;
   citedKind: string;
   citedId: number;
-  relation: string | null;
+  relationClass: string;
   provenance: string;
   tailTag: string;
   headTag: string;
@@ -692,7 +692,7 @@ export function mergeLaneTag(
       `SELECT id,
               citing_kind AS citingKind, citing_id AS citingId,
               cited_kind AS citedKind, cited_id AS citedId,
-              relation, provenance,
+              relation_class AS relationClass, provenance,
               tail_tag AS tailTag, head_tag AS headTag,
               created_at_epoch AS createdAtEpoch
          FROM memory_edges
@@ -739,7 +739,6 @@ export function mergeLaneTag(
       rewrite.row.citingId,
       rewrite.row.citedKind,
       rewrite.row.citedId,
-      rewrite.row.relation ?? null,
       rewrite.tailTag,
       rewrite.headTag,
     ]);
@@ -798,7 +797,7 @@ export function mergeLaneTag(
       collisions.push({
         citingAddress: resolveEdgeNodeAddress(db, kept.entry.row.citingKind, kept.entry.row.citingId),
         citedAddress: resolveEdgeNodeAddress(db, kept.entry.row.citedKind, kept.entry.row.citedId),
-        relation: kept.entry.row.relation,
+        relationClass: kept.entry.row.relationClass,
         tailTag: kept.entry.tailTag,
         headTag: kept.entry.headTag,
         keptEdgeId: kept.id,
@@ -967,7 +966,7 @@ export interface LaneClearBlocker {
   edgeId: number;
   citingAddress: string;
   citedAddress: string;
-  relation: string | null;
+  relationClass: string;
   /**
    * `cross-lane` — the OTHER side resolves to a DIFFERENT declared lane
    * (same segment or another one); deleting the row destroys that lane's

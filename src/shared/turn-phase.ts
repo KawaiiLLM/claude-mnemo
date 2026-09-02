@@ -21,61 +21,13 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * (later) turn to its CITED predecessor — `memory_edges.citing_id` is always
  * the turn being written now, `cited_id` the turn it points at.
  *
- * ## The seven-word STORAGE vocabulary (lane-model v12, rubric-v12's 七种关系)
+ * ## The relation vocabulary lives in `shared/relation-class.ts`
  *
- * SINCE relation-vocabulary-v13 ticket 02 THESE SEVEN ARE NOT THE WRITE
- * VOCABULARY. A new write carries one of three CLASSES (`shared/relation-
- * class.ts`: `correct` with a full/partial bit, `verify`, `use`) and lands in
- * the `relation` column under this list's INTERIM equivalent, so the column's
- * CHECK, its identity key and every reader still keyed on these words keep
- * working unchanged. `EDGE_RELATIONS` below is therefore "what a stored row's
- * `relation` may say", which is exactly what all of its consumers use it for —
- * the SQL `IN`-lists in `db/memory-edges.ts`, `db/lane-checker-load.ts` and
- * `db/basis-reachability-load.ts`, and the lane checker's conformance gate.
- *
- * Each word says what the CITED node's main result becomes in light of this
- * node; none of them constrains either end's phase. The class each one maps to
- * (`shared/relation-class.ts`'s `LEGACY_RELATION_CLASS`) is named beside it:
- *
- *   verifies   the cited main result is verified/supported by this node
- *              -> verify
- *   override   the cited main result is overturned, WITHDRAWN or REPLACED by
- *              this node — one word for disproof, retraction, abandonment and
- *              replacement alike, because the reader's question ("must I still
- *              read the cited result?") gets the same answer from all four
- *              -> correct, coverage full
- *   narrows    the cited main result still applies; this node corrects or
- *              limits a detail
- *              -> correct, coverage partial
- *   extends    the cited main result still applies; this node adds to it
- *              -> use
- *   grounds    this node's work depends on the cited standing — if the cited
- *              falls, this node falls with it
- *              -> use
- *   consume    uses another node's output, taking no liability for it
- *              -> use
- *   indexes    this node converges a stage, pointing at several nodes to
- *              express aggregation/index of what survives of the work before
- *              -> use
- *
- * v11 -> v12, and why (measured, spec's 问题 section): `refutes` MERGES into
- * `override` — its meaning was already a subset of "the cited result is
- * overturned", and keeping both forced a writer to guess which. And the PHASE
- * AXIS leaves the vocabulary entirely. It was never load-bearing: with the
- * "any legal pairing on a multi-phase turn wins" escape hatch open, exactly
- * ONE live hand-written edge in the whole database failed the phase gate;
- * close the hatch and 309/609 (51%) failed. What made the graph legal was the
- * escape hatch, not the axis. The evidence-type condition that used to ride on
- * `verifies`/`refutes` goes with it: 19/20 asserted rows already complied, and
- * the single genuine violation it caught is legal under the merged semantics.
- *
- * Splits and merges vs the retired pre-v11 sets: `refines` -> `extends` +
- * `narrows`; `depends-on` -> `consume` + `indexes`; `encodes` merges into
- * `grounds` alongside `grounded-on`; `evidence-for` renames to `verifies` and
- * `evidence-against` (briefly `refutes`) lands in `override`. `supersedes`
- * stays frozen-readable storage only (`db/citations.ts`'s
- * `CITATION_RELATIONS`), never a member of this module's write vocabulary —
- * and `refutes` joins it there, readable on stored rows, unwritable.
+ * Three CLASSES — `correct` (with a full/partial coverage bit), `verify`,
+ * `use` — decided by precedence. The seven-word storage vocabulary that used
+ * to be listed here (`override narrows extends indexes consume grounds
+ * verifies`) left with the `relation` column at the main-agent-edges cutover
+ * (spec D1, ticket 01); nothing at runtime names one of those words any more.
  *
  * ## Self edges are refused, always (lane-model-v12 D2, ticket 04)
  *
@@ -233,69 +185,13 @@ export function phasesForTypes(types: readonly string[]): Set<TurnPhase> {
   return phases;
 }
 
-/**
- * The SEVEN-word closed set a stored row's `relation` column may carry
- * (lane-model v12, rubric-v12's 七种关系). Membership is the WHOLE storage-time
- * word test — no phase pairing, no per-word evidence requirement, nothing
- * derived from either endpoint's `type`.
- *
- * NOT THE WRITE VOCABULARY any more (relation-vocabulary-v13 ticket 02): a
- * caller asks for one of `shared/relation-class.ts`'s three CLASSES and the
- * write path resolves it to a member of this list through that module's INTERIM
- * equivalence. This constant stays the STORAGE set because every one of its
- * consumers is a storage-side filter or gate over rows that already exist.
- *
- * `supersedes` and `refutes` are deliberately not members — frozen legacy,
- * `db/citations.ts`'s `CITATION_RELATIONS` is where they survive as
- * storage-level, read-only values. `refutes` rows written before v12 stay
- * readable and retractable; their meaning is now `override`'s (ticket 03
- * migrates the stored rows).
- */
-export const EDGE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies",
-] as const;
-export type TurnEdgeRelation = (typeof EDGE_RELATIONS)[number];
-
-export function isTurnEdgeRelation(value: unknown): value is TurnEdgeRelation {
-  return typeof value === "string" && (EDGE_RELATIONS as readonly string[]).includes(value);
-}
-
-/**
- * The words a lane tag may attach to: ALL SEVEN ([S15069/T1562], rubric v12's
- * 七种关系). Derived from `EDGE_RELATIONS` rather than listed, so the set
- * cannot drift from the vocabulary it is defined as.
- *
- * It used to be the five same-phase words, on the reasoning that a lane is
- * phase-local and a tag spanning a phase boundary would assert membership
- * across a line the model did not define. The field study that tested that
- * reasoning is why it is gone: 46%/53% of already-legal edges joined turns
- * whose phase SETS differ, so "same phase" was never rigid; and of 29
- * boundary-spanning references only 13 broke a line, 12 of those from
- * dispatch/acceptance/release turns with no single sub-task identity anyway.
- * A tagged edge across that boundary is now the ORDINARY way a design line
- * continues into the delivery that ships it —
- * `实现 —consume{rubric-design}→ spec —grounds{rubric-design}→ 设计终点` is
- * one lane, not two hinged halves.
- *
- * With every word taggable this set is total, so there is no word-level tag
- * refusal left and no `isTaggableRelation` predicate to ask one: the surviving
- * tag refusals are all STRUCTURAL (a self edge, an undeclared lane, a
- * non-canonical tag, an intersecting stored row) and live in
- * `checkTagLegality` below. The name stays because it is the vocabulary
- * statement a reader greps for, and because an EIGHTH word admitted tomorrow
- * inherits taggability here by construction rather than by a second edit.
- *
- * NO WORD REQUIRES A TAG. The mandate that once forced one on
- * `extends`/`narrows` is withdrawn — see this module's header for the measured
- * reason — so there is no `TAG_MANDATORY_RELATIONS` counterpart to this set.
- */
-export const TAGGABLE_RELATIONS: ReadonlySet<TurnEdgeRelation> = new Set(EDGE_RELATIONS);
+// THE SEVEN-WORD STORAGE VOCABULARY (`EDGE_RELATIONS`, `TurnEdgeRelation`,
+// `isTurnEdgeRelation`, `TAGGABLE_RELATIONS`) IS DELETED (main-agent-edges
+// spec D1, ticket 01 — the cutover). An edge is a relation FACT — class plus
+// coverage, `shared/relation-class.ts` — and the `relation` column those words
+// lived in no longer exists. The only place a word survives is
+// `db/schema.ts`, as a frozen migration literal for databases that predate the
+// three-class backfill; nothing at runtime names one.
 
 // `STANCE_RELATIONS` (`narrows`/`extends`) IS DELETED (main-agent-edges spec
 // D2). Its last reader was `shared/lane-checker.ts`'s segment graph — a WORD

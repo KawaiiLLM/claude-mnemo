@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { insertLane } from "../../src/db/lanes";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
@@ -13,7 +14,6 @@ import {
 import { upsertSession } from "../../src/db/sessions";
 import { buildSegmentLaneListView, timelineQuery } from "../../src/mcp/timeline";
 import { countTokens } from "../../src/shared/token-count";
-import type { CitationRelation } from "../../src/db/citations";
 
 /**
  * The lane view's ruled adjacency table (frontier-injection spec Rev 5,
@@ -107,7 +107,7 @@ function makeEdge(
   db: Database,
   citingTurnId: number,
   citedTurnId: number,
-  relation: CitationRelation,
+  relation: string,
   tailTag: string,
   headTag: string,
 ): void {
@@ -117,7 +117,7 @@ function makeEdge(
       {
         citing: { kind: "turn", id: citingTurnId },
         cited: { kind: "turn", id: citedTurnId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "judged",
         tailTag,
         headTag,
@@ -127,43 +127,14 @@ function makeEdge(
   );
 }
 
-/**
- * A SECOND physical row on a pair that already has one — pre-cutover stock,
- * seeded past the write path on purpose.
- *
- * main-agent-edges D5 gives one pair one row: `writeMemoryEdges` would promote
- * the stored row in place (or no-op) rather than mint this, so a corpus whose
- * SUBJECT is a multi-relation pair can no longer be built through `makeEdge`.
- * A database that predates ticket 01's rebuild holds exactly this shape (109
- * such pairs in production), and every reader below is untouched by D5 — the
- * lane view still has to render a multi-relation pair correctly for as long as
- * one can be read. So the extra row goes in as SQL, alongside the side-tag
- * index rows a relation write maintains, which is what the lane readers join
- * against.
- */
-function makeLegacyEdgeRow(
-  db: Database,
-  citingTurnId: number,
-  citedTurnId: number,
-  relation: CitationRelation,
-  tailTag: string,
-  headTag: string,
-): void {
-  const row = db
-    .query<{ id: number }, [number, number, string, string, string]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'judged', ?, ?, '', '', ${BASE_EPOCH})
-       RETURNING id`,
-    )
-    .get(citingTurnId, citedTurnId, relation, tailTag, headTag)!;
-  const insertSideTag = db.query<unknown, [number, string, string]>(
-    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
-  );
-  if (tailTag !== "") insertSideTag.run(row.id, "tail", tailTag);
-  if (headTag !== "") insertSideTag.run(row.id, "head", headTag);
-}
+// `makeLegacyEdgeRow` IS DELETED (main-agent-edges ticket 01): it seeded a
+// SECOND physical row on a pair that already had one. The cutover folded that
+// stock and rebuilt `memory_edges` UNIQUE on `(citing, cited)`, so the shape
+// cannot be read any more and the readers below have one row per pair to
+// render. The two fixture rows it wrote (a6 -correct(partial)-> a1 beside a6
+// -correct(full)-> a1, and b1 -use-> a6 beside b1 -correct(full)-> a6) are gone with
+// it; each pair keeps its more specific class, which is what the fold itself
+// would have left.
 
 /** One lane's page text via the single-lane canonical address (page 1/1 in this ticket's single-page scope). */
 function renderLane(db: Database, segmentId: number, tag: string, pageBudget?: number): string {
@@ -335,7 +306,10 @@ function parseLanePage(text: string): ParsedLanePage {
     if (line.startsWith("└ ")) {
       expect(root).not.toBeNull();
       const rest = line.slice("└ ".length);
-      const mirror = rest.match(/^([a-z]+) (<-|<=) (.+)$/);
+      // The relation token is a CLASS token since the cutover — `use`,
+      // `verify`, `correct(full)`, `correct(partial)` — so the bare `[a-z]+`
+      // this used to accept would not match a coverage-bearing correction.
+      const mirror = rest.match(/^([a-z]+(?:\([a-z]+\))?) (<-|<=) (.+)$/);
       if (mirror) {
         for (const source of mirror[3]!.split(", ")) {
           if (mirror[2] === "<=") {
@@ -418,21 +392,17 @@ function seedRichWorld(db: Database) {
   settleWindow(db, s2, 2, 2);
 
   // Forward edges in #auth:
-  //   a6 -override-> a1   (heaviest: main line)
-  //   a6 -extends-> a3    (secondary branch, continues through a3)
-  //   a6 -narrows-> a1    (multi-relation revisit of a1)
-  //   a3 -grounds-> a2    (a3 is single-out: the continuation the branch takes)
-  //   a2 -extends-> infra (cross-lane forward stub)
+  //   a6 -correct(full)-> a1   (heaviest: main line)
+  //   a6 -use-> a3    (secondary branch, continues through a3)
+  //   a3 -use-> a2    (a3 is single-out: the continuation the branch takes)
+  //   a2 -use-> infra (cross-lane forward stub)
   makeEdge(db, a6, a1, "override", "auth", "auth");
   makeEdge(db, a6, a3, "extends", "auth", "auth");
-  makeLegacyEdgeRow(db, a6, a1, "narrows", "auth", "auth");
   makeEdge(db, a3, a2, "grounds", "auth", "auth");
   makeEdge(db, a2, infra, "extends", "auth", "infra");
-  // Cross-lane inbound mirrors onto a6: two same-relation sources (fold) plus
-  // a lighter-weight relation that must sort after them.
+  // Cross-lane inbound mirrors onto a6: two same-class sources (fold).
   makeEdge(db, b1, a6, "override", "legal", "auth");
   makeEdge(db, infra, a6, "override", "infra", "auth");
-  makeLegacyEdgeRow(db, b1, a6, "extends", "legal", "auth");
 
   return { s1, s2, taskA, taskB, a1, a2, a3, a4, infra, a6, b1, frontier };
 }
@@ -447,11 +417,10 @@ describe("lane view: forward multiset (spec testing seam 2)", () => {
     const auth = `E${world.taskA.id}/#auth`;
     const infraLane = `E${world.taskA.id}/#infra`;
     const expected = new Map<string, number>([
-      [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "override", auth, auth), 1],
-      [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "extends", auth, auth), 1],
-      [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "narrows", auth, auth), 1],
-      [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "grounds", auth, auth), 1],
-      [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "extends", auth, infraLane), 1],
+      [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "correct(full)", auth, auth), 1],
+      [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "use", auth, auth), 1],
+      [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "use", auth, auth), 1],
+      [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "use", auth, infraLane), 1],
     ]);
     expect(parsed.forwards).toEqual(expected);
     db.close();
@@ -486,10 +455,10 @@ describe("lane view: forward multiset (spec testing seam 2)", () => {
     const parsed = parseLanePage(page);
     const lane = `E${task.id}/#twin`;
     expect(parsed.forwards).toEqual(
-      new Map([[forwardKey(`S${s2}/T2`, `S${s1}/T2`, "extends", lane, lane), 1]]),
+      new Map([[forwardKey(`S${s2}/T2`, `S${s1}/T2`, "use", lane, lane), 1]]),
     );
     // The session CHANGES mid-chain, so the head re-renders full-form.
-    expect(parsed.skeleton).toEqual([`S${s2}/T2 extends -> S${s1}/T2`]);
+    expect(parsed.skeleton).toEqual([`S${s2}/T2 use -> S${s1}/T2`]);
     db.close();
   });
 
@@ -516,17 +485,17 @@ describe("lane view: forward multiset (spec testing seam 2)", () => {
     const laneB = `E${taskB.id}/#alpha`;
     expect(pageA.header.settled).toBe(2);
     expect(pageA.forwards).toEqual(
-      new Map([[forwardKey(`S${s1}/T2`, `S${s1}/T1`, "extends", laneA, laneA), 1]]),
+      new Map([[forwardKey(`S${s1}/T2`, `S${s1}/T1`, "use", laneA, laneA), 1]]),
     );
     expect(pageA.mirrors).toEqual(
-      new Map([[[`S${s1}/T3`, "override", laneB, `S${s1}/T1`].join("|"), 1]]),
+      new Map([[[`S${s1}/T3`, "correct(full)", laneB, `S${s1}/T1`].join("|"), 1]]),
     );
     expect(pageB.header.settled).toBe(1);
     // B's one forward edge is cross-lane INTO A's lane — same tag word,
     // different task, so the qualifier names A's task, and B's island graph
     // (both endpoints in B's lane) excludes it: the divergence fixture.
     expect(pageB.forwards).toEqual(
-      new Map([[forwardKey(`S${s1}/T3`, `S${s1}/T1`, "override", laneB, laneA), 1]]),
+      new Map([[forwardKey(`S${s1}/T3`, `S${s1}/T1`, "correct(full)", laneB, laneA), 1]]),
     );
     expect(pageB.header.forward).toBe(1);
     expect(pageB.header.islands).toBe(0);
@@ -545,20 +514,18 @@ describe("lane view: mirror multiset and folds", () => {
 
     expect(parsed.mirrors).toEqual(
       new Map([
-        [[`S${world.s2}/T2`, "override", `E${world.taskB.id}/#legal`, `S${world.s1}/T6`].join("|"), 1],
-        [[`S${world.s1}/T5`, "override", `E${world.taskA.id}/#infra`, `S${world.s1}/T6`].join("|"), 1],
-        [[`S${world.s2}/T2`, "extends", `E${world.taskB.id}/#legal`, `S${world.s1}/T6`].join("|"), 1],
+        [[`S${world.s2}/T2`, "correct(full)", `E${world.taskB.id}/#legal`, `S${world.s1}/T6`].join("|"), 1],
+        [[`S${world.s1}/T5`, "correct(full)", `E${world.taskA.id}/#infra`, `S${world.s1}/T6`].join("|"), 1],
       ]),
     );
-    // The fold: both override sources on ONE line, newer source (b1, epoch
-    // +700) first; the weight-0 extends mirror on its own LATER line.
-    const overrideLine = parsed.skeleton.find((line) => line.includes("override <="))!;
+    // The fold: both `correct(full)` sources on ONE line, newer source (b1,
+    // epoch +700) first. (The lighter second mirror this case used to sort
+    // AFTER this line was the pair's SECOND physical row; the cutover's
+    // pair-UNIQUE rebuild leaves one row per pair, so the weight ordering
+    // between two mirrors of the same pair no longer has stock to run on.)
+    const overrideLine = parsed.skeleton.find((line) => line.includes("correct(full) <="))!;
     expect(overrideLine).toBe(
-      `└ override <= S${world.s2}/T2^(E${world.taskB.id}/#legal), S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
-    );
-    const extendsLine = parsed.skeleton.find((line) => line.includes("extends <="))!;
-    expect(parsed.skeleton.indexOf(extendsLine)).toBeGreaterThan(
-      parsed.skeleton.indexOf(overrideLine),
+      `└ correct(full) <= S${world.s2}/T2^(E${world.taskB.id}/#legal), S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
     );
     // Mirrors render AFTER every branch of their head's block: no branch line
     // of the a6 block sits below a mirror line.
@@ -578,10 +545,11 @@ describe("lane view: chain decomposition", () => {
     const db = makeDb();
     const world = seedRichWorld(db);
     const parsed = parseLanePage(renderLane(db, world.taskA.id, "auth"));
-    // a6's block: main line takes override -> a1; extends and narrows fall to └.
-    expect(parsed.skeleton[0]).toBe(`S${world.s1}/T6 override -> T1`);
-    expect(parsed.skeleton.some((line) => line.startsWith("└ extends -> "))).toBe(true);
-    expect(parsed.skeleton.some((line) => line.startsWith("└ narrows -> "))).toBe(true);
+    // a6's block: the main line takes `correct(full) -> a1`; the `use` edge
+    // falls to └. (The third branch this used to check was the pair's second
+    // physical row into a1, folded away by the cutover.)
+    expect(parsed.skeleton[0]).toBe(`S${world.s1}/T6 correct(full) -> T1`);
+    expect(parsed.skeleton.some((line) => line.startsWith("└ use -> "))).toBe(true);
     db.close();
   });
 
@@ -592,19 +560,17 @@ describe("lane view: chain decomposition", () => {
     // The secondary extends branch continues through a3 (single out-edge,
     // first visit) and then through a2 straight into the cross-lane stub.
     expect(parsed.skeleton).toContain(
-      `└ extends -> S${world.s1}/T3 grounds -> T2 extends => S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
+      `└ use -> S${world.s1}/T3 use -> T2 use => S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
     );
     db.close();
   });
 
-  test("^ marks a revisit: the multi-relation second edge into an already-rendered node is a terminal ^ stub", () => {
-    const db = makeDb();
-    const world = seedRichWorld(db);
-    const parsed = parseLanePage(renderLane(db, world.taskA.id, "auth"));
-    // a1 rendered plain at the end of the main line; the narrows revisit stubs it.
-    expect(parsed.skeleton).toContain(`└ narrows -> S${world.s1}/T1^`);
-    db.close();
-  });
+  // DELETED (main-agent-edges ticket 01): "^ marks a revisit: the
+  // multi-relation second edge into an already-rendered node is a terminal ^
+  // stub". Its subject was a SECOND physical row on a pair whose head the
+  // walk had already rendered — stock the pair-UNIQUE rebuilt table cannot
+  // hold. The `^` revisit stub itself is still pinned, on stock that exists,
+  // by the fork case below.
 
   test("a fork target is stubbed ^ where it is reached and re-roots with its FULL out-edge set", () => {
     const db = makeDb();
@@ -625,11 +591,11 @@ describe("lane view: chain decomposition", () => {
 
     const parsed = parseLanePage(renderLane(db, task.id, "fork"));
     expect(parsed.skeleton).toEqual([
-      `S${s1}/T4 extends -> T3^`,
+      `S${s1}/T4 use -> T3^`,
       // t3's own root block: verifies and grounds tie at weight 1 → newer
       // target (t2) takes the main line, grounds falls to └.
-      `S${s1}/T3 verifies -> T2`,
-      `└ grounds -> S${s1}/T1`,
+      `S${s1}/T3 verify -> T2`,
+      `└ use -> S${s1}/T1`,
     ]);
     // Forward exactly-once still holds across the stub + re-root.
     expect([...parsed.forwards.values()]).toEqual([1, 1, 1]);
@@ -658,9 +624,9 @@ describe("lane view: chain decomposition", () => {
 
     const parsed = parseLanePage(renderLane(db, taskA.id, "carrier"));
     expect(parsed.skeleton).toEqual([
-      `S${s1}/T3 extends -> T2^`,
-      `S${s1}/T2 extends -> T1`,
-      `└ verifies <= S${s1}/T4^(E${taskB.id}/#sender)`,
+      `S${s1}/T3 use -> T2^`,
+      `S${s1}/T2 use -> T1`,
+      `└ verify <= S${s1}/T4^(E${taskB.id}/#sender)`,
     ]);
     db.close();
   });
@@ -724,7 +690,9 @@ describe("lane view: universe predicates and header", () => {
     // forward count includes it (island-vs-forward divergence).
     expect(parsed.header.islands).toBe(1);
     expect(parsed.header.singletons).toBe(1);
-    expect(parsed.header.forward).toBe(5);
+    // FOUR forward edges, not five: the pair's second physical row into a1
+    // went at the cutover.
+    expect(parsed.header.forward).toBe(4);
     // frontier = the unsettled prompt-9 member.
     expect(parsed.header.frontier).toBe(1);
     db.close();
@@ -812,11 +780,10 @@ describe("lane view: determinism and overflow", () => {
     // edge exactly once, unchanged from the one-page render.
     expect(union).toEqual(
       new Map<string, number>([
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "override", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "extends", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "narrows", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "grounds", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "extends", auth, infraLane), 1],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "correct(full)", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "use", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "use", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "use", auth, infraLane), 1],
       ]),
     );
     db.close();
@@ -892,15 +859,14 @@ describe("lane view: page partition (ticket 05)", () => {
     // its TAIL's page.
     expect(pages[0]!.forwards).toEqual(
       new Map([
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "override", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "extends", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "narrows", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "correct(full)", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "use", auth, auth), 1],
       ]),
     );
     expect(pages[1]!.forwards).toEqual(
       new Map([
-        [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "grounds", auth, auth), 1],
-        [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "extends", auth, infraLane), 1],
+        [forwardKey(`S${world.s1}/T3`, `S${world.s1}/T2`, "use", auth, auth), 1],
+        [forwardKey(`S${world.s1}/T2`, `S${world.s1}/T5`, "use", auth, infraLane), 1],
       ]),
     );
     expect(pages[2]!.forwards.size).toBe(0);
@@ -909,15 +875,16 @@ describe("lane view: page partition (ticket 05)", () => {
     // in-page target (T3 -> T2 on page 2) and a cross-lane stub carry none.
     expect(pages[0]!.forwardPointers).toEqual(
       new Map([
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "override", auth, auth), "3/3"],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "narrows", auth, auth), "3/3"],
-        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "extends", auth, auth), "2/3"],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T1`, "correct(full)", auth, auth), "3/3"],
+        [forwardKey(`S${world.s1}/T6`, `S${world.s1}/T3`, "use", auth, auth), "2/3"],
       ]),
     );
     expect(pages[1]!.forwardPointers.size).toBe(0);
 
     // Page-local header counts verify against each page's own rendered lines.
-    expect(pages.map((page) => page.header.forward)).toEqual([3, 2, 0]);
+    // [2, 2, 0], not [3, 2, 0]: page 1 lost the pair's second physical row
+    // into a1 at the cutover.
+    expect(pages.map((page) => page.header.forward)).toEqual([2, 2, 0]);
     for (const page of pages) {
       let forwardTotal = 0;
       for (const count of page.forwards.values()) {
@@ -935,30 +902,31 @@ describe("lane view: page partition (ticket 05)", () => {
       parseLanePage(renderLaneAt(db, world.taskA.id, "auth", page, 130).text),
     );
 
-    // Page 2: a6 (page 1, NEWER) -extends-> a3 mirrors onto a3's page; the
-    // in-page a3 -grounds-> a2 edge grows NO mirror line.
-    expect(pages[1]!.skeleton).toContain(`└ extends <- S${world.s1}/T6^ (1/3)`);
-    expect(pages[1]!.skeleton.some((line) => line.includes("grounds <-"))).toBe(false);
+    // Page 2: a6 (page 1, NEWER) -> a3 mirrors onto a3's page; the in-page
+    // a3 -> a2 edge grows NO mirror line. Both edges are `use` after the
+    // cutover, so the "no mirror for the in-page edge" half is stated as the
+    // COUNT of same-lane mirror lines rather than by naming a second word.
+    expect(pages[1]!.skeleton).toContain(`└ use <- S${world.s1}/T6^ (1/3)`);
+    expect(pages[1]!.skeleton.filter((line) => line.includes("<- ")).length).toBe(1);
 
-    // Page 3: both a6 edges into a1 mirror separately (different relations
-    // never fold), weight order — override (2) before narrows (1) — and the
-    // multiset records each folded-out source once with its page pointer.
+    // Page 3: a6's edge into a1 mirrors with its page pointer, and the
+    // multiset records the folded-out source once. (This case used to show
+    // TWO mirror lines for the two physical rows of that pair, ordered by
+    // weight; the cutover left one row, so there is one line.)
     expect(pages[2]!.skeleton).toEqual([
       `S${world.s1}/T1`,
-      `└ override <- S${world.s1}/T6^ (1/3)`,
-      `└ narrows <- S${world.s1}/T6^ (1/3)`,
+      `└ correct(full) <- S${world.s1}/T6^ (1/3)`,
     ]);
     expect(pages[2]!.mirrors).toEqual(
       new Map([
-        [[`S${world.s1}/T6`, "override", "1/3", `S${world.s1}/T1`].join("|"), 1],
-        [[`S${world.s1}/T6`, "narrows", "1/3", `S${world.s1}/T1`].join("|"), 1],
+        [[`S${world.s1}/T6`, "correct(full)", "1/3", `S${world.s1}/T1`].join("|"), 1],
       ]),
     );
 
     // Page 1 keeps the cross-lane `<=` mirrors (fold intact) beside zero
     // same-lane ones — the two mirror kinds coexist without merging.
     expect(pages[0]!.skeleton).toContain(
-      `└ override <= S${world.s2}/T2^(E${world.taskB.id}/#legal), S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
+      `└ correct(full) <= S${world.s2}/T2^(E${world.taskB.id}/#legal), S${world.s1}/T5^(E${world.taskA.id}/#infra)`,
     );
     expect(pages[0]!.skeleton.some((line) => line.includes("<- "))).toBe(false);
 
@@ -971,7 +939,11 @@ describe("lane view: page partition (ticket 05)", () => {
       }
       expect(page.header.mirrors).toBe(mirrorTotal);
     }
-    expect(pages.map((page) => page.header.mirrors)).toEqual([3, 1, 2]);
+    // [2, 1, 1]: page 1 keeps its two cross-lane `<=` mirrors onto a6 (the
+    // third was the second physical row of the b1->a6 pair) and page 3 keeps
+    // one same-lane `<-` mirror onto a1 (it was two, for the two rows of the
+    // a6->a1 pair). Both losses are the cutover's pair fold.
+    expect(pages.map((page) => page.header.mirrors)).toEqual([2, 1, 1]);
     db.close();
   });
 
@@ -1006,13 +978,13 @@ describe("lane view: page partition (ticket 05)", () => {
     // older node, then the cycle edge stubs `^` at the already-rendered root
     // instead of looping.
     expect(parsed.skeleton).toEqual([
-      `S${s1}/T2 override -> T1 grounds -> T2^`,
+      `S${s1}/T2 correct(full) -> T1 use -> T2^`,
     ]);
     const lane = `E${task.id}/#cycle`;
     expect(parsed.forwards).toEqual(
       new Map([
-        [forwardKey(`S${s1}/T2`, `S${s1}/T1`, "override", lane, lane), 1],
-        [forwardKey(`S${s1}/T1`, `S${s1}/T2`, "grounds", lane, lane), 1],
+        [forwardKey(`S${s1}/T2`, `S${s1}/T1`, "correct(full)", lane, lane), 1],
+        [forwardKey(`S${s1}/T1`, `S${s1}/T2`, "use", lane, lane), 1],
       ]),
     );
     db.close();
@@ -1059,10 +1031,10 @@ describe("lane view: page partition (ticket 05)", () => {
 
     // `all out-edges on the tail's page` holds through the pathology.
     expect(parseLanePage(pages[0]!.text).forwards).toEqual(
-      new Map([[forwardKey(`S${s1}/T3`, `S${s1}/T2`, "extends", lane, lane), 1]]),
+      new Map([[forwardKey(`S${s1}/T3`, `S${s1}/T2`, "use", lane, lane), 1]]),
     );
     expect(parsed.forwards).toEqual(
-      new Map([[forwardKey(`S${s1}/T2`, `S${s1}/T1`, "extends", lane, lane), 1]]),
+      new Map([[forwardKey(`S${s1}/T2`, `S${s1}/T1`, "use", lane, lane), 1]]),
     );
     expect(parseLanePage(pages[2]!.text).forwards.size).toBe(0);
     // `every member exactly one page`: the three single-member ranges tile

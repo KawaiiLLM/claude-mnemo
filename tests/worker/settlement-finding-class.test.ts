@@ -138,21 +138,21 @@ function seedClassFixture(db: Database): ClassFixture {
       {
         citing: { kind: "turn", id: far2 },
         cited: { kind: "turn", id: far1 },
-        relation: "extends",
+        relationClass: "use",
         provenance: "asserted",
         ...deriveSideTags(["gamma"]),
       },
       {
         citing: { kind: "turn", id: far4 },
         cited: { kind: "turn", id: far3 },
-        relation: "extends",
+        relationClass: "use",
         provenance: "asserted",
         ...deriveSideTags(["gamma"]),
       },
       {
         citing: { kind: "turn", id: windowTail },
         cited: { kind: "turn", id: near },
-        relation: "extends",
+        relationClass: "use",
         provenance: "asserted",
         ...deriveSideTags(["gamma"]),
       },
@@ -161,7 +161,7 @@ function seedClassFixture(db: Database): ClassFixture {
       {
         citing: { kind: "turn", id: dirtyTurn },
         cited: { kind: "turn", id: windowTail },
-        relation: "consume",
+        relationClass: "use",
         provenance: "asserted",
         ...deriveSideTags([]),
       },

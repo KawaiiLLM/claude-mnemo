@@ -58,7 +58,10 @@ import { LARGE_SPINE_SEGMENT_COUNT, seedLargeEraSpine } from "../support/large-c
 // export a second function of the same name, and the two cut differently.
 import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
 import { type CitationRelation } from "../../src/db/citations";
-import { deriveSideTags, isCitationRelation, writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { fixtureRelationClass } from "../support/lane-edge-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 // `type` accepts a single string as a convenience (ticket 02, spec B5 widened
 // storage to a list; most call sites below predate that and pass one word).
@@ -1472,9 +1475,9 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     // this is the SELECTION-time set; which of them survive a RENDER-time
     // token budget is a separate, later question (decision 5).
     expect(row4.antecedents.map((ref) => ref.address)).toEqual([
-      "-extends,indexes-> T1",
-      "-grounds-> T2",
-      "-grounds,indexes-> T3",
+      "-use-> T1",
+      "-use-> T2",
+      "-use-> T3",
     ]);
     expect(row4.antecedents.map((ref) => ref.turnId)).toEqual(
       [1, 2, 3].map((promptNumber) => rows.find((r) => r.promptNumber === promptNumber)!.id),
@@ -1494,8 +1497,8 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
     const result = selectMilestoneTurns({ windowTurns: rows, laneEdges });
     const row2 = result.kept.find((row) => row.turn.promptNumber === 2)!;
     const row3 = result.kept.find((row) => row.turn.promptNumber === 3)!;
-    expect(row2.antecedents.map((ref) => ref.address)).toEqual(["-grounds-> T1"]);
-    expect(row3.antecedents.map((ref) => ref.address)).toEqual(["-grounds-> T1"]);
+    expect(row2.antecedents.map((ref) => ref.address)).toEqual(["-use-> T1"]);
+    expect(row3.antecedents.map((ref) => ref.address)).toEqual(["-use-> T1"]);
   });
 
   // Edge-atom spec (ticket 11 decision 4): a pair's arrow double-strokes iff
@@ -1515,9 +1518,9 @@ describe("selectMilestoneTurns (lane election, milestone-election spec ticket 03
       result.kept.find((row) => row.turn.promptNumber === promptNumber)!.antecedents.map(
         (ref) => ref.address,
       )[0]!;
-    expect(addressFor(2)).toBe("-extends-> T1");
-    expect(addressFor(3)).toBe("-extends-> T1");
-    expect(addressFor(4)).toBe("=extends=> T1");
+    expect(addressFor(2)).toBe("-use-> T1");
+    expect(addressFor(3)).toBe("-use-> T1");
+    expect(addressFor(4)).toBe("=use=> T1");
   });
 });
 
@@ -1624,25 +1627,43 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     // produced them holds them, side-tag index rows included (that is the
     // half of a relation write `writeMemoryEdges` performs beyond the row
     // itself, and every lane reader depends on it).
-    const insertEdgeRow = db.query<{ id: number }, [number, number, string, string, string, number]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'judged', ?, ?, '', '', ?)
-       RETURNING id`,
-    );
+    // PRE-CUTOVER shape: this corpus IS a multi-row-per-pair database, which
+    // the rebuilt pair-UNIQUE table cannot hold. Restoring the old shape
+    // (idempotent) is what keeps the seeded graph identical to the one the
+    // pure core is measured against.
+    downgradeToPreCutoverShape(db);
+    const insertEdgeRow = (
+      citingId: number,
+      citedId: number,
+      relation: string,
+      tailTag: string,
+      headTag: string,
+      epoch: number,
+    ) => ({
+      id: seedPreCutoverEdge(db, {
+        citingId,
+        citedId,
+        relation,
+        ...fixtureRelationClass({ relation }),
+        provenance: "judged",
+        tailTag,
+        headTag,
+        createdAtEpoch: epoch,
+      }),
+    });
     const insertSideTagRow = db.query<unknown, [number, string, string]>(
       `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
     );
     for (const edge of fixture.edges) {
       // The corpus predates the current vocabulary and carries one `refutes`
-      // row, a word the table's own CHECK no longer admits. `writeMemoryEdges`
-      // used to drop it as `invalid-relation`, so it was never in the graph
-      // this fixture's golden nine was measured on; skipping it keeps the
-      // seeded graph identical to what the write path produced.
-      if (!isCitationRelation(edge.relation)) continue;
+      // row, a word no longer in the fixture translation table. It was never
+      // in the graph this fixture's golden nine was measured on; skipping it
+      // keeps the seeded graph identical to what the write path produced.
+      // (`isCitationRelation` left `src/` with the `relation` column, so the
+      // fixture's own word table is what answers now.)
+      if (fixtureRelationClass({ relation: edge.relation }).relationClass === "") continue;
       const sides = deriveSideTags(edge.tags);
-      const row = insertEdgeRow.get(
+      const row = insertEdgeRow(
         turnDbId(db, session.id, edge.citingId),
         turnDbId(db, session.id, edge.citedId),
         edge.relation,
@@ -2617,7 +2638,7 @@ describe("renderTimeline", () => {
         {
           citing: { kind: "turn", id: turnDbId(db, 1, 6) },
           cited: { kind: "turn", id: turnDbId(db, 1, 1) },
-          relation: "indexes",
+          ...wordEdgeClass("indexes"),
           provenance: "judged",
         },
       ],
@@ -2826,8 +2847,8 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t811Id }, relation: "consume", provenance: "judged" },
-        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t811Id }, ...wordEdgeClass("consume"), provenance: "judged" },
+        { citing: { kind: "turn", id: t821Id }, cited: { kind: "turn", id: t812Id }, ...wordEdgeClass("consume"), provenance: "judged" },
       ],
       t821Epoch,
     );
@@ -2838,7 +2859,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
       [
         `S${session.id} title`,
         "    T821 08-17 18:19 ⚖️ title",
-        "        ↳ -consume-> T811, -consume-> T812",
+        "        ↳ -use-> T811, -use-> T812",
         "    T822 08-17 18:20 ⚖️ title",
       ].join("\n"),
     );
@@ -2875,7 +2896,7 @@ describe("a self edge can no longer reach this renderer at all (v12 D2)", () => 
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "turn", id: turnId },
-          relation: "grounds",
+          ...wordEdgeClass("grounds"),
           provenance: "asserted",
         },
       ],
@@ -2952,12 +2973,15 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     provenance: string,
     epoch: number,
   ): void => {
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, ?, '', '', '', '', ?)`,
-    ).run(citingId, citedId, relation, provenance, epoch);
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, {
+      citingId,
+      citedId,
+      relation,
+      ...fixtureRelationClass({ relation }),
+      provenance,
+      createdAtEpoch: epoch,
+    });
   };
 
   /** The same stock, wordless (main-agent-edges D1). */
@@ -2967,11 +2991,14 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     citedId: number,
     epoch: number,
   ): void => {
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', ?)`,
-    ).run(citingId, citedId, epoch);
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, {
+      citingId,
+      citedId,
+      relation: null,
+      provenance: "text-ref",
+      createdAtEpoch: epoch,
+    });
   };
 
   it("renders a doubly-classified antecedent once, and still names both its relations", () => {
@@ -2991,8 +3018,8 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     );
 
     // One address, one occurrence — not two separate arrow-address entries.
-    expect(output).toContain("-consume,override-> T801");
-    expect(output).not.toContain("-consume-> T801, -override-> T801");
+    expect(output).toContain("-correct(full),use-> T801");
+    expect(output).not.toContain("-use-> T801, -correct(full)-> T801");
     expect(
       output.split("\n").filter((line) => line.trim().startsWith("↳")),
     ).toHaveLength(1);
@@ -3000,7 +3027,7 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     // collapsed pair still names both words on its one line. (This used to be
     // asserted through the `⚑` corrector flag instead — that flag read the
     // `supersedes` word and went with it, lane-model-v12 ticket 03.)
-    expect(output).toContain("↳ -consume,override-> T801");
+    expect(output).toContain("↳ -correct(full),use-> T801");
   });
 
   it("spends the cap and the +N fold on DISTINCT antecedents", () => {
@@ -3011,7 +3038,7 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
       antecedentIds.map((citedId) => ({
         citing: { kind: "turn" as const, id: citerId },
         cited: { kind: "turn" as const, id: citedId },
-        relation: "consume" as const,
+        ...wordEdgeClass("consume"),
         provenance: "asserted" as const,
       })),
       dayEpoch(30),
@@ -3021,39 +3048,43 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     // the write path for the same reason as the test above: main-agent-edges
     // D5 admits one row per pair, so legacy stock is now the only place a
     // second word on one pair comes from, and the fold is what has to survive.
-    legacyEdgeRow(db, citerId, antecedentIds[0]!, "grounds", "asserted", dayEpoch(30));
+    // A DIFFERENT CLASS, not merely a different word: after the cutover the
+    // pre-cutover identity key is (pair, word, sides), and every `use`-class
+    // word reconstructs to the same one, so a second `use` row on this pair
+    // has no form. `verifies` is the second claim now.
+    legacyEdgeRow(db, citerId, antecedentIds[0]!, "verifies", "asserted", dayEpoch(30));
 
     const output = renderTimeline(
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
     );
 
     // Cap is 4 addresses; 5 distinct antecedents fold exactly one. T801 carries
-    // both `consume` and `grounds` (edge-read-surface spec, ticket 01: each
-    // word named once, alphabetical); the rest carry `consume` alone.
+    // BOTH classes (edge-read-surface spec, ticket 01: each named once,
+    // alphabetical); the rest carry `use` alone.
     expect(output).toContain(
-      "↳ -consume,grounds-> T801, -consume-> T802, -consume-> T803, -consume-> T804, +1",
+      "↳ -use,verify-> T801, -use-> T802, -use-> T803, -use-> T804, +1",
     );
   });
 
-  // Edge-read-surface spec, ticket 01: `resolveTurnRowLinks`' own `↳` feed
-  // (unlike the milestone views' `laneEdges`, which only ever carry a
-  // relation word) still counts a pair's BARE row toward `↳` — "an
-  // antecedent is a turn this row was built on, whatever relation the writer
-  // named" (see that function's own doc comment). A pair with NO relation
-  // word at all has nothing to put in parens, so it keeps the plain `T<n>`
-  // form rather than an empty `T<n>()`.
-  it("a bare (unclassified) antecedent keeps the plain T<n> form; a classified one gets its word", () => {
+  // MAIN-AGENT-EDGES D1 INVERTS THIS CASE. `resolveTurnRowLinks`' `↳` feed
+  // used to count a pair's BARE row — "an antecedent is a turn this row was
+  // built on, whatever relation the writer named" — and rendered it as a
+  // plain `T<n>` with nothing in the arrow. The wordless population is
+  // retired: the cutover deleted every stored one, no writer mints another,
+  // and every reader narrows to rows that carry a CLASS. So a bare row left
+  // over in the deferral window contributes NOTHING to `↳`, and the plain
+  // form has no producer left.
+  it("a bare (unclassified) antecedent contributes nothing to ↳; a classified one gets its class", () => {
     const db = createDatabase(":memory:");
     const { sessionId, citerId, antecedentIds } = seedCiter(db, 2);
-    // The wordless row is seeded past the write path: main-agent-edges D1
-    // retired that WRITE (`writeMemoryEdges` refuses `relation: null` by name,
-    // reason `bare-row-retired`), and the stored population it leaves behind is
-    // exactly what this reader still has to render until ticket 01 deletes it.
+    // The wordless row is seeded on the PRE-CUTOVER shape: no writer mints one
+    // and the rebuilt table has no form for it, so a deferral-window database
+    // is the only place it exists — and the reader must skip it there.
     legacyBareRow(db, citerId, antecedentIds[0]!, dayEpoch(30));
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[1]! }, relation: "extends", provenance: "asserted" },
+        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[1]! }, ...wordEdgeClass("extends"), provenance: "asserted" },
       ],
       dayEpoch(30),
     );
@@ -3062,7 +3093,8 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
     );
 
-    expect(output).toContain("↳ -> T801, -extends-> T802");
+    expect(output).toContain("↳ -use-> T802");
+    expect(output).not.toContain("T801");
   });
 });
 
@@ -3384,7 +3416,7 @@ function citeTurns(
     cites.map(([promptNumber, relation]) => ({
       citing: { kind: "turn" as const, id: citingId },
       cited: { kind: "turn" as const, id: turnDbId(db, sessionId, promptNumber) },
-      relation,
+      ...wordEdgeClass(relation),
       provenance: "judged" as const,
     })),
     ERA_BASE,
@@ -3544,7 +3576,12 @@ function seedDesignArc(db: Database) {
   const session = seedArcSession(db, rows);
   citeTurns(db, session.id, 3, [[2, "verifies"]]);
   citeTurns(db, session.id, 5, [
-    [3, "supersedes"],
+    // The `[3, "supersedes"]` cite this fixture used to carry is DROPPED:
+    // `supersedes` was a frozen-legacy word that mapped to NO class, so the
+    // row it produced reached no graph even before the cutover — and after it
+    // there is no column for a classless row at all. Re-pointing it at
+    // `override` would ADD a rendered antecedent the frozen shape below never
+    // had.
     [2, "verifies"],
   ]);
   return session;
@@ -3597,7 +3634,7 @@ describe("unified row renderer — row formats (spec §D)", () => {
     seedDesignArc(db);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).toContain("            ↳ -verifies-> T2");
+    expect(out).toContain("            ↳ -verify-> T2");
     // ↳ rows are title-only: the antecedent's OWN desc never renders a second
     // time under its citer's row — T2's desc appears once, under T2's own row.
     expect(out).not.toMatch(/↳[^\n]*T2[^\n]*\n\s+Sampled 200 cards/);
@@ -4088,7 +4125,7 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     const pulledLine = block.find((line) => PULLED_ROW_RE.test(line))!;
     expect([...pulledLine.matchAll(/T\d+/g)]).toHaveLength(MILESTONE_UNIT_PULLED_CAP);
     expect(block.join("\n")).toContain(
-      "↳ -verifies-> T2, -verifies-> T3, -verifies-> T4, -verifies-> T5, +2",
+      "↳ -verify-> T2, -verify-> T3, -verify-> T4, -verify-> T5, +2",
     );
   });
 
@@ -4472,10 +4509,10 @@ describe("unified row renderer — frozen shapes", () => {
       '        T1 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"  ✏️slicing.md',
       '        T2 07-25 🔵 12-14% error · "先量误差"',
       '        T3 07-25 ⚖️ Volume anchoring · "按卷号锚"',
-      "            ↳ -verifies-> T2",
+      "            ↳ -verify-> T2",
       '        T4 07-25 ✅ Wired the loader · "接到 loader"',
       '        T5 07-25 ⚖️ Cursor slicing · "没有卷数怎么办"',
-      "            ↳ -verifies-> T2",
+      "            ↳ -verify-> T2",
       '        🏁 T6 07-25 🟣 0.9.0 released · "发布"  ✏️package.json,plugin.json',
     ]);
   });
@@ -4529,7 +4566,7 @@ describe("unified row renderer — frozen shapes", () => {
       '        T2 07-25 🔵 Worker A: cursor slicing wins on recall · "⟨notify⟩"',
       '        T3 07-25 🔵 Worker B: inconclusive · "⟨notify⟩"',
       '        T4 07-25 ⚖️ Picked cursor slicing on the survey evidence · "⟨notify⟩"',
-      "            ↳ -verifies-> T2",
+      "            ↳ -verify-> T2",
     ]);
   });
 
@@ -4612,27 +4649,41 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
       }),
       turn({
         promptNumber: 4,
+        type: "change",
+        userPrompt: "噪音c",
+        title: "day0 noise c",
+        createdAtEpoch: ERA_BASE + 180,
+      }),
+      turn({
+        promptNumber: 5,
         type: "decision",
         userPrompt: "第二天决定",
         title: "day1 kept",
         createdAtEpoch: ERA_BASE + day,
       }),
       turn({
-        promptNumber: 5,
+        promptNumber: 6,
         type: "change",
         userPrompt: "噪音2",
         title: "day1 noise a",
         createdAtEpoch: ERA_BASE + day + 60,
       }),
       turn({
-        promptNumber: 6,
+        promptNumber: 7,
         type: "change",
         userPrompt: "噪音2b",
         title: "day1 noise b",
         createdAtEpoch: ERA_BASE + day + 120,
       }),
       turn({
-        promptNumber: 7,
+        promptNumber: 8,
+        type: "change",
+        userPrompt: "噪音2c",
+        title: "day1 noise c",
+        createdAtEpoch: ERA_BASE + day + 180,
+      }),
+      turn({
+        promptNumber: 9,
         type: "decision",
         userPrompt: "收尾",
         title: "day2 anchor",
@@ -4643,11 +4694,16 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
     // writer (tier ①, guaranteed seats) — the same shape the old grade-driven
     // fixture wanted (T2/T3 hidden under day0, T5/T6 hidden under day1),
     // reproduced through the election plus a render-time token budget.
-    for (const citingPrompt of [1, 4, 7]) {
+    for (const citingPrompt of [1, 5, 9]) {
       citeTurns(db, session.id, citingPrompt, [[2, "indexes"]]);
     }
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    // Measured against this fixture: budget 228 (staged-settlement ticket 11
+    // Measured against this fixture: budget 228 (main-agent-edges ticket 01
+    // RE-MEASURED — the `↳` arrow now carries a CLASS TOKEN (`-use->`) where
+    // it carried a storage word (`-indexes->`), so every antecedent line got
+    // cheaper and the old 7-turn fixture stopped producing two folds at ANY
+    // budget; one noise turn was added to each of day0 and day1 to restore the
+    // shape, and 228 still sits inside the window. Earlier: staged-settlement ticket 11
     // re-measured, USER RULING S15069/T2016 — unbracketed row addresses cost
     // a few tokens less each; was 232 under whitespace-runs-price-as-one-
     // token ticket 14, 237 under honest-token-pricing ticket 04, 665 before

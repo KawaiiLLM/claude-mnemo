@@ -6,166 +6,92 @@ import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { checkLanes } from "../../src/shared/lane-checker";
-import { electMilestones } from "../../src/shared/milestone-election";
 import {
   displayEdgeRelation,
   edgeRelationClass,
-  INTERIM_LEGACY_RELATION,
-  interimLegacyRelation,
-  LEGACY_RELATION_CLASS,
-  LEGACY_RELATIONS_BY_CLASS,
+  formatRelationClass,
   RELATION_CLASSES,
   RELATION_COVERAGES,
+  relationClassBearingSql,
 } from "../../src/shared/relation-class";
-import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 
 /**
- * relation-vocabulary-v13 ticket 02 — the storage half.
+ * `shared/relation-class.ts` after the main-agent-edges cutover (ticket 01).
  *
- * The vocabulary change is additive by construction, and this file is where
- * that construction is pinned:
+ * WHAT LEFT, AND WHY THIS FILE SHRANK. Three whole blocks went with the
+ * `relation` column:
  *
- *   - `memory_edges.relation` keeps its seven-word CHECK, so ticket 03 can
- *     migrate the existing corpus WITHOUT rewriting it and rollback stays a
- *     read-side switch;
- *   - `relation_class` / `relation_coverage` are the two added columns, and the
- *     coverage bit is a STORED guarantee (a table CHECK), not a convention the
- *     write path happens to honour;
- *   - the INTERIM equivalence is what keeps a three-class edge visible to every
- *     reader still keyed on the old words, and ticket 05a replaces exactly that
- *     table.
+ *   - "the mapping tables are total and mutually consistent" — it walked
+ *     `EDGE_RELATIONS` against `LEGACY_RELATION_CLASS` /
+ *     `LEGACY_RELATIONS_BY_CLASS`. All three constants are deleted; the seven
+ *     words survive only as a frozen migration literal in `db/schema.ts`, and
+ *     the sweep that consumes it is pinned by
+ *     `tests/db/schema.relation-class-backfill.test.ts`.
+ *   - the LEGACY arms of `edgeRelationClass` / `displayEdgeRelation` — a row
+ *     with no class no longer resolves from a word, it resolves to `null`.
+ *   - "a row written under the RETIRED vocabulary is unchanged for every
+ *     reader" — every reader now takes the class columns, and no stored row
+ *     carries a word to be unchanged about.
+ *
+ * WHAT REMAINS is the module as it now is: three classes, the coverage bit one
+ * of them carries, the ONE accessor and its single surviving `null` arm (the
+ * deferral window, where D9's fence has postponed the migration and a
+ * pre-cutover wordless row still stands), and the storage guarantee the table
+ * itself makes.
  */
 
-describe("the mapping tables are total and mutually consistent", () => {
-  test("every storage word maps to a class, and every class back to at least one word", () => {
-    for (const relation of EDGE_RELATIONS) {
-      const mapped = LEGACY_RELATION_CLASS[relation];
-      expect(RELATION_CLASSES, relation).toContain(mapped.relationClass);
-      expect(LEGACY_RELATIONS_BY_CLASS[mapped.relationClass], relation).toContain(relation);
-    }
+describe("the class vocabulary is three closed values with one coverage bit", () => {
+  test("the classes and coverages are exactly the spec's", () => {
+    expect([...RELATION_CLASSES]).toEqual(["correct", "verify", "use"]);
+    expect([...RELATION_COVERAGES]).toEqual(["full", "partial"]);
+  });
+
+  test("the token spelling is one function, used by every surface", () => {
+    expect(formatRelationClass("correct", "full")).toBe("correct(full)");
+    expect(formatRelationClass("correct", "partial")).toBe("correct(partial)");
+    expect(formatRelationClass("verify", "")).toBe("verify");
+    expect(formatRelationClass("use", "")).toBe("use");
+  });
+
+  test("the SQL form names the same three values and nothing else", () => {
+    const sql = relationClassBearingSql("me");
     for (const relationClass of RELATION_CLASSES) {
-      expect(LEGACY_RELATIONS_BY_CLASS[relationClass].length).toBeGreaterThan(0);
+      expect(sql, relationClass).toContain(`'${relationClass}'`);
     }
-    // The v13 spec's own absorption table, stated once here so a silent
-    // re-pointing of any word fails loudly.
-    expect([...LEGACY_RELATIONS_BY_CLASS.correct].sort()).toEqual(["narrows", "override"]);
-    expect([...LEGACY_RELATIONS_BY_CLASS.verify]).toEqual(["verifies"]);
-    expect([...LEGACY_RELATIONS_BY_CLASS.use].sort()).toEqual([
-      "consume",
-      "extends",
-      "grounds",
-      "indexes",
-    ]);
-  });
-
-  test("the coverage bit exists exactly where the class is `correct`", () => {
-    for (const relation of EDGE_RELATIONS) {
-      const { relationClass, relationCoverage } = LEGACY_RELATION_CLASS[relation];
-      expect(relationCoverage !== "", relation).toBe(relationClass === "correct");
-      if (relationCoverage !== "") {
-        expect(RELATION_COVERAGES, relation).toContain(relationCoverage);
-      }
-    }
-  });
-
-  // THE INTERIM TABLE (relation-vocabulary-v13 ticket 05a replaces it, and
-  // nothing else). It is the equivalence that lets the frozen election weights,
-  // `db/edge-signals.ts` and the lane checker's coupling groups keep reading a
-  // three-class edge with no change at their own seams.
-  test("the INTERIM equivalence is (correct/full≈override, correct/partial≈narrows, verify≈verifies, use≈extends)", () => {
-    expect(
-      INTERIM_LEGACY_RELATION.map((row) => [
-        row.relationClass,
-        row.relationCoverage,
-        row.legacy,
-      ]),
-    ).toEqual([
-      ["correct", "full", "override"],
-      ["correct", "partial", "narrows"],
-      ["verify", "", "verifies"],
-      ["use", "", "extends"],
-    ]);
-    // Every legal (class, coverage) write has exactly one interim destination,
-    // and each destination is a real storage word.
-    for (const relationClass of RELATION_CLASSES) {
-      const coverages = relationClass === "correct" ? RELATION_COVERAGES : ([""] as const);
-      for (const coverage of coverages) {
-        const legacy = interimLegacyRelation(relationClass, coverage);
-        expect(EDGE_RELATIONS, `${relationClass}/${coverage}`).toContain(legacy);
-      }
-    }
-    // The interim word ROUND-TRIPS back to the class it came from — without
-    // that, a row written today would read as a different class tomorrow.
-    for (const row of INTERIM_LEGACY_RELATION) {
-      expect(LEGACY_RELATION_CLASS[row.legacy]).toEqual({
-        relationClass: row.relationClass,
-        relationCoverage: row.relationCoverage,
-      });
-    }
-  });
-
-  test("interimLegacyRelation throws rather than guessing at an illegal pairing", () => {
-    expect(() => interimLegacyRelation("use", "full")).toThrow();
-    expect(() => interimLegacyRelation("correct", "")).toThrow();
+    expect(sql).toContain("me.relation_class IN");
   });
 });
 
-describe("edgeRelationClass is the ONE accessor, for a legacy row and a classified one alike", () => {
+describe("edgeRelationClass is the ONE accessor, and its only `null` is the deferral window", () => {
   test("a classified row answers from its own columns", () => {
-    expect(
-      edgeRelationClass({ relation: "extends", relationClass: "correct", relationCoverage: "full" }),
-    ).toEqual({ relationClass: "correct", relationCoverage: "full" });
+    expect(edgeRelationClass({ relationClass: "correct", relationCoverage: "full" })).toEqual({
+      relationClass: "correct",
+      relationCoverage: "full",
+    });
+    expect(edgeRelationClass({ relationClass: "use", relationCoverage: "" })).toEqual({
+      relationClass: "use",
+      relationCoverage: "",
+    });
   });
 
-  test("an UNCLASSIFIED legacy row answers from its stored word — one fixture per word", () => {
-    for (const relation of EDGE_RELATIONS) {
-      expect(
-        edgeRelationClass({ relation, relationClass: "", relationCoverage: "" }),
-        relation,
-      ).toEqual(LEGACY_RELATION_CLASS[relation]);
-    }
+  test("a row carrying NO class has none — the pre-cutover wordless row, in the deferral window", () => {
+    expect(edgeRelationClass({ relationClass: "", relationCoverage: "" })).toBeNull();
+    expect(displayEdgeRelation({ relationClass: "", relationCoverage: "" })).toBe("");
   });
 
-  test("a BARE row and an out-of-vocabulary word have no class at all", () => {
-    expect(edgeRelationClass({ relation: null, relationClass: "", relationCoverage: "" })).toBeNull();
-    expect(
-      edgeRelationClass({ relation: "supersedes", relationClass: "", relationCoverage: "" }),
-    ).toBeNull();
-  });
-
-  // The rendering asymmetry is deliberate, and it is what keeps ticket 03's
-  // migration honest: a legacy row renders EXACTLY as it did before this
-  // release until that ticket classifies it, so nothing about the existing
-  // corpus's rendering moves here.
-  test("a legacy row renders its own word, unchanged; a classified row renders its class", () => {
-    for (const relation of EDGE_RELATIONS) {
-      expect(
-        displayEdgeRelation({ relation, relationClass: "", relationCoverage: "" }),
-        relation,
-      ).toBe(relation);
-    }
-    expect(
-      displayEdgeRelation({
-        relation: "override",
-        relationClass: "correct",
-        relationCoverage: "full",
-      }),
-    ).toBe("correct(full)");
-    expect(
-      displayEdgeRelation({
-        relation: "narrows",
-        relationClass: "correct",
-        relationCoverage: "partial",
-      }),
-    ).toBe("correct(partial)");
-    expect(
-      displayEdgeRelation({ relation: "extends", relationClass: "use", relationCoverage: "" }),
-    ).toBe("use");
+  test("a classified row renders its class token", () => {
+    expect(displayEdgeRelation({ relationClass: "correct", relationCoverage: "full" })).toBe(
+      "correct(full)",
+    );
+    expect(displayEdgeRelation({ relationClass: "correct", relationCoverage: "partial" })).toBe(
+      "correct(partial)",
+    );
+    expect(displayEdgeRelation({ relationClass: "verify", relationCoverage: "" })).toBe("verify");
+    expect(displayEdgeRelation({ relationClass: "use", relationCoverage: "" })).toBe("use");
   });
 });
 
-describe("the two added columns are a STORED guarantee, not a write-path convention", () => {
+describe("the two class columns are a STORED guarantee, not a write-path convention", () => {
   let db: Database;
   let sessionId: number;
   let citing: number;
@@ -196,12 +122,12 @@ describe("the two added columns are a STORED guarantee, not a write-path convent
     db.close();
   });
 
-  test("the columns exist beside `relation`, which keeps its own seven-word CHECK", () => {
+  test("the class columns are there and the seven-word column is NOT", () => {
     const columns = db
       .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
       .all()
       .map((row) => row.name);
-    expect(columns).toContain("relation");
+    expect(columns).not.toContain("relation");
     expect(columns).toContain("relation_class");
     expect(columns).toContain("relation_coverage");
 
@@ -210,75 +136,67 @@ describe("the two added columns are a STORED guarantee, not a write-path convent
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
       )
       .get()!.sql;
-    // UNCHANGED, and that is the point: ticket 03's migration writes only the
-    // two new columns, so an existing row keeps its original word and rollback
-    // is a read-side switch rather than a data restore.
-    for (const relation of EDGE_RELATIONS) {
-      expect(ddl, relation).toContain(`'${relation}'`);
+    for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies"]) {
+      expect(ddl, word).not.toContain(`'${word}'`);
     }
-    for (const relationClass of RELATION_CLASSES) {
-      expect(ddl, relationClass).not.toContain(`relation IN`.concat(` ('${relationClass}'`));
-    }
+    expect(ddl).toContain("relation_class TEXT NOT NULL CHECK (relation_class IN ('correct', 'verify', 'use'))");
   });
 
-  test("the bare-pair uniqueness index and the identity key still hold", () => {
+  test("the identity key is the PAIR, and the bare-pair index is gone with the bare rows", () => {
     const indexes = db
       .query<{ name: string; sql: string | null }, []>(
         "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memory_edges'",
       )
       .all();
-    const barePair = indexes.find((row) => row.name === "idx_memory_edges_bare_pair");
-    expect(barePair?.sql).toContain("WHERE relation IS NULL");
-    // Neither new column joins the identity key: the class is a FUNCTION of the
-    // stored word for a legacy row and is filled FROM it for a new one, so
-    // adding it to the key could only split one claim into two rows.
+    expect(indexes.map((row) => row.name)).not.toContain("idx_memory_edges_bare_pair");
     const ddl = db
       .query<{ sql: string }, []>(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
       )
       .get()!.sql;
-    expect(ddl).toContain(
-      "UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tail_tag, head_tag)",
-    );
+    // Neither class column joins the key: one pair is one row, and its class
+    // is what a promotion REWRITES in place rather than a second row's name.
+    expect(ddl).toContain("UNIQUE (citing_kind, citing_id, cited_kind, cited_id)");
     expect(ddl).not.toContain("relation_class, tail_tag");
   });
 
-  test("the table itself refuses a `correct` with no coverage and a `use` with one", () => {
-    const raw = db.query<unknown, [string, string, string]>(
+  test("the table itself refuses a `correct` with no coverage, a `use` with one, and a nonsense class", () => {
+    const raw = db.query<unknown, [string, string]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
           tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ${citing}, 'turn', ${cited}, ?, 'judged', '', '', ?, ?, 100)`,
+       VALUES ('turn', ${citing}, 'turn', ${cited}, 'judged', '', '', ?, ?, 100)`,
     );
-    expect(() => raw.run("override", "correct", "")).toThrow();
-    expect(() => raw.run("extends", "use", "full")).toThrow();
-    expect(() => raw.run("extends", "nonsense", "")).toThrow();
-    // …and the legal shapes go through.
-    raw.run("override", "correct", "full");
-    raw.run("extends", "use", "");
+    expect(() => raw.run("correct", "")).toThrow();
+    expect(() => raw.run("use", "full")).toThrow();
+    expect(() => raw.run("nonsense", "")).toThrow();
+    expect(() => raw.run("", "")).toThrow();
+    // …and a legal shape goes through. ONE of them: the pair is UNIQUE now, so
+    // the second legal insert this case used to make is itself a refusal.
+    raw.run("correct", "full");
+    expect(() => raw.run("use", "")).toThrow();
   });
 
-  test("a write that states no class stores `''` in both — the pre-v13 row shape", () => {
+  test("a write states its class, and the stored row answers from it", () => {
     writeMemoryEdges(
       db,
       [
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "grounds",
+          relationClass: "use",
           provenance: "judged",
         },
       ],
       200,
     );
     const [edge] = getOutgoingEdges(db, { kind: "turn", id: citing });
-    expect(edge?.relationClass).toBe("");
+    expect(edge?.relationClass).toBe("use");
     expect(edge?.relationCoverage).toBe("");
-    // …and it still answers the class question, through the one accessor.
     expect(edgeRelationClass(edge!)).toEqual({ relationClass: "use", relationCoverage: "" });
   });
 
-  test("attachTurnRelations fills both columns and the interim word together", () => {
+  test("attachTurnRelations fills both columns", () => {
     const result = attachTurnRelations(
       db,
       citing,
@@ -294,93 +212,8 @@ describe("the two added columns are a STORED guarantee, not a write-path convent
     expect(result.rejected).toEqual([]);
     expect(result.written).toHaveLength(1);
     expect(result.written[0]).toMatchObject({
-      relation: "override",
       relationClass: "correct",
       relationCoverage: "full",
     });
-  });
-});
-
-describe("a row written under the RETIRED vocabulary is unchanged for every reader", () => {
-  /** One legacy row per old word, plus the two turns it joins, in one lane. */
-  function legacyGraph(relation: string) {
-    return {
-      turns: [
-        { id: 1, type: ["design"], laneTags: ["lane-a"] },
-        { id: 2, type: ["implement"], laneTags: ["lane-a"] },
-      ],
-      edges: [
-        {
-          citingId: 2,
-          citedId: 1,
-          relation,
-          tailTag: "lane-a",
-          headTag: "lane-a",
-        },
-      ],
-    };
-  }
-
-  test("the lane checker admits every old word to its graph, with no out-of-vocabulary finding", () => {
-    for (const relation of EDGE_RELATIONS) {
-      const { turns, edges } = legacyGraph(relation);
-      const result = checkLanes(turns as never, edges as never);
-      expect(result.vocabularyConformance.outOfVocabularyEdges.count, relation).toBe(0);
-    }
-  });
-
-  // main-agent-edges ticket 02: the election has no IN-degree term any more —
-  // its four terms are out-degree, the outgoing class sum, recency and type.
-  // What a legacy word still has to do is RESOLVE to its class, which is what
-  // the class sum prices; the assertion moves to that.
-  test("election prices every old word through its CLASS — one fixture per word", () => {
-    const expected: Record<string, number> = {
-      override: 2, // correct(full)
-      narrows: 1.5, // correct(partial)
-      verifies: 1, // verify
-      extends: 0.5,
-      consume: 0.5,
-      grounds: 0.5,
-      indexes: 0.5,
-    };
-    for (const relation of EDGE_RELATIONS) {
-      const { turns, edges } = legacyGraph(relation);
-      const elected = electMilestones(turns as never, edges as never);
-      const citer = elected.candidates.find((entry) => entry.id === 2);
-      expect(citer, relation).toBeTruthy();
-      expect(citer!.outDegree, relation).toBe(1);
-      expect(citer!.classScore, relation).toBe(expected[relation]!);
-    }
-  });
-
-  // THE INTERIM EQUIVALENCE, AT THE ELECTION SEAM. A NEW three-class edge
-  // scores exactly as the old-vocabulary edge it replaces — which since
-  // main-agent-edges ticket 02 is true by CONSTRUCTION rather than by a frozen
-  // word table: both go through `edgeRelationClass`, so the only way they could
-  // differ is if the legacy bridge mapped the word to the wrong class.
-  test("INTERIM: a new-class edge scores identically to its old-word equivalent", () => {
-    for (const row of INTERIM_LEGACY_RELATION) {
-      const legacy = legacyGraph(row.legacy);
-      // What a v13 write actually stores: the interim word in `relation`, plus
-      // the class and bit in their own columns.
-      const classified = {
-        turns: legacy.turns,
-        edges: [
-          {
-            ...legacy.edges[0]!,
-            relationClass: row.relationClass,
-            relationCoverage: row.relationCoverage,
-          },
-        ],
-      };
-      const before = electMilestones(legacy.turns as never, legacy.edges as never);
-      const after = electMilestones(classified.turns as never, classified.edges as never);
-      expect(
-        after.candidates.map((entry) => [entry.id, entry.score, entry.classScore, entry.outDegree]),
-        `${row.relationClass}/${row.relationCoverage}`,
-      ).toEqual(
-        before.candidates.map((entry) => [entry.id, entry.score, entry.classScore, entry.outDegree]),
-      );
-    }
   });
 });

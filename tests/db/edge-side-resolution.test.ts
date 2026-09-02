@@ -13,6 +13,7 @@ import { insertLane } from "../../src/db/lanes";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { downgradeTurnsTagsToPreCutover } from "../support/pre-cutover-edge-shape";
 
 /**
  * THE FIVE OUTCOMES (main-agent-edges spec D2). A lane side is an
@@ -201,13 +202,25 @@ describe("loadEndpointLaneFacts — the one shared load", () => {
     expect(loadEndpointLaneFacts(db, [99_999]).get(99_999)).toEqual({ segmentId: null, lanes: [] });
   });
 
-  test("malformed stored tags read as no tags — a read path never throws on the stock the cutover has not normalised", () => {
+  // INVERTED by main-agent-edges ticket 01 (spec D9 transform 1, R9-8). This
+  // read used to COERCE a malformed value to "no tags". The cutover normalised
+  // every stored one away and put a trigger over the column, so meeting one is
+  // now a DEFECT to surface rather than a state to tolerate: `readTurnTags` is
+  // the ONE parser and it throws `MalformedTurnTagsError` by name.
+  test("malformed stored tags throw by name — the one parser never coerces", () => {
     const segment = createSegment(db, { title: "Task", nowEpoch: 10 });
     insertLane(db, segment.id, "alpha", 10);
     const turnId = addTurn(1, []);
     addSegmentMembers(db, segment.id, [turnId], 10);
+    // The malformed value exists only on the PRE-CUTOVER shape — transform 1
+    // normalised every one away and the `turns` trigger refuses a new one —
+    // which is exactly the stock this read path must not throw on while D9's
+    // fence still defers the migration.
+    downgradeTurnsTagsToPreCutover(db);
     db.query("UPDATE turns SET tags = ? WHERE id = ?").run("{not json", turnId);
-    expect(loadEndpointLaneFacts(db, [turnId]).get(turnId)!.lanes).toEqual([]);
+    expect(() => loadEndpointLaneFacts(db, [turnId])).toThrow(
+      /turns\.tags is not a JSON array of strings/,
+    );
   });
 
   test("an empty id list costs no query at all", () => {

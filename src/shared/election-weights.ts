@@ -117,7 +117,6 @@ export function electionEdgeClass(
   edge: ElectionEdgeRelation,
 ): { relationClass: string; relationCoverage: RelationCoverageValue } | null {
   return edgeRelationClass({
-    relation: edge.relation ?? null,
     relationClass: edge.relationClass ?? NO_RELATION_CLASS,
     relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
   });

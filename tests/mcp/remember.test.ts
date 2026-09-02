@@ -17,6 +17,8 @@ import { sessionWriterId } from "../../src/db/write-gate";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
 import { rememberTool } from "../../src/mcp/remember";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { displayEdgeRelation } from "../../src/shared/relation-class";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]!.text;
@@ -552,7 +554,7 @@ describe("remember tool (ticket 02)", () => {
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["old-name"]),
           },
@@ -895,7 +897,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: t2 },
               cited: { kind: "turn", id: t1 },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               ...deriveSideTags(["child-lane"]),
             },
@@ -1445,7 +1447,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: t2 },
               cited: { kind: "turn", id: t1 },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               ...deriveSideTags(["write-gate"]),
             },
@@ -1643,7 +1645,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: t2 },
               cited: { kind: "turn", id: t1 },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               ...deriveSideTags(["child-lane"]),
             },
@@ -1740,7 +1742,7 @@ describe("remember tool (ticket 02)", () => {
               {
                 citing: { kind: "turn", id: t1 },
                 cited: { kind: "turn", id: t2 },
-                relation: "extends",
+                ...wordEdgeClass("extends"),
                 provenance: "asserted",
                 tailTag: "alpha",
                 headTag: "alpha",
@@ -1783,7 +1785,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: t1 },
               cited: { kind: "turn", id: t2 },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               tailTag: "alpha",
               // headTag omitted — stored as the unsettled sentinel.
@@ -1821,7 +1823,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: a },
               cited: { kind: "turn", id: b },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               tailTag: "alpha",
               headTag: "alpha",
@@ -1837,7 +1839,7 @@ describe("remember tool (ticket 02)", () => {
 
         const outgoing = getOutgoingEdges(db, { kind: "turn", id: a });
         expect(outgoing).toHaveLength(1);
-        expect(outgoing[0]?.relation).toBe("extends");
+        expect(displayEdgeRelation(outgoing[0]!)).toBe("use");
         expect(outgoing[0]?.provenance).toBe("asserted");
         expect(outgoing[0]?.cited).toEqual({ kind: "turn", id: b });
       });
@@ -1857,7 +1859,7 @@ describe("remember tool (ticket 02)", () => {
             {
               citing: { kind: "turn", id: a },
               cited: { kind: "turn", id: b },
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               provenance: "asserted",
               tailTag: "alpha",
               headTag: "alpha",

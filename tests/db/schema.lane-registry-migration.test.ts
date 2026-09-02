@@ -18,6 +18,7 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { downgradeTurnsTagsToPreCutover } from "../support/pre-cutover-edge-shape";
 import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
@@ -574,7 +575,16 @@ describe("lane registry migration (ticket 04, spec D6/M3-M4)", () => {
     runLaneRegistryMigration(db, nowEpoch);
   }
 
+  /**
+   * M3 was written against a `turns.tags` that could be NULL or malformed —
+   * the two states it reports and skips. The main-agent-edges cutover
+   * normalised both away and put a trigger over the column, so these fixtures
+   * cannot be seeded on the post-cutover shape at all; the turns table moves
+   * back to the shape THIS migration actually ran against, exactly as
+   * `downgradeToPreV12EdgeShape` moves the edge table back.
+   */
   function seedTurn(promptNumber: number, tags?: string[] | null): number {
+    downgradeTurnsTagsToPreCutover(db);
     return db
       .query<{ id: number }, [number, number, string | null, number]>(
         `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)

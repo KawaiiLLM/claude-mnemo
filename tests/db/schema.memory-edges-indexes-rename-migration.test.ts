@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -73,7 +77,8 @@ function storedTableSql(db: Database): string {
   return (
     db
       .query<{ sql: string | null }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
       )
       .get()?.sql ?? ""
   );
@@ -96,7 +101,7 @@ function allEdges(db: Database): EdgeRow[] {
          citing_kind AS citingKind, citing_id AS citingId,
          cited_kind AS citedKind, cited_id AS citedId,
          relation, provenance, created_at_epoch AS createdAtEpoch
-       FROM memory_edges ORDER BY citing_id, cited_id, relation`,
+       FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY citing_id, cited_id, relation`,
     )
     .all();
 }
@@ -108,6 +113,16 @@ function relationsOf(db: Database, citingId: number): string[] {
     .sort();
 }
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01)", () => {
   let db: Database;
 
@@ -174,19 +189,11 @@ describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01
       expect(edge.relation).not.toBe("collects");
     }
 
-    // The new word inserts cleanly; the retired one is now refused. Explicit
-    // column list (rubric-v10 ticket 01): the post-migration table carries
-    // `id`/`tags` too, which default cleanly when omitted from the list.
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 90, 'turn', 91, 'indexes', 'asserted', 50)`,
-    );
-    expect(() =>
-      db.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 92, 'turn', 93, 'collects', 'asserted', 55)`,
-      ),
-    ).toThrow();
+    // The live INSERT probe ("the new word inserts cleanly, the retired one is
+    // refused") is DELETED: after the cutover the live table has no `relation`
+    // column at all, so both halves would fail to prepare rather than exercise
+    // a CHECK. The archived CHECK asserted at the top of this test is the same
+    // fact, read where it still exists.
   });
 
   /**
@@ -201,25 +208,33 @@ describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01
    * grounded-on merge, which genuinely drops one row per collision.
    */
   test("zero row loss: renaming collects to indexes cannot collide, so no row is dropped", () => {
-    const before = allEdges(db).length;
+    // `before` is counted on the LIVE table (the archive does not exist yet);
+    // `after` on the archive, which is the same table one migration later.
+    const before = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges")
+      .get()!.n;
     initializeSchema(db);
     expect(allEdges(db).length).toBe(before);
   });
 
   test("the cited-side and bare-pair indexes survive the rebuild attached to the NEW table", () => {
     initializeSchema(db);
-    const citedIndex = db
-      .query<{ tblName: string }, []>(
-        "SELECT tbl_name AS tblName FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_edges_cited'",
+    // Both indexes key on the `relation` column, so the cutover's own rebuild
+    // drops them and puts its side index in their place. What this case is
+    // about — that THIS migration's rebuild reattached them rather than
+    // leaving them on the temporary table — is read from the DDL archive, the
+    // sqlite_master rows as the chain handed them over.
+    const archived = db
+      .query<{ name: string; tblName: string }, []>(
+        `SELECT name, tbl_name AS tblName FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+          WHERE kind = 'index' AND name IN ('idx_memory_edges_cited', 'idx_memory_edges_bare_pair')
+          ORDER BY name`,
       )
-      .get();
-    expect(citedIndex?.tblName).toBe("memory_edges");
-    const bareIndex = db
-      .query<{ tblName: string }, []>(
-        "SELECT tbl_name AS tblName FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_edges_bare_pair'",
-      )
-      .get();
-    expect(bareIndex?.tblName).toBe("memory_edges");
+      .all();
+    expect(archived).toEqual([
+      { name: "idx_memory_edges_bare_pair", tblName: "memory_edges" },
+      { name: "idx_memory_edges_cited", tblName: "memory_edges" },
+    ]);
   });
 
   test("idempotent: a second initializeSchema is a byte-for-byte no-op", () => {
@@ -244,19 +259,29 @@ describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01
     ).toBe(0);
   });
 
-  test("a fresh database is born already speaking indexes, never collects", () => {
+  test("a fresh database is born already speaking indexes, never collects — and past the word column entirely", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
 
+    // A fresh database is still BORN through the word chain (the fresh-install
+    // DDL carries the seven-word CHECK) and the cutover then rebuilds it in
+    // the same open, so the archived DDL is where "born speaking indexes"
+    // reads — and the live table is where the word column's absence does.
     expect(storedTableSql(fresh)).toContain("'indexes'");
     expect(storedTableSql(fresh)).not.toContain("'collects'");
+    const liveSql = fresh
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()?.sql ?? "";
+    expect(liveSql).not.toContain("relation TEXT");
     fresh.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 1, 'turn', 2, 'indexes', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 100)`,
     );
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
          VALUES ('turn', 3, 'turn', 4, 'collects', 'asserted', 100)`,
       ),
     ).toThrow();
@@ -281,10 +306,18 @@ describe("memory_edges indexes rename migration (indexes-rescope spec, ticket 01
     expect(
       legacy
         .query<{ relation: string | null }, [number]>(
-          "SELECT relation FROM memory_edges WHERE citing_id = ?",
+          `SELECT relation FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} WHERE citing_id = ?`,
         )
         .get(1)?.relation,
     ).toBe("consume");
+    // …and the cutover carried that word to its class on the live table.
+    expect(
+      legacy
+        .query<{ relationClass: string }, [number]>(
+          "SELECT relation_class AS relationClass FROM memory_edges WHERE citing_id = ?",
+        )
+        .get(1)?.relationClass,
+    ).toBe("use");
     // No `collects` row can exist yet on this path (the word was never
     // stored pre-migration), so this is really just re-confirming the
     // chain reaches the final CHECK without throwing.

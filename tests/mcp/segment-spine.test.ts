@@ -27,6 +27,7 @@ import {
 } from "../../src/hooks/milestone-injection";
 import { renderSpineRow } from "../../src/mcp/segment-spine";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Spec D11. The era boundary is a TURN-level comparison, so one session view can
@@ -139,7 +140,7 @@ function seedEraFixture(
       {
         citing: { kind: "turn", id: ids.citer! },
         cited: { kind: "turn", id: ids.orphan! },
-        relation: "consume",
+        ...wordEdgeClass("consume"),
         provenance: "judged",
       },
     ],
@@ -465,7 +466,7 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
             body text
         T14 03-17 ✅ review the fix · "the user asked something"
             body text
-            ↳ -consume-> T13
+            ↳ -use-> T13
 
   shape signals (window T1-T14 = full session):
     - fastest gap:   after T10 (+1s)

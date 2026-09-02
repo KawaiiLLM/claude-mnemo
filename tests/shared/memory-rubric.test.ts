@@ -15,10 +15,8 @@ import {
 import { MAX_TURN_RELATION_DEGREE } from "../../src/db/citations";
 import { NOTE_TOKEN_BUDGET } from "../../src/shared/note-budget";
 import {
-  LEGACY_RELATION_CLASS,
   RELATION_CLASSES,
 } from "../../src/shared/relation-class";
-import { EDGE_RELATIONS, TAGGABLE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   MEMORY_RUBRIC_CONCEPTS_HASH,
   MEMORY_RUBRIC_CONCEPTS_TEXT,
@@ -408,15 +406,16 @@ describe("the relation vocabulary the rubric teaches is the gate's own", () => {
     expect(rubricWords()).not.toContain("partial");
   });
 
-  // Every stored word still maps to one of the three, so no legacy row reads
-  // as a class the rubric never taught.
-  test("every stored relation word maps to a class the rubric teaches", () => {
+  // REPLACES "every stored relation word maps to a class the rubric teaches".
+  // `EDGE_RELATIONS`, `LEGACY_RELATION_CLASS` and `TAGGABLE_RELATIONS` left
+  // `src/` with the `relation` column at the main-agent-edges cutover, so
+  // there is no word population left to map. What the rubric owes now is the
+  // other direction: it teaches EVERY class a stored row can carry, and no
+  // fourth one.
+  test("the rubric teaches exactly the three classes a stored row can carry", () => {
     const taught = new Set(rubricWords());
-    for (const relation of EDGE_RELATIONS) {
-      expect(taught.has(LEGACY_RELATION_CLASS[relation].relationClass), relation).toBe(true);
-      // And every one of them is still taggable at the gate — the vocabulary
-      // change touches no tag rule.
-      expect(TAGGABLE_RELATIONS.has(relation), relation).toBe(true);
+    for (const relationClass of RELATION_CLASSES) {
+      expect(taught.has(relationClass), relationClass).toBe(true);
     }
   });
 

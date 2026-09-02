@@ -9,11 +9,38 @@ import {
   type MemoryEdgesRelationClassBackfillReceipt,
 } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { edgeRelationClass } from "../../src/shared/relation-class";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 import {
-  edgeRelationClass,
-  LEGACY_RELATION_CLASS,
-} from "../../src/shared/relation-class";
-import { EDGE_RELATIONS, type TurnEdgeRelation } from "../../src/shared/turn-phase";
+  FIXTURE_LEGACY_WORD_CLASS,
+  FIXTURE_LEGACY_WORDS,
+} from "../support/lane-edge-fixtures";
+import {
+  downgradeToPreCutoverShape,
+  seedPreCutoverEdge,
+} from "../support/pre-cutover-edge-shape";
+import { MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE } from "../../src/db/main-agent-edges-cutover";
+
+/**
+ * main-agent-edges ticket 01, and the two things it changes about this file.
+ *
+ * (1) THE FIXTURE. Every row here is PRE-v13 by construction — a stored word,
+ * both class columns `''` — and the cutover dropped the word column, so the
+ * fixture puts `memory_edges` back into the pre-cutover shape before seeding
+ * (`downgradeToPreCutoverShape`) and states its rows in SQL. That is not a
+ * fiction: the backfill only ever runs on a database that still has the
+ * column, and the cutover REFUSES to run at all on one whose backfill receipt
+ * is missing.
+ *
+ * (2) THE OBSERVATION. `initializeSchema` runs the backfill and then the
+ * cutover in the same open, so the state the backfill produced is read out of
+ * the cutover's receipt archive rather than off the live table.
+ *
+ * `EDGE_RELATIONS`/`LEGACY_RELATION_CLASS` left `src/` with the column; the
+ * tests-side mirror of the same table (`FIXTURE_LEGACY_WORD_CLASS`) is what
+ * drives the sweep below.
+ */
+type TurnEdgeRelation = string;
 
 /**
  * Relation-vocabulary-v13 ticket 03 — the seven-to-three migration.
@@ -54,20 +81,13 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
   function seedLegacyEdge(relation: TurnEdgeRelation): number {
     const citing = addTurn();
     const cited = addTurn();
-    const { written } = writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: cited },
-          relation,
-          provenance: "judged",
-        },
-      ],
-      EPOCH,
-    );
-    expect(written).toHaveLength(1);
-    return written[0]!.id;
+    return seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation,
+      provenance: "judged",
+      createdAtEpoch: EPOCH,
+    });
   }
 
   /**
@@ -83,15 +103,13 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
   function seedWordlessEdge(provenance: "judged" | "text-ref" = "judged"): number {
     const citing = addTurn();
     const cited = addTurn();
-    return db
-      .query<{ id: number }, [number, number, string, number]>(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, NULL, ?, '', '', '', '', ?)
-         RETURNING id`,
-      )
-      .get(citing, cited, provenance, EPOCH)!.id;
+    return seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation: null,
+      provenance,
+      createdAtEpoch: EPOCH,
+    });
   }
 
   /** The "never swept" state: rows present, no receipt. */
@@ -126,11 +144,23 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     relation_coverage: string;
   }
 
+  /**
+   * Where a worded row can still be read: the LIVE table while the fixture is
+   * pre-cutover, the cutover's receipt archive once `initializeSchema` has run.
+   */
+  function edgeSource(): string {
+    const hasWord = db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_edges')")
+      .all()
+      .some((column) => column.name === "relation");
+    return hasWord ? "memory_edges" : MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE;
+  }
+
   function readEdge(id: number): StoredEdge {
     return db
       .query<StoredEdge, [number]>(
         `SELECT id, relation, relation_class, relation_coverage
-           FROM memory_edges WHERE id = ?`,
+           FROM ${edgeSource()} WHERE id = ?`,
       )
       .get(id)!;
   }
@@ -139,7 +169,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     return db
       .query<StoredEdge, []>(
         `SELECT id, relation, relation_class, relation_coverage
-           FROM memory_edges ORDER BY id`,
+           FROM ${edgeSource()} ORDER BY id`,
       )
       .all();
   }
@@ -147,7 +177,6 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
   /** What `edgeRelationClass` answers for a stored row, as one comparable token. */
   function readerAnswer(row: StoredEdge): string {
     const answer = edgeRelationClass({
-      relation: row.relation,
       relationClass: row.relation_class as never,
       relationCoverage: row.relation_coverage as never,
     });
@@ -171,6 +200,9 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
       updatedAtEpoch: null,
       completedAtEpoch: null,
     }).id;
+    // The shape the backfill actually runs on (module header): a table that
+    // still carries the seven-word column and no cutover receipt.
+    downgradeToPreCutoverShape(db);
   });
 
   afterEach(() => {
@@ -194,11 +226,11 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
   ];
 
   test("the destination table covers every word the storage vocabulary admits", () => {
-    // Not decoration: a word added to `EDGE_RELATIONS` without a case here
-    // would migrate silently under whatever `LEGACY_RELATION_CLASS` said, with
-    // no fixture asserting the bit.
+    // Not decoration: a word added to the storage vocabulary without a case
+    // here would migrate silently under whatever the mapping said, with no
+    // fixture asserting the bit.
     expect([...DESTINATIONS.map(([word]) => word)].sort()).toEqual(
-      [...EDGE_RELATIONS].sort(),
+      [...FIXTURE_LEGACY_WORDS].sort(),
     );
   });
 
@@ -227,7 +259,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
 
     beforeEach(() => {
       seeded = new Map();
-      for (const word of EDGE_RELATIONS) {
+      for (const word of FIXTURE_LEGACY_WORDS) {
         seeded.set(seedLegacyEdge(word), word);
         seeded.set(seedLegacyEdge(word), word);
       }
@@ -251,19 +283,35 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
         if (row.relation === null) {
           continue;
         }
-        const mapped = LEGACY_RELATION_CLASS[row.relation as TurnEdgeRelation];
+        const mapped = FIXTURE_LEGACY_WORD_CLASS[row.relation as string]!;
         expect(row.relation_class).toBe(mapped.relationClass);
         expect(row.relation_coverage).toBe(mapped.relationCoverage);
       }
     });
 
-    test("no reader's answer moves — the sweep is a materialization", () => {
-      const before = new Map(allEdges().map((row) => [row.id, readerAnswer(row)]));
+    // REPLACES "no reader's answer moves — the sweep is a materialization".
+    // That equivalence rested on `edgeRelationClass` falling back to
+    // `LEGACY_RELATION_CLASS[row.relation]`, and the main-agent-edges cutover
+    // deleted the word column and that fallback with it. The sweep is now what
+    // MAKES a reader answer at all: every worded row reads `null` before it
+    // and its class after, and the cutover refuses to run on a database whose
+    // receipt is missing precisely because `''` would then mean "unclassified"
+    // rather than "wordless" and it would delete every classified edge.
+    test("the sweep is what gives a reader an answer — null before it, the class after", () => {
+      const before = allEdges();
+      expect(before.every((row) => readerAnswer(row) === "null")).toBe(true);
 
       initializeSchema(db);
 
       for (const row of allEdges()) {
-        expect(readerAnswer(row)).toBe(before.get(row.id)!);
+        const expected =
+          row.relation === null
+            ? "null"
+            : (() => {
+                const mapped = FIXTURE_LEGACY_WORD_CLASS[row.relation]!;
+                return `${mapped.relationClass}/${mapped.relationCoverage || "-"}`;
+              })();
+        expect(readerAnswer(row)).toBe(expected);
       }
     });
 
@@ -274,8 +322,8 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
 
       expect(receiptRows()).toBe(1);
       const written = receipt();
-      expect(written.classified).toBe(EDGE_RELATIONS.length * 2);
-      for (const word of EDGE_RELATIONS) {
+      expect(written.classified).toBe(FIXTURE_LEGACY_WORDS.length * 2);
+      for (const word of FIXTURE_LEGACY_WORDS) {
         expect(written.classifiedByRelation[word]).toBe(2);
       }
       expect(written.bareRowsLeftUnclassified).toBe(2);
@@ -305,14 +353,12 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
       ).toBe(firstApplied);
     });
 
-    test("rollback is a read-side switch: clearing the two columns restores the pre-sweep row", () => {
-      const before = allEdges();
-      initializeSchema(db);
-
-      db.exec("UPDATE memory_edges SET relation_class = '', relation_coverage = ''");
-
-      expect(allEdges()).toEqual(before);
-    });
+    // DELETED: "rollback is a read-side switch: clearing the two columns
+    // restores the pre-sweep row". It cleared `relation_class` back to `''` on
+    // the live table; the post-cutover CHECK admits only the three classes, so
+    // the write is refused, and there is no word left for a cleared row to be
+    // re-derived from. The cutover's own receipt is the rollback surface now
+    // (`tests/db/schema.main-agent-edges-cutover.test.ts`).
   });
 
   // ---------------------------------------------------------------------
@@ -357,7 +403,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
       expect(
         db
           .query<{ c: number }, []>(
-            "SELECT COUNT(*) AS c FROM memory_edges WHERE relation_class = ''",
+            `SELECT COUNT(*) AS c FROM ${edgeSource()} WHERE relation_class = ''`,
           )
           .get()!.c,
       ).toBe(2);
@@ -369,7 +415,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
       expect(receiptRows()).toBe(1);
       const unclassified = db
         .query<{ relation: string | null }, []>(
-          "SELECT relation FROM memory_edges WHERE relation_class = ''",
+          `SELECT relation FROM ${edgeSource()} WHERE relation_class = ''`,
         )
         .all();
       expect(unclassified).toEqual([{ relation: null }]);
@@ -394,21 +440,14 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     function seedDisagreeingClassifiedEdge(): number {
       const citing = addTurn();
       const cited = addTurn();
-      const { written } = writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "extends",
-            provenance: "asserted",
-            relationClass: "correct",
-            relationCoverage: "full",
-          },
-        ],
-        EPOCH,
-      );
-      return written[0]!.id;
+      return seedPreCutoverEdge(db, {
+        citingId: citing,
+        citedId: cited,
+        relation: "extends",
+        relationClass: "correct",
+        relationCoverage: "full",
+        createdAtEpoch: EPOCH,
+      });
     }
 
     test("an already-classified row is not re-derived from its legacy word", () => {
@@ -443,105 +482,12 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     });
   });
 
-  // ---------------------------------------------------------------------
-  // The ON CONFLICT gap ticket 02 left open
-  // ---------------------------------------------------------------------
-
-  describe("re-asserting over a pre-existing legacy row (ticket 02's owed gap)", () => {
-    function reassert(
-      citing: number,
-      cited: number,
-      relation: TurnEdgeRelation,
-      relationClass?: "correct" | "verify" | "use",
-      relationCoverage?: "full" | "partial",
-    ): void {
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation,
-            provenance: "judged",
-            ...(relationClass ? { relationClass } : {}),
-            ...(relationCoverage ? { relationCoverage } : {}),
-          },
-        ],
-        EPOCH,
-      );
-    }
-
-    test("a class-carrying restatement classifies the unclassified row it conflicts with", () => {
-      const citing = addTurn();
-      const cited = addTurn();
-      reassert(citing, cited, "override");
-      const id = db
-        .query<{ id: number }, []>("SELECT id FROM memory_edges ORDER BY id DESC LIMIT 1")
-        .get()!.id;
-      expect(readEdge(id).relation_class).toBe("");
-
-      reassert(citing, cited, "override", "correct", "full");
-
-      const row = readEdge(id);
-      expect(row.relation_class).toBe("correct");
-      expect(row.relation_coverage).toBe("full");
-      // One row, not two: the conflict path is still a restatement.
-      expect(
-        db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM memory_edges").get()!.c,
-      ).toBe(1);
-    });
-
-    test("a CLASSLESS restatement still classifies, from the stored word", () => {
-      const citing = addTurn();
-      const cited = addTurn();
-      reassert(citing, cited, "narrows");
-      const id = db
-        .query<{ id: number }, []>("SELECT id FROM memory_edges ORDER BY id DESC LIMIT 1")
-        .get()!.id;
-
-      reassert(citing, cited, "narrows");
-
-      const row = readEdge(id);
-      expect(row.relation_class).toBe("correct");
-      expect(row.relation_coverage).toBe("partial");
-    });
-
-    test("a restatement never overwrites a class the row already carries", () => {
-      const citing = addTurn();
-      const cited = addTurn();
-      reassert(citing, cited, "extends", "correct", "full");
-      const id = db
-        .query<{ id: number }, []>("SELECT id FROM memory_edges ORDER BY id DESC LIMIT 1")
-        .get()!.id;
-
-      reassert(citing, cited, "extends", "verify");
-      reassert(citing, cited, "extends");
-
-      const row = readEdge(id);
-      expect(row.relation_class).toBe("correct");
-      expect(row.relation_coverage).toBe("full");
-    });
-
-    test("the conflict path returns the row it satisfied, as the write contract requires", () => {
-      const citing = addTurn();
-      const cited = addTurn();
-      reassert(citing, cited, "verifies");
-      const { written } = writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "verifies",
-            provenance: "judged",
-            relationClass: "verify",
-          },
-        ],
-        EPOCH,
-      );
-      expect(written).toHaveLength(1);
-      expect(written[0]!.relationClass).toBe("verify");
-      expect(written[0]!.relation).toBe("verifies");
-    });
-  });
+  // DELETED (main-agent-edges ticket 01): the whole "re-asserting over a
+  // pre-existing legacy row (ticket 02's owed gap)" block. Its four cases were
+  // about the INTERIM write path — an ON CONFLICT that met a row carrying a
+  // word and no class, and classified it from the word. The cutover dropped
+  // the column, `WriteEdgeInput.relationClass` is required, and the promotion
+  // rule that replaced the conflict path (spec D5: most specific wins, weaker
+  // is a no-op) is pinned in `tests/db/memory-edges.test.ts` and
+  // `tests/db/citations.test.ts`.
 });

@@ -564,7 +564,7 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
    */
   function write(
     sides: readonly [string, string] | undefined,
-    relation: "extends" | null = "extends",
+    relationClass: "use" | null = "use",
   ) {
     return writeMemoryEdges(
       db,
@@ -572,7 +572,7 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation,
+          relationClass: relationClass as never,
           provenance: "asserted",
           ...(sides === undefined ? {} : { tailTag: sides[0], headTag: sides[1] }),
         },
@@ -664,7 +664,7 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
 
     expect(result.written).toEqual([]);
     expect(result.rejected.map((entry) => entry.reason)).toEqual([
-      "bare-row-retired",
+      "invalid-relation",
     ]);
     expect(columns()).toEqual([]);
     expect(sideRows()).toEqual([]);
@@ -677,31 +677,30 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
    * this property only became independently true once the merged component
    * left.
    *
-   * main-agent-edges D5 took the WRITE PATH away from it: identity there is
-   * the pair, so `writeMemoryEdges` can no longer produce a second row for one
-   * pair under any side arguments. The stored UNIQUE key still names
-   * (pair, relation, tail, head) until ticket 01's rebuild narrows it, and
-   * that is what still admits the 109 legacy multi-row pairs production holds
-   * — so the property is asserted where it now lives, against the table.
-   * Mutation: drop `tail_tag, head_tag` from the UNIQUE in
-   * `memoryEdgesTableDdl`'s `sides-only` arm and the second insert throws
-   * instead of landing.
+   * main-agent-edges TICKET 01 FINISHED THE JOB. The write path lost the
+   * multi-row shape at D5 (identity is the pair), and the cutover then took it
+   * from the TABLE too: `(citing_kind, citing_id, cited_kind, cited_id)` is
+   * the UNIQUE key, so the side columns are no longer part of any identity and
+   * three rows on one pair cannot be stored at all. What this case pins now is
+   * that inversion — the FIRST side placement lands, the second is refused,
+   * whatever its sides.
+   *
+   * Mutation: drop the pair UNIQUE from `memoryEdgesPostCutoverTableDdl` and
+   * the second insert lands instead of throwing.
    */
-  test("the stored UNIQUE key still separates side pairs on one (pair, relation) — three legacy rows", () => {
+  test("the stored UNIQUE key is the PAIR — a second row with different sides is refused", () => {
     const insert = db.query<unknown, [number, number, string, string]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
           tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, '', '', 300)`,
+       VALUES ('turn', ?, 'turn', ?, 'asserted', ?, ?, 'use', '', 300)`,
     );
     insert.run(citing, cited, "lane-a", "lane-a");
-    insert.run(citing, cited, "lane-b", "lane-b");
-    insert.run(citing, cited, "lane-a", "lane-b");
+    expect(() => insert.run(citing, cited, "lane-b", "lane-b")).toThrow();
+    expect(() => insert.run(citing, cited, "lane-a", "lane-b")).toThrow();
 
     expect(columns().map((row) => [row.tailTag, row.headTag])).toEqual([
       ["lane-a", "lane-a"],
-      ["lane-b", "lane-b"],
-      ["lane-a", "lane-b"],
     ]);
   });
 

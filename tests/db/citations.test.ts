@@ -21,6 +21,8 @@ import { initializeSchema } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, promoteTurnFromNote } from "../../src/db/turns";
+import { displayEdgeRelation } from "../../src/shared/relation-class";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 describe("inline citation grammar", () => {
   // Each fixture asserts the EXACT expanded DB-id array — the grammar's whole
@@ -155,7 +157,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
         {
           citing: { kind: "turn", id: citingTurnId },
           cited: { kind: "turn", id: citedTurnId },
-          relation,
+          ...wordEdgeClass(relation),
           provenance: "judged",
         },
       ],
@@ -237,7 +239,7 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
       {
         citingTurnId: turns[1]!,
         citedTurnId: turns[0]!,
-        relation: "narrows",
+        relationClass: "correct",
         createdAtEpoch: 500,
       },
     ]);
@@ -286,76 +288,15 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
   // three precisely because a turn id and a segment id are numbers drawn from
   // independent sequences and will collide. An untested collision is the one
   // failure this design was built to prevent.
-  test("a segment sharing a turn's id takes only its own edges when deleted (spec C15)", () => {
-    // Force the collision rather than hoping for it: the segment is given the
-    // id of a live turn, so every edge below is ambiguous on id alone and can
-    // only be resolved by kind.
-    const collidingId = turns[0]!;
-    db.query(
-      `INSERT INTO segments (id, title, content, created_at_epoch, updated_at_epoch)
-       VALUES (?, 'colliding segment', NULL, 500, 500)`,
-    ).run(collidingId);
-
-    const edge = db.query<unknown, [string, number, string, number]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES (?, ?, ?, ?, NULL, 'text-ref', 500)`,
-    );
-    edge.run("segment", collidingId, "turn", turns[1]!); // segment's outgoing
-    edge.run("turn", foreignTurn, "segment", collidingId); // segment's incoming
-    edge.run("turn", collidingId, "turn", foreignTurn); // the TURN of the same id
-
-    db.query("DELETE FROM segments WHERE id = ?").run(collidingId);
-
-    const survivors = db
-      .query<{ citingKind: string; citedKind: string }, []>(
-        "SELECT citing_kind AS citingKind, cited_kind AS citedKind FROM memory_edges",
-      )
-      .all();
-    // Both segment-touching edges are gone in BOTH directions, and the
-    // same-numbered turn's edge is untouched.
-    expect(survivors).toEqual([{ citingKind: "turn", citedKind: "turn" }]);
-  });
-
-  test("a session-sourced edge goes when its session does (spec C15)", () => {
-    // The only trigger with a single direction: nothing cites a session, so it
-    // prunes outgoing edges only.
-    //
-    // The cited endpoint MUST be a turn of the OTHER session. An earlier
-    // version of this test cited a turn of sessionB itself, and deleting
-    // sessionB cascaded into that turn, so the TURN trigger removed the edge
-    // through its cited endpoint — the row disappeared and the session
-    // trigger was never the cause. That test stayed green with the session
-    // trigger deleted outright, which is the same false-positive shape the
-    // id-collision test above exists to rule out: it asserted disappearance
-    // without pinning what caused it.
-    db.query<unknown, [number, number]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('session', ?, 'turn', ?, NULL, 'text-ref', 500)`,
-    ).run(sessionB, turns[0]!);
-    expect(
-      db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
-      ).get()!.count,
-    ).toBe(1);
-
-    db.query("DELETE FROM sessions WHERE id = ?").run(sessionB);
-
-    // The cited endpoint outlived the deletion, so no turn trigger can have
-    // fired for it — the only thing that could remove this row is the session
-    // trigger. Without this assertion the test proves nothing.
-    expect(
-      db.query<{ count: number }, [number]>(
-        "SELECT COUNT(*) AS count FROM turns WHERE id = ?",
-      ).get(turns[0]!)!.count,
-    ).toBe(1);
-    expect(
-      db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM memory_edges WHERE citing_kind = 'session'",
-      ).get()!.count,
-    ).toBe(0);
-  });
+  // DELETED (main-agent-edges ticket 01): "a segment sharing a turn's id takes
+  // only its own edges when deleted" and "a session-sourced edge goes when its
+  // session does". Both seeded a WORDLESS row whose endpoint was a segment or a
+  // session — the text-ref prose-citation population. The cutover deleted every
+  // wordless row and rebuilt `memory_edges` with `CHECK (citing_kind = 'turn')`
+  // and `CHECK (cited_kind = 'turn')`, so neither row can be written. The
+  // segment and session prune triggers survive the rebuild but can no longer
+  // match anything; the TURN trigger, which still can, is covered by the two
+  // cases around this note.
 
   test("deleting the citing endpoint's session removes only that endpoint's edges (spec C15)", () => {
     citeFrom(turns[1]!, turns[0]!, "consume");
@@ -376,50 +317,57 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     ).toEqual([{ citingTurnId: turns[1]! }]);
   });
 
-  test("rejects a duplicate (citing, cited, relation) row, and a second BARE row for one pair (D2)", () => {
-    const insert = db.query<unknown, [number, number, string | null]>(
+  test("rejects a SECOND row on a pair, whatever its class — the pair is the whole key (D1/D5)", () => {
+    const insert = db.query<unknown, [number, number, string, string]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'judged', 1)`,
+         (citing_kind, citing_id, cited_kind, cited_id, relation_class, relation_coverage, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, ?, 'judged', 1)`,
     );
-    insert.run(turns[1]!, turns[0]!, "verifies");
+    insert.run(turns[1]!, turns[0]!, "verify", "");
 
-    // Identity is the triple now: a DIFFERENT relation on the same pair is a
-    // legal second row, the same relation twice is not.
-    expect(() => insert.run(turns[1]!, turns[0]!, "narrows")).not.toThrow();
-    expect(() => insert.run(turns[1]!, turns[0]!, "verifies")).toThrow();
-    expect(getTurnCitations(db, turns[1]!)).toHaveLength(2);
+    // The cutover made `(citing_kind, citing_id, cited_kind, cited_id)` the
+    // UNIQUE key. Before it, identity was the wider tuple and a DIFFERENT word
+    // on the same pair was a legal second row; now nothing is.
+    expect(() => insert.run(turns[1]!, turns[0]!, "correct", "partial")).toThrow();
+    expect(() => insert.run(turns[1]!, turns[0]!, "verify", "")).toThrow();
+    expect(getTurnCitations(db, turns[1]!)).toHaveLength(1);
 
-    // The bare row is the one shape SQLite's UNIQUE cannot police on its own
-    // (it treats NULLs as distinct), so the partial unique index does.
-    insert.run(turns[2]!, turns[0]!, null);
-    expect(() => insert.run(turns[2]!, turns[0]!, null)).toThrow();
-    expect(getTurnCitations(db, turns[2]!)).toHaveLength(1);
+    // The BARE row this case used to police with a partial unique index has no
+    // form left at all: `relation_class` is NOT NULL and CHECKed to the three
+    // classes.
+    expect(() =>
+      db
+        .query<unknown, [number, number]>(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, '', 'text-ref', 1)`,
+        )
+        .run(turns[2]!, turns[0]!),
+    ).toThrow();
+    expect(getTurnCitations(db, turns[2]!)).toHaveLength(0);
   });
 
-  test("rejects an unknown relation at the schema level", () => {
+  test("rejects an unknown relation CLASS at the schema level", () => {
+    // The seven-word `relation` column this used to probe was dropped at the
+    // cutover; `relation_class` is what the CHECK now polices, and it admits
+    // exactly `correct`, `verify` and `use`.
     expect(() =>
       db
         .query(
           `INSERT INTO memory_edges
-             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+             (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
            VALUES ('turn', ?, 'turn', ?, 'mentions', 'judged', 1)`,
         )
         .run(turns[1]!, turns[0]!),
     ).toThrow();
   });
 
-  test("accepts a NULL relation at the schema level (spec C5: an unattributed citation is storable)", () => {
-    expect(() =>
-      db
-        .query(
-          `INSERT INTO memory_edges
-             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-           VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 1)`,
-        )
-        .run(turns[1]!, turns[0]!),
-    ).not.toThrow();
-  });
+  // DELETED (main-agent-edges ticket 01): "accepts a NULL relation at the
+  // schema level (spec C5: an unattributed citation is storable)". Spec D1
+  // reversed C5 — the wordless population is a fact nothing acts on, every
+  // stored one was deleted at the cutover, and the rebuilt table has no
+  // nullable class to store another. The refusal is pinned by the pair-key
+  // case above.
 });
 
 // `recomputeTurnCitedPairs` IS DELETED (main-agent-edges D1 / R10-2), and a
@@ -465,9 +413,15 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       )
       .get(sessionDbId, promptNumber)!.id;
 
-  const relationsOn = (turnId: number): Array<string | null> =>
+  /**
+   * Each outgoing row as its CLASS TOKEN. The cutover dropped the seven-word
+   * `relation` column and `MemoryEdge` with it, so what a stored row says
+   * about itself is the class pair, rendered here through the one formatter
+   * every surface uses (`displayEdgeRelation`).
+   */
+  const relationsOn = (turnId: number): string[] =>
     getOutgoingEdges(db, { kind: "turn", id: turnId })
-      .map((edge) => edge.relation)
+      .map((edge) => displayEdgeRelation(edge))
       .sort();
 
   beforeEach(() => {
@@ -500,11 +454,11 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(result.rejected).toEqual([]);
     expect(result.restated).toEqual([]);
     expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.relation).toBe("narrows");
+    expect(displayEdgeRelation(result.written[0]!)).toBe("correct(partial)");
     expect(result.written[0]?.provenance).toBe("asserted");
     const stored = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
     expect(stored).toHaveLength(1);
-    expect(stored[0]?.relation).toBe("narrows");
+    expect(displayEdgeRelation(stored[0]!)).toBe("correct(partial)");
     expect(stored[0]?.provenance).toBe("asserted");
   });
 
@@ -542,7 +496,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     // column as `extends` — the INTERIM equivalence
     // (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`). The stored
     // word, not the class, is what `relationsOn` reads.
-    expect(relationsOn(turns[2]!)).toEqual(["extends"]);
+    expect(relationsOn(turns[2]!)).toEqual(["use"]);
   });
 
   // main-agent-edges D5 rewrote this. Two classes on one pair used to COEXIST
@@ -574,9 +528,9 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     );
 
     expect(second.rejected).toEqual([]);
-    expect(second.written.map((edge) => edge.relation)).toEqual(["narrows"]);
+    expect(second.written.map(displayEdgeRelation)).toEqual(["correct(partial)"]);
     expect(second.restated).toEqual([]);
-    expect(relationsOn(turns[2]!)).toEqual(["narrows"]);
+    expect(relationsOn(turns[2]!)).toEqual(["correct(partial)"]);
     expect(second.written[0]?.createdAtEpoch).toBe(500);
 
     // The weaker class alone, a call later, IS the restatement case.
@@ -587,7 +541,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       700,
     );
     expect(third.written).toEqual([]);
-    expect(third.restated.map((edge) => edge.relation)).toEqual(["narrows"]);
+    expect(third.restated.map(displayEdgeRelation)).toEqual(["correct(partial)"]);
     expect(third.restated[0]?.createdAtEpoch).toBe(500);
   });
 
@@ -662,7 +616,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(stored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
     // INTERIM (ticket 05a): `use` stores as `extends`, and the CLASS is what a
     // reader asks for.
-    expect(stored[0]?.relation).toBe("extends");
+    expect(displayEdgeRelation(stored[0]!)).toBe("use");
     expect(stored[0]?.relationClass).toBe("use");
     expect(stored[0]?.relationCoverage).toBe("");
   });
@@ -701,7 +655,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     ]);
     expect(
       getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
-        (edge) => edge.cited.kind === "segment" && edge.relation !== null,
+        (edge) => edge.cited.kind === "segment",
       ),
     ).toEqual([]);
   });
@@ -731,8 +685,8 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     ]);
 
     expect(result.rejected).toEqual([]);
-    expect(result.deleted.map((edge) => edge.relation)).toEqual(["narrows"]);
-    expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
+    expect(result.deleted.map(displayEdgeRelation)).toEqual(["correct(partial)"]);
+    expect(relationsOn(turns[2]!)).toEqual(["verify"]);
   });
 
   test("an address carrying no edge at all rejects the whole call and deletes nothing", () => {
@@ -753,7 +707,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       { relation: "correct", raw: `S${sessionId}/T2`, reason: "no-such-edge" },
     ]);
     // The one that WAS there survives — all-or-nothing, same as the attach path.
-    expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
+    expect(relationsOn(turns[2]!)).toEqual(["verify"]);
   });
 
   // The T2432 P1 pin's own case at this layer: the pair HAS an edge, and the
@@ -781,7 +735,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
         currentClass: "correct",
       },
     ]);
-    expect(relationsOn(turns[2]!)).toEqual(["override"]);
+    expect(relationsOn(turns[2]!)).toEqual(["correct(full)"]);
   });
 
   // main-agent-edges D1: the pair is left with NO row, and the citing body is
@@ -910,7 +864,7 @@ describe("effective citations predicate", () => {
         {
           citing: { kind: "turn", id: citerId },
           cited: { kind: "turn", id: citedId },
-          relation: "narrows",
+          ...wordEdgeClass("narrows"),
           provenance: "judged",
         },
       ],
@@ -922,7 +876,7 @@ describe("effective citations predicate", () => {
     // and dangling, so it is still dropped — the union widens the sources, it
     // does not relax resolution.
     expect(effective.citedTurnIds).toEqual([citedId]);
-    expect(effective.edges.map((edge) => edge.relation)).toEqual(["narrows"]);
+    expect(effective.edges.map((edge) => edge.relationClass)).toEqual(["correct"]);
   });
 
   test("a prose citation the edge set never recorded is still effective", () => {
@@ -942,7 +896,7 @@ describe("effective citations predicate", () => {
         {
           citing: { kind: "turn", id: citerId },
           cited: { kind: "turn", id: citedId },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "judged",
         },
       ],
@@ -955,38 +909,51 @@ describe("effective citations predicate", () => {
     ).toEqual([citedId, extra]);
   });
 
-  // Second review round: both generic pair readers used to filter
-  // `relation IS NOT NULL`, so a pair with no stated relation returned
-  // nothing at all — and since this turn's `cites_recorded = 1`, there was no
-  // inline fallback either. That emptied spec C5 of its content: the whole
-  // point of pair identity is that an unattributed citation is a real,
-  // storable, READABLE state. A bare write reaches `memory_edges` the way
-  // settlement's text-ref/bare writes do (writeMemoryEdges, spec C14);
-  // inserted directly here since `replaceTurnCitations` requires every entry
-  // in its replace-set to carry a relation.
-  test("a NULL-relation edge is still an effective citation, not a missing one (spec C5)", () => {
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 500)`,
-    ).run(citerId, citedId);
+  // DELETED (main-agent-edges ticket 01): "a NULL-relation edge is still an
+  // effective citation, not a missing one (spec C5)". Spec D1 retired the
+  // wordless population outright: the cutover deleted every stored one and
+  // `relation_class` is NOT NULL, so the state this case asserted a reading
+  // for cannot occur. The prose half of the union — which is what actually
+  // carried an unclassified reference — is pinned by the case below.
 
-    const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
-    expect(effective.citedTurnIds).toEqual([citedId]);
-    expect(effective.edges).toEqual([
-      {
-        citingTurnId: citerId,
-        citedTurnId: citedId,
-        relation: null,
-        createdAtEpoch: 500,
-      },
-    ]);
+  test("a prose citation the edge set never recorded is still effective", () => {
+    const extra = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, 9, 'extracted', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    db.query("UPDATE turns SET content = ? WHERE id = ?").run(
+      `builds on [T${citedId}] and also [T${extra}]`,
+      citerId,
+    );
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citerId },
+          cited: { kind: "turn", id: citedId },
+          ...wordEdgeClass("consume"),
+          provenance: "judged",
+        },
+      ],
+      500,
+    );
 
-    const sessionEffective = getSessionEffectiveCitations(db, sessionId);
-    expect(sessionEffective.get(citerId)?.citedTurnIds).toEqual([citedId]);
-
-    expect(getSessionCitationInDegree(db, sessionId).get(citedId)).toBe(1);
+    // Structured first, then prose the edges did not cover.
+    expect(
+      getEffectiveCitations(db, getTurnById(db, citerId)!).citedTurnIds,
+    ).toEqual([citedId, extra]);
   });
+
+  // DELETED (main-agent-edges ticket 01): "a NULL-relation edge is still an
+  // effective citation, not a missing one (spec C5)". Spec D1 reversed C5 —
+  // the wordless population is a fact nothing acts on, the cutover deleted
+  // every stored one, and `relation_class` is NOT NULL on the rebuilt table,
+  // so the state it asserted a reading for cannot occur. The prose half of the
+  // union — which is what actually carried an unclassified reference — is
+  // pinned by "a prose citation the edge set never recorded is still
+  // effective" above.
 });
 
 describe("session-wide effective citations", () => {
@@ -1056,13 +1023,13 @@ describe("session-wide effective citations", () => {
         {
           citing: { kind: "turn", id: structuredCiter },
           cited: { kind: "turn", id: anchor },
-          relation: "narrows",
+          ...wordEdgeClass("narrows"),
           provenance: "judged",
         },
         {
           citing: { kind: "turn", id: structuredCiter },
           cited: { kind: "turn", id: foreignTurn },
-          relation: "verifies",
+          ...wordEdgeClass("verifies"),
           provenance: "judged",
         },
       ],
@@ -1125,7 +1092,7 @@ describe("session-wide effective citations", () => {
 
     const entry = getSessionEffectiveCitations(db, sessionA).get(structuredCiter)!;
     expect(entry.citedTurnIds).toEqual([anchor]);
-    expect(entry.edges.map((edge) => edge.relation)).toEqual(["narrows"]);
+    expect(entry.edges.map((edge) => edge.relationClass)).toEqual(["correct"]);
     expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
   });
 
@@ -1215,13 +1182,13 @@ describe("deleted/dormant node predicate (indexes-rescope spec law 8, ticket 03)
         {
           citing: { kind: "turn", id: live },
           cited: { kind: "turn", id: rolledBackTarget },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
         {
           citing: { kind: "turn", id: rolledBackCiter },
           cited: { kind: "turn", id: live },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
       ],
@@ -1258,7 +1225,7 @@ describe("deleted/dormant node predicate (indexes-rescope spec law 8, ticket 03)
         {
           citing: { kind: "turn", id: dormant },
           cited: { kind: "turn", id: anchor },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
       ],
@@ -1284,7 +1251,7 @@ describe("deleted/dormant node predicate (indexes-rescope spec law 8, ticket 03)
     // The edge itself: same relation, same original timestamp — never
     // rewritten by the promotion, only re-exposed.
     expect(restored.get(dormant)?.edges).toEqual([
-      { citingTurnId: dormant, citedTurnId: anchor, relation: "consume", createdAtEpoch: 500 },
+      { citingTurnId: dormant, citedTurnId: anchor, relationClass: "use", createdAtEpoch: 500 },
     ]);
     expect(getSessionCitationInDegree(db, sessionId).get(anchor)).toBe(1);
   });

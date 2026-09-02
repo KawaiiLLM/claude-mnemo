@@ -6,6 +6,7 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { computeSettlementWritableTurnIds } from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The IMMUTABLE WRITABLE SET (tag-mandate ticket 05, spec "the writable set
@@ -74,7 +75,7 @@ function edge(citingId: number, citedId: number, relation: string, tags: string[
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags(tags),
       },

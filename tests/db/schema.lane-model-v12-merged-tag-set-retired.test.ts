@@ -10,6 +10,7 @@ import {
   LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT,
   type LaneModelV12MergedTagSetRetiredReceipt,
 } from "../../src/db/schema";
+import { MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE } from "../../src/db/main-agent-edges-cutover";
 import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
@@ -87,6 +88,33 @@ describe("lane-model-v12 M-E — the merged tag set is retired", () => {
       .query<{ edgeRowId: number; side: string; tag: string }, []>(
         `SELECT edge_row_id AS edgeRowId, side, tag FROM memory_edge_side_tags
          ORDER BY edge_row_id, side`,
+      )
+      .all();
+
+  /** The same shape, read out of the cutover's receipt archive. */
+  const archivedEdges = (): Array<{
+    id: number;
+    relation: string | null;
+    provenance: string;
+    tailTag: string;
+    headTag: string;
+    createdAtEpoch: number;
+  }> =>
+    db
+      .query<
+        {
+          id: number;
+          relation: string | null;
+          provenance: string;
+          tailTag: string;
+          headTag: string;
+          createdAtEpoch: number;
+        },
+        []
+      >(
+        `SELECT id, relation, provenance, tail_tag AS tailTag, head_tag AS headTag,
+                created_at_epoch AS createdAtEpoch
+         FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY id`,
       )
       .all();
 
@@ -432,7 +460,16 @@ describe("lane-model-v12 M-E — the merged tag set is retired", () => {
 
     expect(columnNames()).not.toContain("tags");
     expect(tableNames()).toEqual(["memory_edge_side_tags"]);
-    expect(edges()).toEqual(after);
-    expect(sideRows()).toEqual(sides);
+    // Read off the cutover's receipt archive: `initializeSchema` ends PAST the
+    // main-agent-edges cutover, which drops the word column `edges()` selects
+    // — the archive is the table exactly as M-E left it.
+    expect(archivedEdges()).toEqual(after);
+    // The SIDE INDEX is not preserved across that open, and must not be: the
+    // cutover's transform 3 clears every stored declaration whose endpoint is
+    // not in two or more lanes (spec D9), and these fixture turns are in none
+    // at all. The declarations this file made are exactly that population, so
+    // the rebuilt index is empty — while `sides` records what M-E itself left.
+    expect(sides.length).toBeGreaterThan(0);
+    expect(sideRows()).toEqual([]);
   });
 });

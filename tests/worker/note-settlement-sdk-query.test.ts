@@ -69,6 +69,7 @@ import {
 } from "../support/settlement-config";
 import type { ResponseOriginRegistry } from "../../src/worker/note-settlement-response-origin";
 import { retainAllImpressions } from "../support/impression-payload";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The settlement subagent's SDK tool registration
@@ -244,10 +245,10 @@ function seedLaneCheckFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["ownership"]) },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
-      { citing: { kind: "turn", id: outside }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", ...deriveSideTags([]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("indexes"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, ...wordEdgeClass("indexes"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: outside }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("consume"), provenance: "asserted", ...deriveSideTags([]) },
     ],
     NOW,
   );
@@ -348,8 +349,8 @@ function seedSeveredLaneFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
-      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["severed-fixture"]) },
       // Deliberately nothing crosses {t1,t2} <-> {t3,t4} — the two islands
       // Report 2 finds SEVERED.
     ],
@@ -437,8 +438,8 @@ function seedSeveredLaneLookbackFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
-      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["severed-lookback-fixture"]) },
       // Deliberately nothing crosses {t1,t2} <-> {t3,t4} — the two islands
       // Report 2 finds SEVERED, exactly as in `seedSeveredLaneFixture`.
     ],
@@ -538,9 +539,9 @@ function seedThreeIslandLaneLookbackFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
-      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
-      { citing: { kind: "turn", id: t6 }, cited: { kind: "turn", id: t5 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
+      { citing: { kind: "turn", id: t6 }, cited: { kind: "turn", id: t5 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["three-island-fixture"]) },
       // Deliberately nothing crosses {t1,t2}, {t3,t4}, {t5,t6} — three
       // islands, two fractures.
     ],
@@ -639,10 +640,10 @@ function seedBridgedLaneFixture(db: Database): {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
       // THE BRIDGE — the only thing joining {t1,t2} to {t3,t4}.
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
-      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
+      { citing: { kind: "turn", id: t4 }, cited: { kind: "turn", id: t3 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["bridged-fixture"]) },
     ],
     NOW,
   );
@@ -1289,42 +1290,15 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
+          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
         ],
         NOW,
       );
-      // The `indexes` row on the SAME pair, which main-agent-edges D1 took away
-      // from `writeMemoryEdges`: one pair holds one row, `indexes` and
-      // `extends` are both class `use`, so a second write onto this pair is now
-      // a no-op and the lane's two-word tally below would silently become one.
-      // A legacy multi-row pair is still legitimate STOCK — this whole fixture
-      // is about what the checker makes of stock it cannot have written — so
-      // the row is inserted at the storage layer, beside the out-of-vocabulary
-      // one below and for the same reason.
-      const indexesRowId = db
-        .query<{ id: number }, [number, number]>(
-          `INSERT INTO memory_edges
-             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-              tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-           VALUES ('turn', ?, 'turn', ?, 'indexes', 'asserted',
-                   'vocab-fixture', 'vocab-fixture', '', '', ${NOW})
-           RETURNING id`,
-        )
-        .get(t2, t1)!.id;
-      for (const side of ["tail", "head"] as const) {
-        db.query<unknown, [number, string]>(
-          `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag)
-           VALUES (?, ?, 'vocab-fixture')`,
-        ).run(indexesRowId, side);
-      }
-      // The out-of-vocabulary row, written the only way one can now exist.
-      db.exec("PRAGMA ignore_check_constraints = ON");
-      db.query<unknown, [number, number]>(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'supersedes', 'asserted', ${NOW})`,
-      ).run(t2, t1);
-      db.exec("PRAGMA ignore_check_constraints = OFF");
+      // The SECOND row on this pair IS DELETED (main-agent-edges ticket 01):
+      // the cutover rebuilt `memory_edges` UNIQUE on the pair, so the legacy
+      // multi-row stock this fixture used to seed cannot exist on any database
+      // a checker runs against. The lane's tally is one `use` row, and the E4
+      // orphan below rides that single row.
 
       enqueueNoteSettlementWindows(
         db,
@@ -1367,20 +1341,14 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
           // not just the text, is the point: a reader who is not told these
           // rows exist sees a silently under-reported scope.
           expect(text).not.toContain("[E2]");
+          // The out-of-vocabulary REPORT is now always empty: after the cutover
+          // there is no word column, `relation_class` is CHECKed to the three
+          // classes, and the loader's two out-of-vocabulary passes are deleted.
+          expect(text).toContain("(no out-of-vocabulary relations)");
+          expect(text).not.toContain("supersedes");
           expect(text).toContain(
-            "edge(s) whose relation is outside the seven-word vocabulary -- pre-migration stock, admitted to no graph",
+            `[E4] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --use--> S${sessionDbId}/T1 {vocab-fixture}`,
           );
-          expect(text).toContain(
-            `  S${sessionDbId}/T2 --supersedes--> S${sessionDbId}/T1`,
-          );
-          expect(text).toContain(
-            `[E4] anchor S${sessionDbId}/T2 -- S${sessionDbId}/T2 --extends--> S${sessionDbId}/T1 {vocab-fixture}`,
-          );
-          // Never admitted: the lane's own tally counts by CLASS since
-          // main-agent-edges ticket 02, and `supersedes` resolves to none, so
-          // it appears in no tally at all.
-          expect(text).not.toContain("supersedes=");
-          expect(text).not.toContain("supersedes=");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -1419,7 +1387,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
 /**
  * Phase-connectivity ticket 01 fixture: three landing turns in one window —
  * one compound (T1, implement+design, zero hops), one that reaches a basis
- * by a directed walk (T2 --extends--> T3, T3 is research), and one with no
+ * by a directed walk (T2 --use--> T3, T3 is research), and one with no
  * basis reachable at all (T4). Report-only: nothing in the commit path reads
  * a switch to decide whether to refuse (ticket 06 deleted the dead "armed"
  * constant this comment used to name — there is no arming wire yet at all),
@@ -1472,7 +1440,7 @@ function seedPhaseConnectivityFixture(db: Database): {
       {
         citing: { kind: "turn", id: t2 },
         cited: { kind: "turn", id: t3 },
-        relation: "extends",
+        ...wordEdgeClass("extends"),
         provenance: "asserted",
         tailTag: "phase-connectivity-fixture",
         headTag: "phase-connectivity-fixture",
@@ -2249,7 +2217,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
           {
             citing: { kind: "turn", id: laneTurnIds[3]! },
             cited: { kind: "turn", id: laneTurnIds[1]! },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["bridged-fixture"]),
           },
@@ -2982,7 +2950,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: outside },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["lane"]),
         },
@@ -3329,7 +3297,7 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
         [closureTurn, lookbackTurn, windowTurn].map((citing) => ({
           citing: { kind: "turn" as const, id: citing },
           cited: { kind: "turn" as const, id: citedOutside },
-          relation: "grounds" as const,
+          ...wordEdgeClass("grounds"),
           provenance: "asserted" as const,
           ...deriveSideTags([]),
         })),
@@ -3442,7 +3410,7 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
           {
             citing: { kind: "turn", id: t1 },
             cited: { kind: "turn", id: citedOutside },
-            relation: "grounds",
+            ...wordEdgeClass("grounds"),
             provenance: "asserted",
             ...deriveSideTags([]),
           },
@@ -3680,7 +3648,7 @@ describe("ticket 06 — the read tools the pull architecture depends on", () => 
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["pull-lane"]),
           },
@@ -3810,9 +3778,9 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       db.query<unknown, [number, number]>(
         `INSERT INTO memory_edges (
            citing_kind, citing_id, cited_kind, cited_id,
-           relation, provenance, tail_tag, head_tag,
+           provenance, tail_tag, head_tag,
            relation_class, relation_coverage, created_at_epoch
-         ) VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', '', '', 'use', '', ${NOW - 800})`,
+         ) VALUES ('turn', ?, 'turn', ?, 'asserted', '', '', 'use', '', ${NOW - 800})`,
       ).run(citing, t3);
     }
     return { sessionDbId, t1, t2, t3, job: claimWindow(db, sessionDbId, 1, 2) };
@@ -4130,7 +4098,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
       expect(getTurnById(db, t1)!.tags).toEqual(["lane", "writable-set"]);
       const edges = getOutgoingEdges(db, { kind: "turn", id: t2 }).filter(
-        (row) => row.relation === "extends",
+        (row) => row.relationClass === "use",
       );
       expect(edges).toHaveLength(1);
       expect([edges[0]!.tailTag, edges[0]!.headTag]).toEqual(["writable-set", "writable-set"]);
@@ -4191,7 +4159,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
         {
           citing: { kind: "turn", id: lookback },
           cited: { kind: "turn", id: cited },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["lookback-lane"]),
         },
@@ -4317,7 +4285,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           {
             citing: { kind: "turn", id: lookback },
             cited: { kind: "turn", id: far },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["outside-lane"]),
           },
@@ -4644,7 +4612,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags([]),
         },
@@ -4837,7 +4805,7 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
         {
           citing: { kind: "turn", id: citer },
           cited: { kind: "turn", id: cited },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["lane-x"]),
         },
@@ -4940,7 +4908,7 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
           {
             citing: { kind: "turn", id: citer },
             cited: { kind: "turn", id: cited },
-            relation: "grounds",
+            ...wordEdgeClass("grounds"),
             provenance: "asserted",
             ...deriveSideTags([]),
           },
@@ -5223,14 +5191,14 @@ function seedStageTwoFixture(db: Database): StageTwoFixture {
     db,
     [
       // A PRE-EXISTING BARE DRAFT on the (a2, a1) pair — both sides unsettled.
-      { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, relation: "extends", provenance: "asserted", tailTag: "", headTag: "" },
+      { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, ...wordEdgeClass("extends"), provenance: "asserted", tailTag: "", headTag: "" },
       // THE REMOVED-SIDE DEBT: a head side naming `gamma`, a lane the stage-1
       // projection took off a2.
-      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: a2 }, relation: "consume", provenance: "asserted", tailTag: "", headTag: "gamma" },
+      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: a2 }, ...wordEdgeClass("consume"), provenance: "asserted", tailTag: "", headTag: "gamma" },
       // TWO HOMELESS DRAFTS: neither side can ever be placed, because their
       // citing turn belongs to no task at all.
-      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a1 }, relation: "grounds", provenance: "asserted", tailTag: "", headTag: "" },
-      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a3 }, relation: "consume", provenance: "asserted", tailTag: "", headTag: "" },
+      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a1 }, ...wordEdgeClass("grounds"), provenance: "asserted", tailTag: "", headTag: "" },
+      { citing: { kind: "turn", id: homeless }, cited: { kind: "turn", id: a3 }, ...wordEdgeClass("consume"), provenance: "asserted", tailTag: "", headTag: "" },
     ],
     NOW,
   );
@@ -5491,7 +5459,7 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
                   {
                     citing: { kind: "turn", id: a2 },
                     cited: { kind: "turn", id: a1 },
-                    relation: "extends",
+                    ...wordEdgeClass("extends"),
                     provenance: "asserted",
                     tailTag: "alpha",
                     headTag: "alpha",
@@ -5691,7 +5659,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       // The reconciled pair holds ONE extends row, placed — not the draft
       // beside a duplicate.
       const fromA2 = getOutgoingEdges(db, { kind: "turn", id: a2 }).filter(
-        (edge) => edge.relation === "extends",
+        (edge) => edge.relationClass === "use",
       );
       expect(fromA2).toHaveLength(1);
       expect(fromA2[0]!.tailTag).toBe("alpha");
@@ -5765,8 +5733,13 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
 
       const audits = loadHomelessRetractionAuditsForGroup(db, groupId);
       expect(audits).toHaveLength(2);
-      const grounds = audits.find((row) => row.relationWord === "grounds")!;
-      const consume = audits.find((row) => row.relationWord === "consume")!;
+      // Keyed by CITED endpoint, not by word: the audit's `relation_word`
+      // column carries the class TOKEN since the cutover dropped the word
+      // column, and both of these rows are `use`.
+      const grounds = audits.find((row) => row.citedId === a1)!;
+      const consume = audits.find((row) => row.citedId === a3)!;
+      expect(grounds.relationWord).toBe("use");
+      expect(consume.relationWord).toBe("use");
 
       // FULL composite identity, every field of it.
       expect(grounds.jobId).toBe(fixture.job.id);
@@ -5856,15 +5829,15 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, relation: "extends", provenance: "judged", tailTag: "alpha", headTag: "alpha" },
+          { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, ...wordEdgeClass("extends"), provenance: "judged", tailTag: "alpha", headTag: "alpha" },
           // Two crossings, two different words — grouped, not summed into one.
-          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a1 }, relation: "consume", provenance: "judged", tailTag: "beta", headTag: "alpha" },
-          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a3 }, relation: "grounds", provenance: "judged", tailTag: "beta", headTag: "alpha" },
+          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a1 }, ...wordEdgeClass("consume"), provenance: "judged", tailTag: "beta", headTag: "alpha" },
+          { citing: { kind: "turn", id: beta }, cited: { kind: "turn", id: a3 }, ...wordEdgeClass("grounds"), provenance: "judged", tailTag: "beta", headTag: "alpha" },
           // INDUCED SINCE main-agent-edges D2: its head side is undeclared,
           // and `a2` is in exactly one lane, so the side DERIVES `alpha`. The
           // stored-side model dropped this row for want of a word nobody had
           // written; the resolver reads the endpoint instead.
-          { citing: { kind: "turn", id: a3 }, cited: { kind: "turn", id: a2 }, relation: "narrows", provenance: "judged", tailTag: "alpha", headTag: "" },
+          { citing: { kind: "turn", id: a3 }, cited: { kind: "turn", id: a2 }, ...wordEdgeClass("narrows"), provenance: "judged", tailTag: "alpha", headTag: "" },
         ],
         NOW + 1,
       );
@@ -5902,7 +5875,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: latecomer }, cited: { kind: "turn", id: a3 }, relation: "extends", provenance: "judged", tailTag: "alpha", headTag: "alpha" },
+          { citing: { kind: "turn", id: latecomer }, cited: { kind: "turn", id: a3 }, ...wordEdgeClass("extends"), provenance: "judged", tailTag: "alpha", headTag: "alpha" },
         ],
         NOW + 2,
       );
@@ -6159,7 +6132,7 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
                 {
                   citing: { kind: "turn", id: t2 },
                   cited: { kind: "turn", id: t1 },
-                  relation: "extends",
+                  ...wordEdgeClass("extends"),
                   provenance: "asserted",
                   ...deriveSideTags([]),
                 },
@@ -6555,7 +6528,7 @@ describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writabl
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags([]),
         },
@@ -6567,9 +6540,9 @@ describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writabl
     // through it — which is exactly why E4 exists as a finding over stock.
     db.query<unknown, [number, number, number]>(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
           tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', 'not-a-lane-of-mine', 'amb-one',
+       VALUES ('turn', ?, 'turn', ?, 'judged', 'not-a-lane-of-mine', 'amb-one',
                'use', '', ?)`,
     ).run(t3, t1, NOW);
     return { sessionDbId, t1, t2, t3 };
@@ -6734,14 +6707,14 @@ describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writabl
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags([]),
           },
           {
             citing: { kind: "turn", id: t3 },
             cited: { kind: "turn", id: t2 },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags([]),
           },

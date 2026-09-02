@@ -30,6 +30,7 @@ import { createUnifiedNoteSettlementDispatch } from "../../src/worker/note-settl
 import { NOTE_SETTLEMENT_UNIFIED_SYSTEM_PROMPT } from "../../src/worker/note-settlement-unified-prompt";
 import { RESPONSE_ORIGIN_TOOL_USE_META_KEY } from "../../src/worker/note-settlement-response-origin";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * STAGE 1's SHARED LOGIC, driven at the UNIFIED harness's own registration
@@ -219,7 +220,7 @@ function seed(): Fixture {
       {
         citing: { kind: "turn", id: t2 },
         cited: { kind: "turn", id: t1 },
-        relation: "extends",
+        ...wordEdgeClass("extends"),
         provenance: "asserted",
         ...deriveSideTags([]),
       },
@@ -227,7 +228,7 @@ function seed(): Fixture {
       {
         citing: { kind: "turn", id: t5 },
         cited: { kind: "turn", id: t2 },
-        relation: "grounds",
+        ...wordEdgeClass("grounds"),
         provenance: "asserted",
         ...deriveSideTags(["mapc-terrain-research"]),
       },

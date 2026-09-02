@@ -12,6 +12,7 @@ import {
 import { rankSegmentMembers } from "../../src/db/segment-rank";
 import { upsertSession } from "../../src/db/sessions";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Law 8 (indexes-rescope spec) says a deleted (`was_rolled_back`) turn is not
@@ -86,13 +87,13 @@ describe("law 8 read sides — every surface hides deleted and dormant turns", (
         {
           citing: { kind: "turn", id: live },
           cited: { kind: "turn", id: dormant },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
         {
           citing: { kind: "turn", id: live },
           cited: { kind: "turn", id: deleted },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
       ],

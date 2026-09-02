@@ -21,6 +21,7 @@ import {
   type SettlementTurnFacadeContext,
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * MAIN-AGENT-EDGES 03b — F2 and F4, the peer's two "drive it through the real
@@ -296,7 +297,7 @@ describe("one real settlement call at the degree cap, retracting and attaching t
           {
             citing: { kind: "turn", id: t1 },
             cited: { kind: "turn", id: cited[index]! },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             tailTag: "",
             headTag: "",

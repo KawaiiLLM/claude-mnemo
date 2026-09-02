@@ -26,6 +26,10 @@ import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
 import { recallMemory } from "../../src/mcp/recall";
 import { registerMainMcpTools } from "../../src/mcp/server";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { fixtureRelationClass } from "../support/lane-edge-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
+import { displayEdgeRelation } from "../../src/shared/relation-class";
 
 function resultText(result: { content: Array<{ text: string }> }): string {
   return result.content[0]!.text;
@@ -1469,7 +1473,7 @@ describe("note tool citations (spec C6)", () => {
         {
           citing: { kind: "turn", id: targetTurnId },
           cited: { kind: "turn", id: citedTurnId },
-          relation: "narrows",
+          ...wordEdgeClass("narrows"),
           provenance: "judged",
         },
       ],
@@ -1493,7 +1497,7 @@ describe("note tool citations (spec C6)", () => {
     // row, which is what the decoupling was always about.
     const survivors = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     expect(survivors).toHaveLength(1);
-    expect(survivors[0]?.relation).toBe("narrows");
+    expect(displayEdgeRelation(survivors[0]!)).toBe("correct(partial)");
   });
 
   // DELETED (main-agent-edges D1): "a rewrite that drops a reference deletes a
@@ -1595,7 +1599,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // INTERIM (relation-vocabulary-v13 ticket 02, replaced by ticket 05a): a
     // `use` write lands in the `relation` column as `extends`, and the CLASS is
     // stored beside it in its own column.
-    expect(edges[0]?.relation).toBe("extends");
+    expect(displayEdgeRelation(edges[0]!)).toBe("use");
     expect(edges[0]?.relationClass).toBe("use");
     expect(edges[0]?.relationCoverage).toBe("");
     // MAIN-AGENT-EDGES D3: BOTH sides stay UNSETTLED even though both
@@ -1682,7 +1686,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     const viaSettlement = getOutgoingEdges(db, { kind: "turn", id: settlementCitingTurnId });
     expect(viaNote).toHaveLength(1);
     expect(viaSettlement).toHaveLength(1);
-    expect(viaNote[0]?.relation).toBe(viaSettlement[0]?.relation);
+    expect(displayEdgeRelation(viaNote[0]!)).toBe(displayEdgeRelation(viaSettlement[0]!));
     expect(viaNote[0]?.tailTag).toBe(viaSettlement[0]?.tailTag);
     expect(viaNote[0]?.headTag).toBe(viaSettlement[0]?.headTag);
     expect(viaNote[0]?.cited.id).toBe(viaSettlement[0]?.cited.id);
@@ -1727,7 +1731,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       // INTERIM (ticket 05a replaces the mapping): correct/partial lands in
       // `relation` as `narrows`, which is what keeps the edge visible to every
       // reader still keyed on the seven words.
-      expect(edge?.relation).toBe("narrows");
+      expect(displayEdgeRelation(edge!)).toBe("correct(partial)");
     });
 
     // ADAPTED (main-agent-edges D5, ONE PAIR ONE ROW). This test used to
@@ -1746,8 +1750,8 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
 
       note({ turn: `S${sessionId}/T2`, correct: [placed("full")] });
       const [first] = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
-      expect([first?.relation, first?.relationClass, first?.relationCoverage]).toEqual([
-        "override",
+      expect([displayEdgeRelation(first!), first?.relationClass, first?.relationCoverage]).toEqual([
+        "correct(full)",
         "correct",
         "full",
       ]);
@@ -1757,10 +1761,10 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
       expect(stored).toHaveLength(1);
       expect([
-        stored[0]?.relation,
+        displayEdgeRelation(stored[0]!),
         stored[0]?.relationClass,
         stored[0]?.relationCoverage,
-      ]).toEqual(["narrows", "correct", "partial"]);
+      ]).toEqual(["correct(partial)", "correct", "partial"]);
       expect(stored[0]?.id).toBe(first!.id);
       expect(stored[0]?.createdAtEpoch).toBe(first!.createdAtEpoch);
     });
@@ -1826,11 +1830,11 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
         use: [`S${sessionId}/T3`],
       });
       const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId }).map(
-        (edge) => [edge.relation, edge.relationClass, edge.relationCoverage] as const,
+        (edge) => [displayEdgeRelation(edge), edge.relationClass, edge.relationCoverage] as const,
       );
       expect(stored).toEqual([
-        ["verifies", "verify", ""],
-        ["extends", "use", ""],
+        ["verify", "verify", ""],
+        ["use", "use", ""],
       ]);
     });
 
@@ -1838,37 +1842,13 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // replacement. "Unrecognized key" is not enough: a run working from a
     // cached schema or an older prompt cannot repair from it in one round trip,
     // and this codebase has paid for a stale teaching surface more than once.
-    test("every retired relation parameter is refused BY NAME, with the class to write instead", () => {
-      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
-      placeBothEndpoints(segmentTag, ["lane-a"]);
-
-      const expected: Array<[string, string]> = [
-        ["override", 'correct with `"coverage": "full"`'],
-        ["narrows", 'correct with `"coverage": "partial"`'],
-        ["extends", "use"],
-        ["consume", "use"],
-        ["grounds", "use"],
-        ["indexes", "use"],
-        ["verifies", "verify"],
-        ["retractOverride", "retractCorrect"],
-        ["retractNarrows", "retractCorrect"],
-        ["retractExtends", "retractUse"],
-        ["retractConsume", "retractUse"],
-        ["retractGrounds", "retractUse"],
-        ["retractIndexes", "retractUse"],
-        ["retractVerifies", "retractVerify"],
-      ];
-      for (const [retired, replacement] of expected) {
-        const text = resultText(
-          note({ turn: `S${sessionId}/T2`, [retired]: [`S${sessionId}/T1`] }),
-        );
-        expect(text, retired).toStartWith("Parameter error:");
-        expect(text, retired).toContain(`${retired} -> ${replacement}`);
-        expect(text, retired).toContain("THREE CLASSES");
-        expect(text, retired).toContain("Nothing was written.");
-        expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
-      }
-    });
+    // DELETED (main-agent-edges ticket 01): "every retired relation parameter
+    // is refused BY NAME, with the class to write instead". The refusal TABLE
+    // it walked was the interim bridge from the seven storage words to the
+    // three classes, and it left `src/` with the `relation` column: there is
+    // no `override`/`narrows`/… parameter for a caller to be redirected FROM,
+    // and an unknown key is an ordinary schema parse error. What the class
+    // parameters themselves accept and refuse is pinned by the cases above.
 
     // The mirrors address a CLASS, so they reach a row written under the
     // retired vocabulary too — the E2 deadlock (a stored word with no deletion
@@ -1898,13 +1878,16 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
         db,
         (
           [
-            ["grounds", citedTurnId],
-            ["override", secondCitedTurnId],
+            [{ relationClass: "use" as const }, citedTurnId],
+            [
+              { relationClass: "correct" as const, relationCoverage: "full" as const },
+              secondCitedTurnId,
+            ],
           ] as const
-        ).map(([relation, cited]) => ({
+        ).map(([classification, cited]) => ({
           citing: { kind: "turn" as const, id: citingTurnId },
           cited: { kind: "turn" as const, id: cited },
-          relation,
+          ...classification,
           provenance: "judged" as const,
           tailTag: "lane-a",
           headTag: "lane-a",
@@ -1938,16 +1921,24 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     test("retractCorrect takes a legacy pair's both coverage rows in one call", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
-      const insertLegacyRow = db.query<null, [string]>(
-        `INSERT INTO memory_edges (
-           citing_kind, citing_id, cited_kind, cited_id,
-           relation, provenance, tail_tag, head_tag,
-           relation_class, relation_coverage, created_at_epoch
-         ) VALUES ('turn', ${citingTurnId}, 'turn', ${citedTurnId},
-                   ?, 'judged', 'lane-a', 'lane-a', '', '', 900)`,
-      );
-      insertLegacyRow.run("override");
-      insertLegacyRow.run("narrows");
+      // On the PRE-CUTOVER shape (idempotent): the rebuilt table is UNIQUE on
+      // the pair, so a legacy multi-row pair exists only while D9's fence
+      // defers the migration.
+      const insertLegacyRow = (relation: string) => {
+        downgradeToPreCutoverShape(db);
+        seedPreCutoverEdge(db, {
+          citingId: citingTurnId,
+          citedId: citedTurnId,
+          relation,
+          ...fixtureRelationClass({ relation }),
+          provenance: "judged",
+          tailTag: "lane-a",
+          headTag: "lane-a",
+          createdAtEpoch: 900,
+        });
+      };
+      insertLegacyRow("override");
+      insertLegacyRow("narrows");
       expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(2);
 
       expect(

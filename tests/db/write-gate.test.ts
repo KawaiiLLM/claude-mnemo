@@ -62,9 +62,9 @@ afterEach(() => db.close());
 function seedOutgoingRelationAtom(citingTurnId: number, citedTurnId = 9_001): void {
   db.query<unknown, [number, number]>(
     `INSERT INTO memory_edges
-       (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+       (citing_kind, citing_id, cited_kind, cited_id, provenance,
         tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-     VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', 'use', '', 100)`,
+     VALUES ('turn', ?, 'turn', ?, 'asserted', '', '', 'use', '', 100)`,
   ).run(citingTurnId, citedTurnId);
 }
 

@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -49,7 +53,8 @@ function storedTableSql(db: Database): string {
   return (
     db
       .query<{ sql: string | null }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
       )
       .get()?.sql ?? ""
   );
@@ -99,11 +104,21 @@ function allNewEdges(db: Database): NewEdgeRow[] {
          cited_kind AS citedKind, cited_id AS citedId,
          relation, provenance, tail_tag AS tailTag, head_tag AS headTag,
          created_at_epoch AS createdAtEpoch
-       FROM memory_edges ORDER BY citing_id, cited_id, relation`,
+       FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY citing_id, cited_id, relation`,
     )
     .all();
 }
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () => {
   let db: Database;
 
@@ -176,25 +191,27 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     // column that carries it rather than the one that used to.
     expect(storedTableSql(db)).toContain("tail_tag TEXT NOT NULL");
     expect(storedTableSql(db)).not.toContain("tags TEXT NOT NULL");
+    // The LANE-IN-IDENTITY half of this case is REVERSED by the
+    // main-agent-edges cutover: this migration made a differently-laned row on
+    // an existing (pair, relation) legal, and the cutover made the PAIR alone
+    // the UNIQUE key, so a second row on pair (1, 2) is refused whatever its
+    // sides. Both facts are asserted, each where it holds — the archived key
+    // above, the live refusal here.
+    expect(storedTableSql(db)).toContain("tail_tag, head_tag");
     expect(() =>
       db.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
-         VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 'laneA', 'laneA', 900)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, tail_tag, head_tag, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 'laneA', 'laneA', 900)`,
       ),
-    ).not.toThrow();
-    expect(countRows(db)).toBe(9);
-
-    // The unsettled row and the laneA row are two DISTINCT rows on the same
-    // (pair, relation) — confirming the uniqueness key, not merely that the
-    // insert succeeded.
+    ).toThrow();
     const relatedRows = db
-      .query<{ tailTag: string }, [number, number]>(
+      .query<{ tailTag: string }, []>(
         `SELECT tail_tag AS tailTag FROM memory_edges
          WHERE citing_kind = 'turn' AND citing_id = 1
            AND cited_kind = 'turn' AND cited_id = 2`,
       )
-      .all(1, 2);
-    expect(relatedRows.map((row) => row.tailTag).sort()).toEqual(["", "laneA"]);
+      .all();
+    expect(relatedRows.map((row) => row.tailTag)).toEqual([""]);
   });
 
   function countRows(database: Database): number {
@@ -270,8 +287,8 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     expect(storedTableSql(fresh)).toContain("tail_tag TEXT NOT NULL");
     const row = fresh
       .query<{ id: number; tailTag: string; headTag: string }, []>(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 100)
          RETURNING id, tail_tag AS tailTag, head_tag AS headTag`,
       )
       .get();
@@ -317,12 +334,22 @@ describe("memory_edges tag-set identity migration (rubric-v10 ticket 01)", () =>
     initializeSchema(legacy);
 
     expect(storedTableSql(legacy)).toContain("tail_tag TEXT NOT NULL");
+    // The cutover deletes the fixture's WORDLESS row on the way out (spec D1),
+    // so the live table carries the two class-bearing ones; the archive still
+    // holds all three, which is where "the chain migrated cleanly" reads.
+    expect(
+      legacy
+        .query<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`,
+        )
+        .get()!.n,
+    ).toBe(3);
     const rows = legacy
       .query<{ tailTag: string; headTag: string }, []>(
         "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges",
       )
       .all();
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(2);
     for (const row of rows) {
       expect(row.tailTag).toBe("");
       expect(row.headTag).toBe("");

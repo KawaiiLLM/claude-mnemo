@@ -1,22 +1,11 @@
-import { EDGE_RELATIONS, type TurnEdgeRelation } from "./turn-phase";
-
 /**
  * The THREE-CLASS relation vocabulary (relation-vocabulary-v13 spec, ticket 02;
  * user ruling S15069/T2391 — "先直接落地 B,别测了,不如实际看看").
  *
- * WHAT REPLACED WHAT. Seven words (`override narrows extends indexes consume
- * grounds verifies`) collapse into three CLASSES, one of which carries a
- * coverage bit:
- *
- *   correct  (+ full | partial)   absorbs `override` (full) and `narrows` (partial)
- *   verify                        absorbs `verifies`
- *   use                           absorbs `extends`, `consume`, `grounds`, `indexes`
- *
- * The measured reason is in the spec: in two blind three-arm batteries every
- * citation a reader actually invoked as evidence was an `override` edge, and
- * `extends`/`consume` score 0 on both sides of the election's own frozen
- * weights. Seven words were paid for at write time and not harvested at read
- * time.
+ * An edge is a fact about two nodes: citing, cited, CLASS, coverage. This
+ * module is the whole of the class vocabulary — the three classes, the
+ * coverage bit that only one of them carries, the ONE accessor a stored row is
+ * read through, and its SQL form.
  *
  * THE DECIDING PROCEDURE IS A PRECEDENCE, NOT A PARTITION (spec, RESTATED
  * after peer review; user rulings S15069/T2300, T2305):
@@ -29,37 +18,25 @@ import { EDGE_RELATIONS, type TurnEdgeRelation } from "./turn-phase";
  * SPECIFIC class. One row per pair: an edge that both corrected and built on
  * its target is CORRECT, and no second row is written for it.
  *
- * ## Storage — additive, and reversible by a READ-SIDE switch
+ * ## Storage, after the main-agent-edges cutover (spec D1, ticket 01)
  *
- * This module is the WHOLE mapping layer, and the storage decision it encodes
- * is what makes ticket 03's migration additive:
+ * `memory_edges.relation_class` is NOT NULL and CHECKed to the three classes;
+ * `relation_coverage` is `full`/`partial` on a `correct` row and `''` on every
+ * other. The seven-word `relation` column, the legacy word -> class bridge
+ * (`LEGACY_RELATION_CLASS`), the interim write-side fill
+ * (`interimLegacyRelation`) and the retired-parameter refusal table all left
+ * with that column. The seven words survive in exactly one place —
+ * `db/schema.ts`, as a frozen migration literal for a database that predates
+ * the three-class backfill — and nothing at runtime names one.
  *
- *   - `memory_edges.relation` KEEPS its seven-word CHECK, untouched. A new
- *     three-class write fills it from `INTERIM_LEGACY_RELATION` below.
- *   - `memory_edges.relation_class` / `relation_coverage` are the two ADDED
- *     columns. A new write fills them; every row written before this release
- *     carries `''` in both.
- *   - `edgeRelationClass()` is the ONE accessor: a row's class comes from the
- *     stored class when it has one, and from `LEGACY_RELATION_CLASS` (old word
- *     -> class + bit) when it does not. No reader forks on old-versus-new, and
- *     no reader asking for a CLASS keys on an old word for a new row.
- *
- * The alternative — putting the class word into `relation` itself and widening
- * the table's CHECK — was rejected: SQLite cannot alter a CHECK without a full
- * table rebuild (a heavy migration on the production edge table), and the
- * cutover would then have to REWRITE `relation` in place on existing rows, so
- * rollback would stop being a read-side switch and become a data restore.
- *
- * MAIN-AGENT-EDGES TICKET 02 finished the READ side of that plan: no reader in
- * the tree keys on a stored word any more. `edgeRelationClass` below (and its
- * SQL form, `relationClassBearingSql`) is the ONE place the seven words are
- * still consulted, as the legacy bridge for rows written before the class
- * columns existed. The WRITE side — `interimLegacyRelation`'s one call site in
- * `db/citations.ts` — stays until the cutover drops the column, because the
- * storage identity key is still `(pair, relation, tail, head)` and
- * `relation IS NULL` is the BARE-ROW discriminator: a class edge written with
- * no word would be indistinguishable from a prose reference and would collide
- * with that pair's bare row under `idx_memory_edges_bare_pair`.
+ * ONE WINDOW in which a row can still carry NO class: D9's durable fence
+ * defers the cutover while a settlement claim is live, and every initializer
+ * proceeds on the OLD schema until the claim set drains. In that window the
+ * pre-cutover wordless rows (`relation_class = ''`) still exist and every
+ * class-bearing row already carries its class (the backfill ran before the
+ * fence is ever consulted). `edgeRelationClass` answers `null` for such a row
+ * and `relationClassBearingSql` excludes it — after the cutover both are
+ * tautologies on a table whose CHECK admits nothing else.
  */
 
 /** The three classes a NEW edge write may carry. Ordered most specific first — the precedence's own order. */
@@ -81,11 +58,16 @@ export type RelationClass = (typeof RELATION_CLASSES)[number];
 export const RELATION_COVERAGES = ["full", "partial"] as const;
 export type RelationCoverage = (typeof RELATION_COVERAGES)[number];
 
-/** The stored "no coverage" value — `verify` and `use` rows, and every pre-v13 row. */
+/** The stored "no coverage" value — `verify` and `use` rows. */
 export const NO_RELATION_COVERAGE = "";
 export type RelationCoverageValue = RelationCoverage | typeof NO_RELATION_COVERAGE;
 
-/** The stored "not classified" value — every row written before this release. */
+/**
+ * The stored "not classified" value. After the cutover no `memory_edges` row
+ * carries it (the column is NOT NULL and CHECKed to the three classes); it
+ * survives as a TYPE because rows read in the deferral window (module header)
+ * and receipt tables that copy an old row still can.
+ */
 export const NO_RELATION_CLASS = "";
 export type RelationClassValue = RelationClass | typeof NO_RELATION_CLASS;
 
@@ -107,165 +89,43 @@ export function relationClassRequiresCoverage(relationClass: RelationClass): boo
   return relationClass === "correct";
 }
 
-/**
- * OLD WORD -> class + bit. The single mapping every reader that wants a class
- * uses; nothing else in the tree may re-derive it.
- *
- * Complete over `EDGE_RELATIONS` by construction (the exhaustive `Record`), so
- * a word added to the storage vocabulary without a class here is a
- * compile-time error rather than a row that silently reads as unclassified.
- */
-export const LEGACY_RELATION_CLASS: Record<
-  TurnEdgeRelation,
-  { relationClass: RelationClass; relationCoverage: RelationCoverageValue }
-> = {
-  override: { relationClass: "correct", relationCoverage: "full" },
-  narrows: { relationClass: "correct", relationCoverage: "partial" },
-  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
-  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-};
-
-/**
- * CLASS -> every stored word that means it, derived from the table above so the
- * two directions cannot disagree.
- *
- * This is what makes RETRACTION class-level and complete: `retractUse` deletes
- * a legacy `grounds`/`consume`/`indexes` row as readily as a new one. Leaving a
- * stored word with no retraction path is the E2 DEADLOCK this codebase already
- * paid for once (`db/citations.ts`'s `RETRACTION_ONLY_RELATIONS` carries the
- * full history) — a window owning a row it cannot delete can never commit.
- */
-export const LEGACY_RELATIONS_BY_CLASS: Record<RelationClass, readonly TurnEdgeRelation[]> =
-  Object.freeze({
-    correct: EDGE_RELATIONS.filter(
-      (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct",
-    ),
-    verify: EDGE_RELATIONS.filter(
-      (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify",
-    ),
-    use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use"),
-  });
-
-/**
- * INTERIM — the WRITE-SIDE fill, retired by the CUTOVER (main-agent-edges D1),
- * not by any reader.
- *
- * class + coverage -> the seven-word value a NEW row's `relation` column
- * carries.
- *
- *   correct/full    ~= override
- *   correct/partial ~= narrows
- *   verify          ~= verifies
- *   use             ~= extends
- *
- * `~=` and not `=`: `use` also absorbs `consume`, `grounds` and `indexes`, so
- * the mapping is onto a REPRESENTATIVE, not a bijection.
- *
- * WHY IT IS STILL WRITTEN, now that no reader keys on it (ticket 02). The
- * column is not decoration until the cutover rebuilds the table: storage
- * identity is `(pair, relation, tail, head)`, and `relation IS NULL` is the
- * BARE-ROW discriminator (`idx_memory_edges_bare_pair`, the DDL's own CHECK,
- * and the prune/restore paths). A class edge written with no word would read as
- * a prose reference to every one of them and would collide with the pair's
- * existing bare row. So the fill stays, and the READS are what ticket 02
- * removed: the word is written by exactly one call site
- * (`db/citations.ts`'s `attachTurnRelations`) and read by exactly one accessor
- * (`edgeRelationClass` below, plus its SQL form) as the legacy bridge.
- */
-export const INTERIM_LEGACY_RELATION: ReadonlyArray<{
-  relationClass: RelationClass;
-  relationCoverage: RelationCoverageValue;
-  legacy: TurnEdgeRelation;
-}> = Object.freeze([
-  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
-  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
-  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
-  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" },
-]);
-
-/**
- * The storage word a new (class, coverage) write lands under. Throws rather
- * than guessing — every caller has already validated the pairing through
- * `checkRelationCoverage` below, so an unmapped combination is a programming
- * error, not user input.
- */
-export function interimLegacyRelation(
-  relationClass: RelationClass,
-  relationCoverage: RelationCoverageValue,
-): TurnEdgeRelation {
-  const entry = INTERIM_LEGACY_RELATION.find(
-    (row) => row.relationClass === relationClass && row.relationCoverage === relationCoverage,
-  );
-  if (!entry) {
-    throw new Error(
-      `no interim legacy relation for class "${relationClass}" coverage "${relationCoverage}"`,
-    );
-  }
-  return entry.legacy;
-}
-
-/** The shape `edgeRelationClass` reads — a stored row, however it was written. */
+/** The shape `edgeRelationClass` reads — a stored row's two class columns. */
 export interface RelationClassBearingRow {
-  relation: TurnEdgeRelation | string | null;
   relationClass: RelationClassValue;
   relationCoverage: RelationCoverageValue;
 }
 
 /**
- * THE ONE ACCESSOR. A row's class, whether it was written under the three-class
- * vocabulary or under the seven words.
- *
- * `null` for a BARE row (`relation IS NULL` — the prose-citation index, which
- * carries no relation at all) and for a stored word outside the vocabulary
- * (pre-migration stock, which the lane checker already reports as a warning and
- * admits to no graph).
+ * THE ONE ACCESSOR. A row's class, or `null` for a row that carries none —
+ * reachable only in the deferral window (module header), where a pre-cutover
+ * wordless row still stands with `relation_class = ''`.
  */
 export function edgeRelationClass(
   row: RelationClassBearingRow,
 ): { relationClass: RelationClass; relationCoverage: RelationCoverageValue } | null {
-  if (isRelationClass(row.relationClass)) {
-    return {
-      relationClass: row.relationClass,
-      relationCoverage: isRelationCoverage(row.relationCoverage)
-        ? row.relationCoverage
-        : NO_RELATION_COVERAGE,
-    };
-  }
-  if (row.relation === null) {
+  if (!isRelationClass(row.relationClass)) {
     return null;
   }
-  return LEGACY_RELATION_CLASS[row.relation as TurnEdgeRelation] ?? null;
+  return {
+    relationClass: row.relationClass,
+    relationCoverage: isRelationCoverage(row.relationCoverage)
+      ? row.relationCoverage
+      : NO_RELATION_COVERAGE,
+  };
 }
 
 /**
  * `edgeRelationClass`, EXPRESSED AS SQL — "this row resolves to a relation
- * class", for a loader that has to narrow in the database rather than in JS
- * (main-agent-edges ticket 02).
+ * class", for a loader that has to narrow in the database rather than in JS.
  *
- * It exists so that no OTHER file has to spell a retired word. Every loader
- * that used to write `relation IN ('override', 'narrows', …)` — the election
- * feed, the frontier, the lane checker's passes — calls this instead, and the
- * word list is generated from the SAME table the accessor above reads, so the
- * SQL and the JS cannot disagree about which rows carry a class.
- *
- * Two arms, mirroring the accessor exactly: a row with a stored CLASS
- * qualifies on the class alone; a row without one qualifies iff its stored
- * word maps to a class. The second arm is the migration bridge and disappears
- * with the column (spec D1) — at which point this collapses to the first arm
- * and every caller keeps compiling.
+ * After the cutover this is a tautology (the CHECK admits nothing else); in the
+ * deferral window it is what keeps the pre-cutover wordless rows out of every
+ * graph. Every loader keeps calling it rather than dropping the predicate so
+ * that the two states read the same code.
  */
 export function relationClassBearingSql(alias: string): string {
   const classes = RELATION_CLASSES.map((value) => `'${value}'`).join(", ");
-  const words = (Object.keys(LEGACY_RELATION_CLASS) as TurnEdgeRelation[])
-    .map((word) => `'${word}'`)
-    .join(", ");
-  return (
-    `(${alias}.relation_class IN (${classes}) OR ` +
-    `(COALESCE(${alias}.relation_class, '') = '' AND ${alias}.relation IN (${words})))`
-  );
+  return `(${alias}.relation_class IN (${classes}))`;
 }
 
 /**
@@ -283,22 +143,14 @@ export function formatRelationClass(
 }
 
 /**
- * What a renderer prints for one stored row.
- *
- * A CLASSIFIED row prints its class; an unclassified legacy row prints the word
- * it was written under, UNCHANGED. That asymmetry is deliberate and is what
- * keeps ticket 03's migration honest: a legacy row renders exactly as it did
- * before this release until that ticket classifies it, so nothing about the
- * existing corpus's rendering moves on this release.
+ * What a renderer prints for one stored row: its class token, or `''` for a
+ * row that carries no class (deferral window only).
  */
 export function displayEdgeRelation(row: RelationClassBearingRow): string {
-  if (isRelationClass(row.relationClass)) {
-    return formatRelationClass(
-      row.relationClass,
-      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE,
-    );
-  }
-  return row.relation ?? "";
+  const resolved = edgeRelationClass(row);
+  return resolved === null
+    ? ""
+    : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
 }
 
 /** Why a (class, coverage) pair was refused. */
@@ -321,67 +173,4 @@ export function checkRelationCoverage(
     return relationCoverage === NO_RELATION_COVERAGE ? "coverage-required" : null;
   }
   return relationCoverage === NO_RELATION_COVERAGE ? null : "coverage-not-allowed";
-}
-
-/**
- * THE RETIRED PARAMETER NAMES, and what to write instead
- * (relation-vocabulary-v13 ticket 02).
- *
- * A caller that sends `override` must be told the WORD, not just that the key
- * is unknown: this codebase's own standing lesson is that a stale teacher
- * anywhere — a cached tool schema, a prompt an old worker still holds, a habit
- * — produces a call the model cannot repair from "unrecognized key". The
- * suggestion is what makes the refusal actionable in one round trip.
- *
- * Both halves are listed, assertion and `retract…` mirror, because a settlement
- * run mid-flight may hold either.
- */
-export const RETIRED_RELATION_FIELDS: ReadonlyArray<
-  readonly [retired: string, replacement: string]
-> = Object.freeze([
-  ["override", 'correct with `"coverage": "full"`'],
-  ["narrows", 'correct with `"coverage": "partial"`'],
-  ["extends", "use"],
-  ["consume", "use"],
-  ["grounds", "use"],
-  ["indexes", "use — convergence is no longer declared; cite what you used"],
-  ["verifies", "verify"],
-  ["retractOverride", "retractCorrect"],
-  ["retractNarrows", "retractCorrect"],
-  ["retractExtends", "retractUse"],
-  ["retractConsume", "retractUse"],
-  ["retractGrounds", "retractUse"],
-  ["retractIndexes", "retractUse"],
-  ["retractVerifies", "retractVerify"],
-]);
-
-/**
- * The refusal one write surface returns for a call carrying retired relation
- * parameters — ONE message for both writers, so `note` and the settlement
- * facade cannot answer the same mistake two different ways.
- *
- * Returns null when the call carries none, which is the ordinary case and the
- * only cost this check adds to it.
- */
-export function retiredRelationFieldRefusal(
-  input: Readonly<Record<string, unknown>>,
-): string | null {
-  const reached = RETIRED_RELATION_FIELDS.filter(
-    ([retired]) => input[retired] !== undefined,
-  );
-  if (reached.length === 0) {
-    return null;
-  }
-  const named = reached
-    .map(([retired, replacement]) => `${retired} -> ${replacement}`)
-    .join("; ");
-  return (
-    `${reached.length === 1 ? "is a" : "are"} retired relation parameter` +
-    `${reached.length === 1 ? "" : "s"}: ${named}. The seven relation words are ` +
-    "replaced by THREE CLASSES — `correct` (carrying a `coverage` of `full` or " +
-    "`partial`), `verify`, `use` — decided by precedence: does this output change " +
-    "the cited result's acceptance, reliability or scope (negated/limited = " +
-    "correct, confirmed/supported = verify)? otherwise, is the cited result a " +
-    "direct input to it (= use)? Nothing was written."
-  );
 }

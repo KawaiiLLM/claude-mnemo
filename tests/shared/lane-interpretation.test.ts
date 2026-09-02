@@ -170,7 +170,15 @@ describe("lane enumeration", () => {
     // ONE tag surface since ticket 09: the two SIDE tags, which a same-lane
     // edge repeats on both ends (lane-model-v12 D1).
     expect(lane?.taggedEdges).toEqual([
-      { citingId: 2, citedId: 1, relation: "grounds", tailTag: "x", headTag: "x" },
+      {
+        citingId: 2,
+        citedId: 1,
+        relation: "use",
+        relationClass: "use",
+        relationCoverage: "",
+        tailTag: "x",
+        headTag: "x",
+      },
     ]);
   });
 

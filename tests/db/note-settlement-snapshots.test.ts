@@ -24,6 +24,7 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { recallMemory } from "../../src/mcp/recall";
 import { ERA_GRANT_COLUMN } from "../../src/segment-era";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * THE THREE TRANSITION SNAPSHOTS (staged-settlement spec Rev 5, §Persisted
@@ -103,7 +104,7 @@ function edge(
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags(laneTag ? [laneTag] : []),
       },

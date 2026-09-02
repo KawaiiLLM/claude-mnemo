@@ -19,6 +19,7 @@ import {
   type NoteSettlementContext,
 } from "../../src/worker/note-settlement-context";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Settlement-ergonomics ticket 04 (spec D0) — `resolveSettlementScopeProvenance`
@@ -81,7 +82,7 @@ function edge(citingId: number, citedId: number, relation: string): void {
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags([]),
       },

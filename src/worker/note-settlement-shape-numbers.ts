@@ -164,7 +164,6 @@ interface ShapeEdgeRow {
   id: number;
   citingId: number;
   citedId: number;
-  relation: string | null;
   relationClass: string | null;
   relationCoverage: string | null;
   /** The row's STORED declarations — resolved into `tailLane`/`headLane` below and never compared directly. */
@@ -246,7 +245,6 @@ export function computeSettlementShapeNumbers(
   const resolved: ResolvedShapeEdge[] = [];
   for (const row of edges) {
     const relationClass = edgeRelationClass({
-      relation: row.relation,
       relationClass: (row.relationClass ?? "") as never,
       relationCoverage: (row.relationCoverage ?? "") as never,
     });
@@ -357,7 +355,6 @@ function readShapeEdges(db: Database, vertices: ReadonlySet<number>): ShapeEdgeR
           `SELECT id,
                   citing_id AS citingId,
                   cited_id AS citedId,
-                  relation,
                   relation_class AS relationClass,
                   relation_coverage AS relationCoverage,
                   tail_tag AS tailTag,

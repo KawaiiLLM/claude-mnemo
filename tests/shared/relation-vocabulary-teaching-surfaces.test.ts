@@ -8,7 +8,6 @@ import {
   MEMORY_RUBRIC_MAIN_ACTIONS_TEXT,
 } from "../../src/shared/memory-rubric";
 import { RELATION_CLASSES } from "../../src/shared/relation-class";
-import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { SETTLEMENT_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 
 /**
@@ -272,9 +271,11 @@ describe("no teaching surface still names a retired relation vocabulary or the p
   test("the vocabulary is THREE CLASSES on every surface that enumerates it", () => {
     expect(RELATION_CLASSES).toHaveLength(3);
     expect([...RELATION_CLASSES]).toEqual(["correct", "verify", "use"]);
-    // The seven STORAGE words are untouched — they are what a stored row's
-    // `relation` column says, and ticket 03 migrates them additively.
-    expect(EDGE_RELATIONS).toHaveLength(7);
+    // The seven STORAGE words are GONE, not merely unenumerated: the
+    // main-agent-edges cutover dropped the `relation` column and
+    // `EDGE_RELATIONS` with it, so there is no second vocabulary for a surface
+    // to fall back on. The negative half of this file is what proves no
+    // surface still names one.
     // main-agent-edges ticket 05 (spec D3): the main agent's own description
     // enumerates the three as ITS OWN routine parameters. The sentence that
     // disowned them is asserted gone here too — this file is the sweep that

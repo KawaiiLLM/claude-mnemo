@@ -12,6 +12,7 @@ import {
   type SegmentSpineRow,
 } from "../db/segment-rank";
 import { liveTurnSql } from "../db/turn-liveness";
+import { readTurnTags } from "../db/turn-tags";
 import type { QueryOutcome } from "./query-outcome";
 import { getSegment, segmentTagOf, type SegmentRecord } from "../db/segments";
 import { loadSettlementCoveredTurnIds } from "../db/note-settlement";
@@ -1425,7 +1426,6 @@ function buildElectedCitations(
     // relation-vocabulary-v13 ticket 02: the milestone `↳` row names the class.
     entry.words.add(
       displayEdgeRelation({
-        relation: edge.relation,
         relationClass: edge.relationClass ?? NO_RELATION_CLASS,
         relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
       }),
@@ -3584,7 +3584,6 @@ function resolveTurnRowLinks(
       {
         citingId: number;
         citedId: number;
-        relation: string | null;
         tailTag: string;
         headTag: string;
         relationClass: RelationClassValue | null;
@@ -3596,13 +3595,14 @@ function resolveTurnRowLinks(
       // so it may not appear as a `↳` antecedent either — the index row is the
       // graph's most visible face. Filtered at BOTH ends here, at the source:
       // the cited lookup below then reads only ids this filter already passed.
-      `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+      `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId,
               e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
          JOIN turns cited ON cited.id = e.cited_id
         WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND ${relationClassBearingSql("e")}
           AND ${liveTurnSql("citing")}
           AND ${liveTurnSql("cited")}
           AND e.citing_id IN (${placeholders})`,
@@ -3662,18 +3662,13 @@ function resolveTurnRowLinks(
       bucket.push(entry);
       byCiter.set(edge.citingId, bucket);
     }
-    if (edge.relation !== null) {
-      // relation-vocabulary-v13 ticket 02: the `↳` line names the CLASS a row
-      // was written under, and the stored seven-word value only for rows older
-      // than that vocabulary.
-      entry.words.add(
-        displayEdgeRelation({
-          relation: edge.relation,
-          relationClass: edge.relationClass ?? NO_RELATION_CLASS,
-          relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
-        }),
-      );
-    }
+    // relation-vocabulary-v13 ticket 02: the `↳` line names the CLASS.
+    entry.words.add(
+      displayEdgeRelation({
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
+      }),
+    );
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
     }
@@ -4671,14 +4666,7 @@ const COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
  * so no comparison below ever reads a bare tag string alone.
  */
 interface FrontierEdge {
-  /**
-   * The stored word, carried for ONE consumer: `edgeRelationClass`'s legacy
-   * bridge, which is how a row written before the class columns still answers
-   * "which class is this". Nothing here compares it, switches on it or renders
-   * it — the cutover drops the column and this field goes with it.
-   */
-  relation: string | null;
-  /** What a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older (`displayEdgeRelation`). A LABEL only: nothing scores or filters on it except the same-weight determinism tiebreak. */
+  /** What a reader is SHOWN — the class token (`displayEdgeRelation`). A LABEL only: nothing scores or filters on it except the same-weight determinism tiebreak. */
   relationLabel: string;
   /** The SCORING key — the two stored class columns, read through `edgeRelationClass` (main-agent-edges ticket 02: no frontier reader keys on a stored word any more). */
   relationClass: RelationClassValue;
@@ -4735,18 +4723,9 @@ function isCompactSyntheticTagList(tags: readonly string[]): boolean {
 }
 
 /** Defensive raw-tag parse (same posture as `db/lanes.ts`'s CASE guards): an unreadable column claims nothing. */
+/** THE ONE PARSER (`db/turn-tags.ts`, main-agent-edges ticket 01): a malformed value throws by name — the storage trigger refuses it, so there is nothing to coerce. */
 function parseRawTagList(raw: string | null): string[] {
-  if (raw === null) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((tag): tag is string => typeof tag === "string")
-      : [];
-  } catch {
-    return [];
-  }
+  return readTurnTags(raw);
 }
 
 function loadRawTurnTags(
@@ -4798,7 +4777,6 @@ function loadFrontierEdges(
   }
   const placeholders = ids.map(() => "?").join(",");
   interface Row {
-    relation: string | null;
     relationClass: RelationClassValue | null;
     relationCoverage: RelationCoverageValue | null;
     tailTurnId: number;
@@ -4816,8 +4794,7 @@ function loadFrontierEdges(
   }
   const rows = db
     .query<Row, number[]>(
-      `SELECT e.relation AS relation,
-              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
+      `SELECT e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -4857,9 +4834,7 @@ function loadFrontierEdges(
       laneFacts,
     );
     return {
-    relation: row.relation,
     relationLabel: displayEdgeRelation({
-      relation: row.relation,
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
       relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     }),

@@ -11,6 +11,8 @@ import { createDatabase } from "../../src/db/database";
 import { getIncomingEdges, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 /**
  * Settlement-read-once ticket 00, spec D0 — the degree caps (USER RULING
@@ -84,7 +86,7 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: relation as never,
+          ...wordEdgeClass(relation),
           provenance: "asserted",
           tailTag: "",
           headTag: "",
@@ -105,15 +107,18 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
     );
   }
 
+  // An ATOM is a row that carries a CLASS. `MemoryEdge.relation` left with the
+  // word column at the main-agent-edges cutover, so the wordless row a cap
+  // must not count is the one whose `relationClass` is `''`.
   function outgoingAtoms(turnId: number): number {
     return getOutgoingEdges(db, { kind: "turn", id: turnId }).filter(
-      (edge) => edge.relation !== null,
+      (edge) => edge.relationClass !== "",
     ).length;
   }
 
   function incomingAtoms(turnId: number): number {
     return getIncomingEdges(db, { kind: "turn", id: turnId }).filter(
-      (edge) => edge.relation !== null,
+      (edge) => edge.relationClass !== "",
     ).length;
   }
 
@@ -338,14 +343,19 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
     // (`bare-row-retired`), but the stored population stands until ticket 01's
     // cutover deletes it, and until then it must still not exhaust a turn's
     // edge budget.
-    const insertBare = db.query<unknown, [number, number]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', '', '', '', '', ${NOW})`,
-    );
+    // On the PRE-CUTOVER shape: the cutover deleted every wordless row and
+    // `relation_class` is NOT NULL on the rebuilt table, so the population
+    // exists only while D9's fence defers the migration — and there the caps
+    // must still not count it.
+    downgradeToPreCutoverShape(db);
     for (let index = 0; index < 20; index += 1) {
-      insertBare.run(citing, cited[index]!);
+      seedPreCutoverEdge(db, {
+        citingId: citing,
+        citedId: cited[index]!,
+        relation: null,
+        provenance: "text-ref",
+        createdAtEpoch: NOW,
+      });
     }
     expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toHaveLength(20);
     expect(outgoingAtoms(citing)).toBe(0);

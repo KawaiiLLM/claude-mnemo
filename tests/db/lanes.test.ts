@@ -14,6 +14,8 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeTurnsTagsToPreCutover } from "../support/pre-cutover-edge-shape";
 
 /**
  * `checkCanonicalLaneTag`'s charset (container-unification ticket 01, spec
@@ -142,9 +144,13 @@ describe("undeclare's guard — a MEMBER NODE holds the lane open (ticket 10)", 
     promptNumber: number,
     options: { status?: string; wasRolledBack?: boolean; tags?: string[] | string } = {},
   ): number {
+    // `undefined` stores `'[]'`, not NULL: the main-agent-edges cutover
+    // normalised every NULL away and put a trigger over the column. A raw
+    // string still goes in verbatim, on a table this fixture first moves back
+    // to the pre-cutover shape (see `seedMalformedTags`).
     const tags =
       options.tags === undefined
-        ? null
+        ? "[]"
         : typeof options.tags === "string"
           ? options.tags
           : JSON.stringify(options.tags);
@@ -170,7 +176,7 @@ describe("undeclare's guard — a MEMBER NODE holds the lane open (ticket 10)", 
         {
           citing: { kind: "turn", id: citingId },
           cited: { kind: "turn", id: citedId },
-          relation: "extends" as never,
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(tags),
         },
@@ -314,6 +320,11 @@ describe("undeclare's guard — a MEMBER NODE holds the lane open (ticket 10)", 
   // WHERE clause that fails the WHOLE statement. One unreadable column must
   // not make `undeclare` un-runnable for the entire segment.
   test("a malformed tags column claims no lane and does not take the guard down", () => {
+    // The malformed values this case is about cannot be STORED any more (the
+    // cutover's `turns` trigger refuses them), so the table goes back to the
+    // shape they exist in — D9's deferral window, where the guard still has to
+    // survive one.
+    downgradeTurnsTagsToPreCutover(db);
     const broken = seedTurn(1, { tags: "{not json" });
     const nonArray = seedTurn(2, { tags: '"write-gate"' });
     const real = seedTurn(3, { tags: ["write-gate"] });

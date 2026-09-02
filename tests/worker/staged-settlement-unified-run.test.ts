@@ -33,6 +33,7 @@ import {
   createSegment,
 } from "../../src/db/segments";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * THE UNIFIED RUN, DRIVEN DIRECTLY (settlement-execution-repair ticket 03).
@@ -874,7 +875,7 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
         {
           citing: { kind: "turn", id: citer },
           cited: { kind: "turn", id: fixture.t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["lane-x"]),
         },
@@ -1008,7 +1009,7 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
               {
                 citing: { kind: "turn", id: fixture.t1 },
                 cited: { kind: "turn", id: outsiderId },
-                relation: "grounds",
+                ...wordEdgeClass("grounds"),
                 provenance: "asserted",
               },
             ],

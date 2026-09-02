@@ -16,10 +16,8 @@ import {
   MAX_TURN_BUDGET,
 } from "../../src/mcp/definitions";
 import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
-import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
 import { RELATION_CLASSES } from "../../src/shared/relation-class";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/db/citations";
-import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { REMEMBER_VERBS } from "../../src/mcp/remember";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { z } from "zod";
@@ -911,10 +909,11 @@ describe("tool surface", () => {
 
   // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary
   // lists must derive from (or be guard-tested against) the ONE shared
-  // constant (`shared/turn-phase.ts`'s `EDGE_RELATIONS`) — this pins that
-  // `mcp/note.ts`'s `RELATION_FIELD_ENTRIES` (the field-name -> relation
-  // wiring) covers exactly `EDGE_RELATIONS`, in the same currency, and that
-  // every one of its parameter names is a real key on `noteInputSchema`.
+  // constant. That constant is `shared/relation-class.ts`'s
+  // `RELATION_CLASSES` since the cutover dropped the word column — this pins
+  // that `mcp/note.ts`'s `RELATION_FIELD_ENTRIES` (the field-name -> class
+  // wiring) covers exactly the three, and that every one of its parameter
+  // names is a real key on `noteInputSchema`.
   it("RELATION_FIELD_ENTRIES covers RELATION_CLASSES exactly, and every field name is a real schema parameter", () => {
     const relations = RELATION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
     expect(relations).toEqual([...RELATION_CLASSES].sort());
@@ -936,15 +935,13 @@ describe("tool surface", () => {
   // vocabulary. `mcp/note.ts` DERIVES its parameter names from the relation
   // ones (`retract` + the capitalised field name); this schema declares them
   // by hand, one describe each, so the guard pins that the two agree — a
-  // relation added to `EDGE_RELATIONS` without its retraction parameter
+  // class added to `RELATION_CLASSES` without its retraction parameter
   // declared here fails right here.
   //
-  // Peer round T1466 (finding P1-2): the mirror set is WIDER than the relation
-  // set by exactly `RETRACTION_ONLY_RELATIONS` — a set lane-model v12 ticket 03
-  // emptied, so the two coincide today. Still asserted as an identity in both
-  // directions rather than loosened, because the RULE is the deliverable: the
-  // union is what a future frozen word would re-enter through.
-  it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, plus the retraction-only words", () => {
+  // Peer round T1466 (finding P1-2) had this set WIDER than the relation set by
+  // the retraction-only words. That asymmetry is gone with the word column
+  // (main-agent-edges ticket 01): the two sets are the three classes, both ways.
+  it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one", () => {
     const relations = RETRACTION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
     expect(relations).toEqual([...RELATION_CLASSES].sort());
 
@@ -964,41 +961,15 @@ describe("tool surface", () => {
     }
   });
 
-  // THE ASYMMETRY ITSELF (finding P1-2), now at its EMPTY value. A word is
-  // retractable-and-never-assertable for exactly as long as stored rows carry
-  // it; `supersedes` and `refutes` both left that state when ticket 03's
-  // migration rewrote their rows and narrowed the CHECK. The identity below is
-  // what keeps the two definitions honest in either direction: freeze a new
-  // word out of `EDGE_RELATIONS` while leaving it in `CITATION_RELATIONS` and
-  // this fails until its mirror is declared; declare a mirror for a word no
-  // row can carry and it fails too.
-  it("the retraction-only words are exactly the storage vocabulary minus the write vocabulary, and none is assertable", () => {
-    expect([...RETRACTION_ONLY_RELATIONS].sort()).toEqual(
-      CITATION_RELATIONS.filter(
-        (relation) => !(EDGE_RELATIONS as readonly string[]).includes(relation),
-      ).sort(),
-    );
+  // DELETED (main-agent-edges ticket 01): "the retraction-only words are
+  // exactly the storage vocabulary minus the write vocabulary, and none is
+  // assertable". It compared `CITATION_RELATIONS` against `EDGE_RELATIONS` to
+  // name the words that were retractable but never assertable. All three
+  // constants left `src/` with the `relation` column: there is ONE vocabulary
+  // now (the three classes), so the difference the test measured is empty by
+  // construction rather than by measurement, and both parameter surfaces are
+  // pinned to `RELATION_CLASSES` by the two cases above.
 
-    for (const relation of RETRACTION_ONLY_RELATIONS) {
-      // No relation field, on either write surface's wiring…
-      // Widened: since relation-vocabulary-v13 ticket 02 the entry list is
-      // keyed on CLASSES and this list on STORAGE words, so the two have no
-      // overlapping type — the ASSERTION (no retraction-only word is
-      // assertable) is still exactly the one this test is about.
-      expect(
-        RELATION_FIELD_ENTRIES.some(([, r]) => (r as string) === (relation as string)),
-      ).toBe(false);
-      // …and no assertable parameter on either schema. `noteInputShape` keeps
-      // `supersedes` as frozen documentation, but `noteInputSchema` omits it,
-      // so a caller sending it is a parse error on both surfaces.
-      expect(relation in noteInputSchema.shape).toBe(false);
-      expect(relation in settlementNoteInputShape).toBe(false);
-      // The retraction mirror, on the one surface that has edges (ticket 08).
-      const mirror = `retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`;
-      expect(mirror in noteInputSchema.shape).toBe(false);
-      expect(mirror in settlementNoteInputShape).toBe(true);
-    }
-  });
 
   // ticket 04 (edge-mechanism-revision D3/D6) closed the gap ticket 02 pinned
   // here: settlement's surface declares the retraction mirrors AND its facade

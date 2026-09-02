@@ -8,6 +8,7 @@ import { reindexTurnFromDb } from "../../src/db/search";
 import { addSegmentMembers, attachSegmentToSession } from "../../src/db/segments";
 import { recallMemory } from "../../src/mcp/recall";
 import { timelineQuery } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The rendered contract, byte for byte.
@@ -258,8 +259,8 @@ describe("金样例 — the rendered row contract", () => {
     });
     addSegmentMembers(db, 31, [t811, t812, t821, t822, s2t21], CUTOFF);
     writeMemoryEdges(db, [
-      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "extends", provenance: "asserted" },
-      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "extends", provenance: "asserted" },
+      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, ...wordEdgeClass("extends"), provenance: "asserted" },
+      { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, ...wordEdgeClass("extends"), provenance: "asserted" },
     ], CUTOFF);
 
     const output = timelineQuery(db, {
@@ -277,7 +278,7 @@ describe("金样例 — the rendered row contract", () => {
     expect(lines[0]).toBe("[E31] title");
     expect(lines[1]).toBe("    S15069");
     expect(lines).toContain("        T821 08-17 ⚖️ title");
-    expect(lines).toContain("            ↳ -extends-> T811, -extends-> T812");
+    expect(lines).toContain("            ↳ -use-> T811, -use-> T812");
     // A milestone row never carries a G value.
     expect(output).not.toMatch(/\bG[0-4]\b/);
   });
@@ -302,7 +303,7 @@ describe("金样例 — the rendered row contract", () => {
     });
     addSegmentMembers(db, 31, [foreign, citer], CUTOFF);
     writeMemoryEdges(db, [
-      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: foreign }, relation: "extends", provenance: "asserted" },
+      { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: foreign }, ...wordEdgeClass("extends"), provenance: "asserted" },
     ], CUTOFF);
 
     const output = timelineQuery(db, {
@@ -312,7 +313,7 @@ describe("金样例 — the rendered row contract", () => {
       taskCausalityEraCutoffEpoch: CUTOFF,
     });
 
-    expect(output.split("\n")).toContain("            ↳ -extends-> S15088/T21");
+    expect(output.split("\n")).toContain("            ↳ -use-> S15088/T21");
   });
 
   test("milestone view: a session re-entered later gets a second transition line, and its title only once", () => {

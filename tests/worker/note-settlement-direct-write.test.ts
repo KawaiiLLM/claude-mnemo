@@ -27,6 +27,7 @@ import {
 } from "../../src/worker/note-settlement-turn-facade";
 import { ERA_GRANT_COLUMN } from "../../src/segment-era";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The direct-write engine (ticket 05: `note`/`remember` land immediately;
@@ -371,7 +372,7 @@ describe("a rejected direct write leaves no partial state (one transaction per c
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t3 },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
       ],
@@ -1298,15 +1299,17 @@ describe("a materialization-only fill reports restated and stamps nothing (03b F
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // A legacy row: a pre-v13 storage word (`extends`) with NO relation_class
-    // filled in — `edgeRelationClass` already reads this as `use` through the
-    // legacy table (shared/relation-class.ts's `LEGACY_RELATION_CLASS`), so a
-    // reader sees the same class before and after this test's write.
+    // A stored row that already carries the class this write asserts. Before
+    // the main-agent-edges cutover this fixture was a pre-v13 row — a storage
+    // WORD with no class, materialized by the write — and the column it
+    // materialized is gone; what survives, and is what F6 is actually about,
+    // is that a write which changes NOTHING reports "already present" and
+    // moves no revision.
     db.query(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
           tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', '', '', ${NOW})`,
+       VALUES ('turn', ?, 'turn', ?, 'asserted', '', '', 'use', '', ${NOW})`,
     ).run(t1, t2);
 
     const job = claimWindow(sessionDbId, 1, 2);
@@ -1339,11 +1342,11 @@ describe("a materialization-only fill reports restated and stamps nothing (03b F
     );
     expect(receipt.content[0]!.text).not.toContain("Landed 1 relation");
 
-    // The column actually materialized on the stored row (the write did
-    // something, just not a claim change)...
+    // The stored row still says exactly what it said (the write did nothing
+    // to it)...
     const row = getOutgoingEdges(db, { kind: "turn", id: t1 })[0]!;
-    expect(row.relation).toBe("extends");
     expect(row.relationClass).toBe("use");
+    expect(row.relationCoverage).toBe("");
 
     // ...but the citing turn's relations revision did not move: a reader who
     // last saw this set as complete is still current, because nothing about

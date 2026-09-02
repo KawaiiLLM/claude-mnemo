@@ -7,7 +7,10 @@ import {
   runLaneModelV12SelfEdgeRetraction,
   type LaneModelV12SelfEdgeRetractionReceipt,
 } from "../../src/db/lanes";
-import { initializeSchema } from "../../src/db/schema";
+import {
+  initializeSchema,
+  MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT,
+} from "../../src/db/schema";
 import { downgradeToPreV12EdgeShape } from "../support/pre-v12-edge-shape";
 
 /**
@@ -233,8 +236,8 @@ describe("lane-model-v12 M-C — the self-edge retraction", () => {
         migrated
           .query(
             `INSERT INTO memory_edges
-               (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-             VALUES ('turn', 7, 'turn', 7, 'grounds', 'asserted', 100)`,
+               (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+             VALUES ('turn', 7, 'turn', 7, 'use', 'asserted', 100)`,
           )
           .run(),
       ).toThrow(/CHECK constraint failed/);
@@ -271,7 +274,15 @@ describe("lane-model-v12 M-C — the self-edge retraction", () => {
       );
 
       // The restore: an old-shaped table, with a row the old shape allowed.
+      // The v13 CLASS backfill receipt goes with it — a restored table whose
+      // rows carry a word and no class has not been swept, and leaving the
+      // receipt would make the main-agent-edges cutover read those rows as
+      // WORDLESS and delete them (its own guard says as much: it refuses to
+      // run at all when the receipt is absent, for exactly this reason).
       downgradeToPreV12EdgeShape(restored);
+      restored
+        .query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?")
+        .run(MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT);
       restored
         .query(
           `INSERT INTO memory_edges

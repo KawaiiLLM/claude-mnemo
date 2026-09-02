@@ -2324,7 +2324,7 @@ function handleMergeLane(
     );
     for (const collision of receipt.collisions) {
       lines.push(
-        `    ${collision.citingAddress} —${collision.relation ?? "(bare)"}→ ${collision.citedAddress} ` +
+        `    ${collision.citingAddress} —${collision.relationClass || "(bare)"}→ ${collision.citedAddress} ` +
           `{${collision.tailTag}→${collision.headTag}}`,
       );
     }

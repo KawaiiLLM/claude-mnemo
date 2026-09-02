@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { readTurnTags } from "./turn-tags";
+
 import { runWriteTransaction } from "./database";
 
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
@@ -135,7 +137,7 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
     wasInterrupted: row.wasInterrupted === 1,
     wasRolledBack: row.wasRolledBack === 1,
     type: parseJsonArray(row.type),
-    tags: parseJsonArray(row.tags),
+    tags: readTurnTags(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
     parentTurnId: row.parentTurnId ?? null,

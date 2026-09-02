@@ -20,6 +20,7 @@ import { recallMemory } from "../../src/mcp/recall";
 import { buildTimelineView } from "../../src/mcp/timeline";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 describe("recallMemory", () => {
   let db: Database;
@@ -1674,7 +1675,7 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
         {
           citing: { kind: "turn", id: subjectId },
           cited: { kind: "turn", id: outboundTargetId },
-          relation: "override",
+          ...wordEdgeClass("override"),
           provenance: "asserted",
           // lane-model-v12 ticket 08: a side holds ONE lane, so the multi-tag
           // shape this fixture used to carry is unwritable. Same-lane here;
@@ -1685,27 +1686,27 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
         {
           citing: { kind: "turn", id: inboundSourceId },
           cited: { kind: "turn", id: subjectId },
-          relation: "narrows",
+          ...wordEdgeClass("narrows"),
           provenance: "asserted",
         },
         // Law-8: neither of these may ever render, in either direction.
         {
           citing: { kind: "turn", id: subjectId },
           cited: { kind: "turn", id: dormantTargetId },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
         },
         {
           citing: { kind: "turn", id: deletedSourceId },
           cited: { kind: "turn", id: subjectId },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
         // Cross-session outbound — renders session-qualified.
         {
           citing: { kind: "turn", id: subjectId },
           cited: { kind: "turn", id: foreignId },
-          relation: "grounds",
+          ...wordEdgeClass("grounds"),
           provenance: "asserted",
         },
         // A CROSSING — the shape v11 could not store at all. It renders both
@@ -1714,7 +1715,7 @@ describe("relations field (edge-read-surface spec, ticket 01)", () => {
         {
           citing: { kind: "turn", id: subjectId },
           cited: { kind: "turn", id: inboundSourceId },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
           tailTag: "rule-ledger-tickets",
           headTag: "watchdog-liveness",

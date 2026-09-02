@@ -18,6 +18,7 @@ import {
   writeNoteSettlementTransitionSnapshots,
   type NoteSettlementSnapshotInput,
 } from "./note-settlement-snapshots";
+import { memoryEdgesPredatesCutover } from "./memory-edges";
 import { liveTurnSql } from "./turn-liveness";
 import {
   DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS,
@@ -1693,6 +1694,90 @@ export interface ClaimNoteSettlementJobOptions {
 const LEASE_EXHAUSTED_ERROR =
   "note settlement lease expired with no attempts left (dispatch never reported back)";
 
+export interface ReclaimExpiredNoteSettlementClaimsOptions {
+  /** One session, or `null` for EVERY session — the cutover fence's global reap. */
+  sessionId: number | null;
+  nowEpoch: number;
+  leaseCutoffEpoch: number;
+  maxAttempts: number;
+}
+
+/**
+ * THE RECLAIM, factored out of `claimNextNoteSettlementJob` so the cutover
+ * fence (`db/schema.ts`, main-agent-edges spec D9 / R10-8) runs exactly the
+ * same three statements before it tests for a live claim — lease expiry
+ * never mutates `claimed` on its own, so "no claimed row" is only meaningful
+ * after this has run. Caller holds the write transaction.
+ *
+ * Both reclaim paths bump the generation, and that bump is the whole reason
+ * a late write-back is safe: the dispatch still running against this row
+ * holds the OLD generation, so its `done` (or its failure) matches nothing
+ * once ownership has moved — including when ownership moved to nobody,
+ * which is exactly the terminal case below.
+ *
+ * Ticket 06: a lease that expired with the attempt cap already spent goes
+ * straight to `abandoned` (the same terminal state `failNoteSettlementJob`'s
+ * own deterministic-at-cap branch produces), with a debt row — a dispatch
+ * that vanished without reporting back at all is treated as the
+ * conservative (deterministic) case, same as the migration backfill for
+ * pre-ticket-06 `failed` rows (db/schema.ts's
+ * `ensureNoteSettlementJobsRetrySchema`): there is no report to classify,
+ * and assuming it would have self-resolved is the reading that could wedge
+ * a session behind a truly broken window forever.
+ */
+export function reclaimExpiredNoteSettlementClaims(
+  db: Database,
+  options: ReclaimExpiredNoteSettlementClaimsOptions,
+): { abandoned: number; returnedToPending: number } {
+  const { sessionId, nowEpoch, leaseCutoffEpoch, maxAttempts } = options;
+  const sessionClause = sessionId === null ? "1 = 1" : "session_id = ?";
+  const sessionArgs: number[] = sessionId === null ? [] : [sessionId];
+
+  const reclaimedAtCap = db
+    .query<
+      { id: number; sessionId: number; windowStart: number; windowEnd: number },
+      (string | number)[]
+    >(
+      `UPDATE note_settlement_jobs
+       SET status = 'abandoned',
+           claimed_at_epoch = NULL,
+           claim_generation = claim_generation + 1,
+           last_error = COALESCE(last_error, ?),
+           failure_class = 'deterministic',
+           updated_at_epoch = ?
+       WHERE ${sessionClause}
+         AND status = 'claimed'
+         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+         AND attempts >= ?
+       RETURNING id, session_id AS sessionId, window_start AS windowStart, window_end AS windowEnd`,
+    )
+    .all(LEASE_EXHAUSTED_ERROR, nowEpoch, ...sessionArgs, leaseCutoffEpoch, maxAttempts);
+  for (const job of reclaimedAtCap) {
+    recordNoteSettlementDebt(db, job, LEASE_EXHAUSTED_ERROR, nowEpoch);
+  }
+
+  const returnedToPending = db
+    .query<unknown, number[]>(
+      `UPDATE note_settlement_jobs
+       SET status = 'pending', claimed_at_epoch = NULL,
+           claim_generation = claim_generation + 1, updated_at_epoch = ?
+       WHERE ${sessionClause}
+         AND status = 'claimed'
+         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+         AND attempts < ?`,
+    )
+    .run(nowEpoch, ...sessionArgs, leaseCutoffEpoch, maxAttempts).changes;
+
+  db.query<unknown, number[]>(
+    `UPDATE note_settlement_jobs
+     SET status = 'pending', claimed_at_epoch = NULL, updated_at_epoch = ?
+     WHERE ${sessionClause} AND status = 'failed'
+       AND attempts < ? AND retry_at_epoch <= ?`,
+  ).run(nowEpoch, ...sessionArgs, maxAttempts, nowEpoch);
+
+  return { abandoned: reclaimedAtCap.length, returnedToPending };
+}
+
 /**
  * Claim this session's next due job, ascending by window.
  *
@@ -1730,61 +1815,23 @@ export function claimNextNoteSettlementJob(
   const leaseCutoffEpoch = Math.floor((nowMs - leaseMs) / 1000);
   const excluded = options.excludeJobIds ?? new Set<number>();
 
+  // main-agent-edges spec D9 (R10-8): while the cutover is DEFERRED — the new
+  // binary has opened this database but its migration is waiting for the live
+  // claim set to drain — the new worker claims nothing. A claim taken here
+  // would hold the fence open against itself; refusing is what makes the
+  // window finite. Every initializer (`initializeSchema`) and the worker's own
+  // drain retry the cutover; once it has run this probe answers false forever.
+  if (memoryEdgesPredatesCutover(db)) {
+    return null;
+  }
+
   return runWriteTransaction(db, () => {
-    // Both reclaim paths bump the generation, and that bump is the whole reason
-    // a late write-back is safe: the dispatch still running against this row
-    // holds the OLD generation, so its `done` (or its failure) matches nothing
-    // once ownership has moved — including when ownership moved to nobody,
-    // which is exactly the terminal case below.
-    //
-    // Ticket 06: a lease that expired with the attempt cap already spent goes
-    // straight to `abandoned` (the same terminal state `failNoteSettlementJob`'s
-    // own deterministic-at-cap branch produces), with a debt row — a dispatch
-    // that vanished without reporting back at all is treated as the
-    // conservative (deterministic) case, same as the migration backfill for
-    // pre-ticket-06 `failed` rows (db/schema.ts's
-    // `ensureNoteSettlementJobsRetrySchema`): there is no report to classify,
-    // and assuming it would have self-resolved is the reading that could wedge
-    // a session behind a truly broken window forever.
-    const reclaimedAtCap = db
-      .query<
-        { id: number; sessionId: number; windowStart: number; windowEnd: number },
-        [string, number, number, number, number]
-      >(
-        `UPDATE note_settlement_jobs
-         SET status = 'abandoned',
-             claimed_at_epoch = NULL,
-             claim_generation = claim_generation + 1,
-             last_error = COALESCE(last_error, ?),
-             failure_class = 'deterministic',
-             updated_at_epoch = ?
-         WHERE session_id = ?
-           AND status = 'claimed'
-           AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
-           AND attempts >= ?
-         RETURNING id, session_id AS sessionId, window_start AS windowStart, window_end AS windowEnd`,
-      )
-      .get(LEASE_EXHAUSTED_ERROR, nowEpoch, sessionId, leaseCutoffEpoch, maxAttempts);
-    if (reclaimedAtCap) {
-      recordNoteSettlementDebt(db, reclaimedAtCap, LEASE_EXHAUSTED_ERROR, nowEpoch);
-    }
-
-    db.query<unknown, [number, number, number, number]>(
-      `UPDATE note_settlement_jobs
-       SET status = 'pending', claimed_at_epoch = NULL,
-           claim_generation = claim_generation + 1, updated_at_epoch = ?
-       WHERE session_id = ?
-         AND status = 'claimed'
-         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
-         AND attempts < ?`,
-    ).run(nowEpoch, sessionId, leaseCutoffEpoch, maxAttempts);
-
-    db.query<unknown, [number, number, number, number]>(
-      `UPDATE note_settlement_jobs
-       SET status = 'pending', claimed_at_epoch = NULL, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'failed'
-         AND attempts < ? AND retry_at_epoch <= ?`,
-    ).run(nowEpoch, sessionId, maxAttempts, nowEpoch);
+    reclaimExpiredNoteSettlementClaims(db, {
+      sessionId,
+      nowEpoch,
+      leaseCutoffEpoch,
+      maxAttempts,
+    });
 
     const stillClaimed = db
       .query<{ id: number }, [number]>(

@@ -66,6 +66,7 @@ import {
 } from "../../src/worker/note-settlement-sdk-query";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * THE SETTLEMENT WRITE PATH FOR IMPRESSIONS (lane-impressions spec Rev 8,
@@ -709,7 +710,7 @@ describe("anchor invalidation runs unconditionally for every touched container",
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation,
+          ...wordEdgeClass(relation),
           provenance: "asserted",
           tailTag: "visual-style",
           headTag: "visual-style",

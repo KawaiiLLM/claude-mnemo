@@ -1,21 +1,37 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  EDGE_RELATIONS,
-  isTurnEdgeRelation,
   phasesForTypes,
-  TAGGABLE_RELATIONS,
   TURN_PHASES,
   TYPE_PHASE,
   validateRelationTarget,
   type EdgeSideRegistryFacts,
-  type TurnEdgeRelation,
   type TurnPhase,
 } from "../../src/shared/turn-phase";
-import {
-  LEGACY_RELATION_CLASS,
-  RELATION_CLASSES,
-} from "../../src/shared/relation-class";
+import { RELATION_CLASSES } from "../../src/shared/relation-class";
+
+/**
+ * The labels this file feeds `validateRelationTarget`.
+ *
+ * `EDGE_RELATIONS`, `isTurnEdgeRelation`, `TAGGABLE_RELATIONS` and
+ * `TurnEdgeRelation` LEFT `shared/turn-phase.ts` with the `relation` column at
+ * the main-agent-edges cutover (spec D1, ticket 01) — the module has no
+ * vocabulary of its own any more, and `RelationTargetValidationInput.relation`
+ * is documented as a plain string carried only so a refusal can name what was
+ * asked for. So the loops below run over the CLASS TOKENS, which is what a
+ * caller actually passes now, and the three blocks that were ABOUT the word
+ * list are deleted:
+ *
+ *   - "EDGE_RELATIONS — the seven-word closed set" (membership and
+ *     `isTurnEdgeRelation`): there is no closed word set to be a member of.
+ *   - "every storage word maps to exactly one class": the mapping table
+ *     (`LEGACY_RELATION_CLASS`) is deleted; the frozen migration literal that
+ *     replaced it is exercised by
+ *     `tests/db/schema.relation-class-backfill.test.ts`.
+ *   - "TAGGABLE_RELATIONS is ALL SEVEN words": the set is deleted, having been
+ *     total; no word-level tag refusal survives it.
+ */
+const RELATION_LABELS = ["correct(full)", "correct(partial)", "verify", "use"] as const;
 import { containsToolCallSyntax } from "../../src/shared/tool-call-syntax";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 
@@ -108,42 +124,6 @@ describe("phasesForTypes (exists-rule input)", () => {
   });
 });
 
-describe("EDGE_RELATIONS — the seven-word closed set (lane-model v12 ticket 02)", () => {
-  test("is exactly the seven words; supersedes AND refutes excluded", () => {
-    expect([...EDGE_RELATIONS].sort()).toEqual(
-      [
-        "indexes",
-        "consume",
-        "extends",
-        "grounds",
-        "narrows",
-        "override",
-        "verifies",
-      ].sort(),
-    );
-    expect(isTurnEdgeRelation("supersedes")).toBe(false);
-    // v12: `refutes` merged into `override`. It stays a STORAGE word
-    // (db/citations.ts's CITATION_RELATIONS) so old rows load and a
-    // `retractRefutes` mirror can delete them, but a NEW write may not carry
-    // it — the same footing `supersedes` has held since flow-relations.
-    expect(isTurnEdgeRelation("refutes")).toBe(false);
-    // Old, retired words are not part of the write-time closed set either —
-    // the CHECK still admits them at the storage layer (db/citations.ts's
-    // CITATION_RELATIONS, the old∪new union) but a NEW write may not.
-    for (const retired of ["refines", "encodes", "grounded-on", "depends-on", "evidence-for", "evidence-against", "collects"]) {
-      expect(isTurnEdgeRelation(retired)).toBe(false);
-    }
-  });
-
-  test("isTurnEdgeRelation accepts every listed word and rejects junk", () => {
-    for (const relation of EDGE_RELATIONS) {
-      expect(isTurnEdgeRelation(relation)).toBe(true);
-    }
-    expect(isTurnEdgeRelation("supports")).toBe(false);
-    expect(isTurnEdgeRelation(42)).toBe(false);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Lane-model v12 ticket 02: the PHASE AXIS LEAVES THE VOCABULARY. What used
 // to sit here was the "六行律" table — all nine (source phase, target phase)
@@ -171,7 +151,7 @@ describe("no phase gate — all nine (source, target) phase pairs x all seven wo
   for (const source of TURN_PHASES) {
     for (const target of TURN_PHASES) {
       test(`${source} -> ${target}: every word is admitted, including the pairs the six-row law refused`, () => {
-        for (const relation of EDGE_RELATIONS) {
+        for (const relation of RELATION_LABELS) {
           const result = validateRelationTarget({
             relation,
             citingPhases: new Set([source]),
@@ -223,7 +203,7 @@ describe("no phase gate — all nine (source, target) phase pairs x all seven wo
   // word — `grounds` most visibly, since T1209 gave it a rejection channel by
   // making it read the same table. Type is not a relation licence any more.
   test("an untyped turn on either end writes any word", () => {
-    for (const relation of EDGE_RELATIONS) {
+    for (const relation of RELATION_LABELS) {
       const result = validateRelationTarget({
         relation,
         citingPhases: new Set<TurnPhase>(),
@@ -311,25 +291,9 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   // `note` parameter, and the write surface no longer offers a parameter per
   // word — it offers one per CLASS, so `db/citations.ts`'s
   // `RELATION_FIELD_ENTRIES` derives from `RELATION_CLASSES` instead. The
-  // replacement's own coverage is in `tests/mcp/definitions.test.ts`. What
-  // survives HERE is the fact this file is about: EVERY storage word still maps
-  // to a class, so no stored row reads as unclassified.
-  test("every storage word maps to exactly one class, and only `correct` carries a bit", () => {
-    for (const relation of EDGE_RELATIONS) {
-      const mapped = LEGACY_RELATION_CLASS[relation];
-      expect(mapped, relation).toBeTruthy();
-      expect(RELATION_CLASSES, relation).toContain(mapped.relationClass);
-      // The bit exists exactly where the class carries one.
-      expect(mapped.relationCoverage !== "", relation).toBe(
-        mapped.relationClass === "correct",
-      );
-    }
-    // And every class is reachable from some storage word, so the interim
-    // equivalence has no orphan on either side.
-    expect(
-      new Set(EDGE_RELATIONS.map((r) => LEGACY_RELATION_CLASS[r].relationClass)).size,
-    ).toBe(RELATION_CLASSES.length);
-  });
+  // replacement's own coverage is in `tests/mcp/definitions.test.ts`. The
+  // "every storage word maps to exactly one class" case that used to follow is
+  // deleted with `LEGACY_RELATION_CLASS` (see this file's header).
 
   // lane-model-v12 D2 (ticket 04): the whole conditional self-citation
   // apparatus is DELETED — the `grounds`-only carve-out, its implementer
@@ -339,7 +303,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
   describe("self edges: refused outright, for every word and every phase (v12 D2)", () => {
     test("EVERY relation refuses a self target, whatever the phase — grounds included", () => {
       const dual = new Set<TurnPhase>(["decision", "delivery"]);
-      for (const relation of EDGE_RELATIONS) {
+      for (const relation of RELATION_LABELS) {
         const result = validateRelationTarget({
           relation,
           citingPhases: dual,
@@ -408,16 +372,9 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
         laneSides: facts,
       });
 
-    // lane-declaration [S15069/T1562]: this used to be the five SAME-PHASE
-    // words, on the reasoning that a lane is phase-local. It is all seven now
-    // — a lane-placed edge is how one lane spans design and delivery.
-    test("TAGGABLE_RELATIONS is ALL SEVEN words, the boundary-spanning ones included", () => {
-      expect([...TAGGABLE_RELATIONS].sort()).toEqual([...EDGE_RELATIONS].sort());
-      expect(TAGGABLE_RELATIONS.size).toBe(7);
-      for (const relation of ["grounds", "verifies"] as const) {
-        expect(TAGGABLE_RELATIONS.has(relation)).toBe(true);
-      }
-    });
+    // The "TAGGABLE_RELATIONS is ALL SEVEN words" case stood here and is
+    // DELETED with the set (see this file's header): it was total by
+    // construction and its vocabulary is gone.
 
     // TICKET 20 REVERSES TICKET 08 HERE. The half-settled shape used to be
     // refused at this gate (`lane-half-settled`); the user's ruling makes it a
@@ -429,7 +386,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     // are where that half is pinned.
     describe("a draft edge is ACCEPTED here — either side may be left empty (ticket 20)", () => {
       test("BOTH sides unsettled is the legal draft — every word, nothing to check", () => {
-        for (const relation of EDGE_RELATIONS) {
+        for (const relation of RELATION_LABELS) {
           expect(
             validateRelationTarget({
               relation,
@@ -466,7 +423,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
       });
 
       test("every one of the seven words accepts a half-settled edge, either side", () => {
-        for (const relation of EDGE_RELATIONS) {
+        for (const relation of RELATION_LABELS) {
           for (const [tailTag, headTag] of [
             ["lane-a", ""],
             ["", "lane-a"],
@@ -769,7 +726,7 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     });
 
     test("EVERY one of the seven words accepts a placed edge and a draft alike", () => {
-      for (const relation of EDGE_RELATIONS) {
+      for (const relation of RELATION_LABELS) {
         expect(
           validateRelationTarget({
             relation,

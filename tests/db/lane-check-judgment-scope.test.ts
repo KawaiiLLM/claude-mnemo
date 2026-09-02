@@ -10,6 +10,7 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
 import { laneToken } from "../../src/shared/lane-interpretation";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * SETTLEMENT-GATE-TAXONOMY TICKET 02 — THE THREE SCOPES, AT THE LOADER.
@@ -87,7 +88,7 @@ function laneEdge(citingId: number, citedId: number, relation: string, tag: stri
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation: relation as never,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags([tag]),
       },

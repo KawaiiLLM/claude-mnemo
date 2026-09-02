@@ -258,20 +258,21 @@ export function normalizeIncidentAttribution(
     head: db.query<unknown, [number]>(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`),
   } as const;
   // THE COLLISION THIS CLEAR CAN CAUSE, and why it is a FOLD rather than an
-  // error. Storage identity is still `(pair, relation, tail, head)` until the
-  // cutover rebuilds it on the pair alone (spec D1), so two rows that differed
-  // ONLY by which lane each declared become the same row the moment both
-  // declarations are cleared — production holds 109 such pairs. The UPDATE
-  // would raise a raw `SQLITE_CONSTRAINT` in the middle of a lane verb; what
-  // it MEANS is that the two rows were always one logical edge, so the loser
-  // is deleted into the receipt exactly as the cutover's own fold does it.
+  // error. DEFERRAL-WINDOW ONLY: until the cutover (main-agent-edges ticket
+  // 01) has rebuilt the table on the pair alone, storage identity is still
+  // `(pair, relation, tail, head)`, so two rows that differed ONLY by which
+  // lane each declared become the same row the moment both declarations are
+  // cleared. The UPDATE would raise a raw `SQLITE_CONSTRAINT` in the middle of
+  // a lane verb; what it MEANS is that the two rows were always one logical
+  // edge, so the loser is deleted into the receipt exactly as the cutover's
+  // own fold does it. After the cutover a pair holds one row and this finds
+  // nothing.
   const collidingSibling = db.query<{ id: number }, [string, string, number]>(
     `SELECT other.id AS id
        FROM memory_edges me
        JOIN memory_edges other
          ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
         AND other.cited_kind = me.cited_kind AND other.cited_id = me.cited_id
-        AND other.relation IS me.relation
         AND other.tail_tag = ? AND other.head_tag = ?
         AND other.id <> me.id
       WHERE me.id = ?

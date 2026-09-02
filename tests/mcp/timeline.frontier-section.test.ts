@@ -17,7 +17,7 @@ import {
   buildSegmentLaneListView,
 } from "../../src/mcp/timeline";
 import { countTokens } from "../../src/shared/token-count";
-import type { CitationRelation } from "../../src/db/citations";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The SessionStart frontier section (frontier-injection spec Rev 5, ticket
@@ -117,7 +117,7 @@ function makeEdge(
   db: Database,
   citingTurnId: number,
   citedTurnId: number,
-  relation: CitationRelation,
+  relation: string,
   tailTag: string,
   headTag: string,
 ): void {
@@ -127,7 +127,7 @@ function makeEdge(
       {
         citing: { kind: "turn", id: citingTurnId },
         cited: { kind: "turn", id: citedTurnId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "judged",
         tailTag,
         headTag,
@@ -597,7 +597,7 @@ describe("frontier section: candidate sequence and acceptance", () => {
 
 interface ProbeEdgeSpec {
   direction: "out" | "in";
-  relation: CitationRelation;
+  relation: string;
   /** OUT only: overrides the stored tail tag (the qualified-coordinate probe). */
   tailTagOverride?: string;
 }
@@ -1091,13 +1091,13 @@ describe("frontier section: shared visible-edge predicate (ticket 07 P1-3)", () 
     // All-era: the tail is settled and in-universe — everything counts.
     const allEra = buildSegmentFrontierSection(db, task.id, null, 2000);
     expect(allEra).toContain("#era · 3 settled · 1 edges");
-    expect(lanePageText(db, task.id, "era", null)).toContain("grounds");
+    expect(lanePageText(db, task.id, "era", null)).toContain("use");
 
     // Era-scoped: the tail's page universe no longer holds it — the edge
     // leaves EVERY denominator, the page, and the score together.
     const eraScoped = buildSegmentFrontierSection(db, task.id, cutoff, 2000);
     expect(eraScoped).toContain("#era · 2 settled · 0 edges");
-    expect(lanePageText(db, task.id, "era", cutoff)).not.toContain("grounds");
+    expect(lanePageText(db, task.id, "era", cutoff)).not.toContain("use");
     // Score: with the in-edge invisible, recency alone seats the NEWER head.
     const render = (budget: number) => buildSegmentFrontierSection(db, task.id, cutoff, budget);
     const oneSeat = minBudgetForRows(render, 1, countTokens(render(100_000)) + 8);

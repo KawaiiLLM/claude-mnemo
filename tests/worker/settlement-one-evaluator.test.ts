@@ -94,7 +94,7 @@ interface EvaluatorFixture {
  *     therefore two fractures, o1<->o4 and o4<->o6. SEVERED, and provably so.
  *
  * THE DISCOVERY EDGE is what makes this fixture say something after ticket 02.
- * `w1 --grounds--> o1` carries `window-lane` on its TAIL and `outside-lane` on
+ * `w1 --use--> o1` carries `window-lane` on its TAIL and `outside-lane` on
  * its HEAD, so the loader DISCOVERS `outside-lane` from the seed and widens its
  * edges — the lane is fully materialised and genuinely reported, not a phantom
  * of a truncated edge set. But `w1` does not carry the lane's tag, so it is not
@@ -164,7 +164,7 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
   const outsideClaim = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },
     cited: { kind: "turn" as const, id: cited },
-    relation: "indexes" as const,
+    relationClass: "use" as const,
     provenance: "asserted" as const,
     tailTag: "outside-lane",
     headTag: "outside-lane",
@@ -176,7 +176,7 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
       {
         citing: { kind: "turn", id: w2 },
         cited: { kind: "turn", id: w1 },
-        relation: "extends",
+        relationClass: "use",
         provenance: "asserted",
         tailTag: "window-lane",
         headTag: "window-lane",
@@ -186,7 +186,7 @@ function seedEvaluatorFixture(db: Database): EvaluatorFixture {
       {
         citing: { kind: "turn", id: w1 },
         cited: { kind: "turn", id: o1 },
-        relation: "grounds",
+        relationClass: "use",
         provenance: "asserted",
         tailTag: "window-lane",
         headTag: "outside-lane",
@@ -368,7 +368,7 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
 
       await runSettlement(db, fixture, fixture.windowTurnIds, async (handlers) => {
         // THE TOUCH, and it is production's own shape: an EDGE SIDE naming the
-        // lane, written on a turn this run may write. `w2 --grounds--> o4`
+        // lane, written on a turn this run may write. `w2 --use--> o4`
         // carries `window-lane` on its tail and `outside-lane` on its head, so
         // the touch ledger records `(o4, outside-lane)` and o4 IS a member of
         // one of that lane's islands — which is exactly the predicate the
@@ -523,7 +523,7 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
       const draft = {
         citing: { kind: "turn" as const, id: w2 },
         cited: { kind: "turn" as const, id: o6 },
-        relation: "verifies" as const,
+        relationClass: "verify" as const,
         provenance: "asserted" as const,
         // Both sides unsettled — a DRAFT edge, which is E6.
         tailTag: "",

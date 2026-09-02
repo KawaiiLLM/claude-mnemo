@@ -18,6 +18,8 @@ import {
   RELATIONS_FIELD_LEGEND,
 } from "../../src/mcp/relations-view";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 /**
  * Settlement-read-once spec D8 (user rulings T2388 "render like timeline, no
@@ -118,12 +120,17 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
         {
           citing: { kind: "turn", id: citingId },
           cited: { kind: "turn", id: citedId },
-          relation: relation as never,
           provenance: "asserted",
           tailTag,
           headTag,
-          relationClass: classification.relationClass,
-          relationCoverage: classification.relationCoverage,
+          // A caller that states a class wins; otherwise the fixture's legacy
+          // WORD is translated the one way the migration translated it.
+          ...(classification.relationClass === ""
+            ? wordEdgeClass(relation)
+            : {
+                relationClass: classification.relationClass,
+                relationCoverage: classification.relationCoverage,
+              }),
         },
       ],
       NOW,
@@ -147,21 +154,33 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
     tailTag = "",
     headTag = "",
   ): void {
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, '', '', ?)`,
-    ).run(citingId, citedId, relation, tailTag, headTag, NOW);
+    // The pair-UNIQUE rebuilt table cannot hold a second row on a pair, so the
+    // fixture first puts `memory_edges` back into the PRE-CUTOVER shape
+    // (idempotent). That is not a fiction: D9's claim fence defers the
+    // migration while a settlement claim is live, and every READ in that
+    // window runs the new readers over exactly this table.
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, {
+      citingId,
+      citedId,
+      relation,
+      ...wordEdgeClass(relation),
+      tailTag,
+      headTag,
+      createdAtEpoch: NOW,
+    });
   }
 
   /** The same pre-cutover stock, wordless (main-agent-edges D1). */
   function legacyBareRow(citingId: number, citedId: number): void {
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', ?)`,
-    ).run(citingId, citedId, NOW);
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, {
+      citingId,
+      citedId,
+      relation: null,
+      provenance: "text-ref",
+      createdAtEpoch: NOW,
+    });
   }
 
   function lines(promptNumber: number, inSession = sessionId): string[] {

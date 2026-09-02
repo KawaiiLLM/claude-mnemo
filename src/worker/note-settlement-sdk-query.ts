@@ -561,9 +561,8 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "declaring more lanes than max(1, 0.05 x its member turns). INDEX " +
   "GRANULARITY names a turn whose whole convergence batch is ONE node — a " +
   "convergence covers the batch that produced one phase result, so a single " +
-  "target usually means a step got declared as a phase. It reads STORED rows " +
-  "written under the retired `indexes` word and can report nothing about a " +
-  "row written since; it is a reading and never a refusal. " +
+  "target usually means a step got declared as a phase. It is a reading and " +
+  "never a refusal. " +
   "All three name " +
   "their numbers, all three are debt or diagnosis rather than a defect: the repair is a " +
   "`create` plus settling both sides of an edge, fewer lanes, or a wider index batch — never a rewrite of the " +

@@ -251,9 +251,9 @@ describe("a note-less turn runs the ordinary field-render path — requested fie
     db.run(
       `INSERT INTO memory_edges (
          citing_kind, citing_id, cited_kind, cited_id,
-         relation, provenance, tail_tag, head_tag,
+         provenance, tail_tag, head_tag,
          relation_class, relation_coverage, created_at_epoch
-       ) VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', 'use', '', ?)`,
+       ) VALUES ('turn', ?, 'turn', ?, 'asserted', '', '', 'use', '', ?)`,
       [turnId, citedTurnId, NOW - 10],
     );
 
