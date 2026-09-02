@@ -4,7 +4,7 @@
 
 **Blocked by:** None. Independent of the batch.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2436 at d95c9992 (merged 048ee09c)**: tsc 0, 4805/0/266 (+2), guards clean; production read-only confirms the agent's correction — 0 rows with `''`, 346 NULL of 3,311 (the peer's "empty string" was the sqlite CLI rendering NULL as blank); root cause = ride turns whose `content_prompt_id` stays NULL are unreachable by the prompt-number fallback; fix = correlate by stored `user_prompt` substring for writer_model only; the 5 permanently-NULL rows self-heal on the next Stop of their sessions, no migration. My probe (real mutation, verified applied): the orphan query flipped to `writer_model IS NOT NULL` → RED (1: "an orphaned ride turn … is recovered by text").
 
 ## Constraints
 

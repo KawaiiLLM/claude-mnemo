@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtk7t527" : "dev";
+var BUILD_ID = true ? "0.29.0-mtk8j3tn" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -32287,6 +32287,7 @@ function backfillShadowNoteWriterModels(db, sessionId, transcriptTurns) {
      WHERE ride_turn_id = ? AND writer_model IS NULL`
   );
   let filled = 0;
+  const matchedTurnIds = /* @__PURE__ */ new Set();
   for (const transcriptTurn of transcriptTurns) {
     if (!transcriptTurn.assistantModel) {
       continue;
@@ -32295,6 +32296,36 @@ function backfillShadowNoteWriterModels(db, sessionId, transcriptTurns) {
     if (!rideTurn) {
       continue;
     }
+    matchedTurnIds.add(rideTurn.id);
+    filled += update.run(transcriptTurn.assistantModel, rideTurn.id)?.changes ?? 0;
+  }
+  filled += backfillOrphanedRideTurns(db, sessionId, transcriptTurns, matchedTurnIds, update);
+  return filled;
+}
+function backfillOrphanedRideTurns(db, sessionId, transcriptTurns, matchedTurnIds, update) {
+  const orphanedRideTurns = db.query(
+    `SELECT DISTINCT t.id, t.user_prompt AS userPrompt
+       FROM shadow_notes n
+       JOIN turns t ON t.id = n.ride_turn_id
+       WHERE t.session_id = ?
+         AND n.writer_model IS NULL
+         AND t.content_prompt_id IS NULL
+         AND t.user_prompt IS NOT NULL
+         AND t.user_prompt != ''`
+  ).all(sessionId);
+  let filled = 0;
+  for (const rideTurn of orphanedRideTurns) {
+    if (matchedTurnIds.has(rideTurn.id)) {
+      continue;
+    }
+    const anchor = rideTurn.userPrompt.slice(0, 200);
+    const transcriptTurn = transcriptTurns.find(
+      (turn) => turn.assistantModel && turn.userPrompt.includes(anchor)
+    );
+    if (!transcriptTurn?.assistantModel) {
+      continue;
+    }
+    matchedTurnIds.add(rideTurn.id);
     filled += update.run(transcriptTurn.assistantModel, rideTurn.id)?.changes ?? 0;
   }
   return filled;
