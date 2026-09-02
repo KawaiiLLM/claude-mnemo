@@ -21,3 +21,5 @@
 - [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
 
 **Pinned (T2432, P3):** this ticket carries the raw-word release gate — a test grepping the seven words over `src/` with an explicit allowlist for historical migration literals in `schema.ts`/`lanes.ts`; it must fail on any other occurrence.
+
+**Acceptance added (peer, S15069/T2438):** the fold's survivor rule must be the SAME function as `selectLogicalEdgeRow` (most specific class, then lowest row id) — import it, do not restate it — so the write path and the migration cannot disagree; pinned by a fixture where the fold and the write path pick the same row.

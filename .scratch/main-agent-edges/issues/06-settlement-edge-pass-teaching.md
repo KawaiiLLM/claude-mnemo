@@ -17,3 +17,5 @@
 - Every teaching sentence added or removed is pinned by a test a mutation drives red. ≥3 mutation probes of your own, RED, md5-restored — and a probe whose mutation did not apply is not a probe.
 - Dispose of every applicable line of `../acceptance-matrix.md` in your report.
 - [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
+
+**Ticket-03 escape (peer review, S15069/T2438, F1):** `note-settlement-prompt.ts` ~1197–1198 still teaches, under HOMELESS RETRACTION, that "when it was the pair's last relation the bare citation comes back" — `restoreBareRowsForEmptiedPairs` was deleted by ticket 03 and `tests/worker/note-settlement-prompt.test.ts` ~2593 pins the false sentence with a shallow `toContain`. Remove the sentence and its pin here; also the pre-existing false "prose mention warning" teaching at ~1050–1058 (nothing implements it).

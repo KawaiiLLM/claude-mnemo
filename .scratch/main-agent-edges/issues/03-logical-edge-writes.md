@@ -114,3 +114,5 @@ with 06's rewrite. Flagged in the report as a pre-existing false teaching.
 - The qualified `[S<n>/T<m>]` form no longer contributes at all — the surviving prose reader
   parses the inline `[T<dbid>]` grammar. Same test.
 - A legacy `turn_citations` pair whose winning relation was null is no longer folded across.
+
+**Peer implementation review (S15069/T2438): storage mechanics SOUND; six escapes.** F1 (false teaching created by this ticket's deletion) → ticket 06, recorded as a 03 escape; F2 (`declare` production route untested end to end), F3 (dead test via duplicate object key; no tests typecheck), F4 (retract+attach at the cap pinned below the call boundary), F5 (second copy of the endpoint-lane rule; two-task fixture missing), F6 (non-stamping restatement unpinned) → ticket 03b. R10-6 stays OPEN against tickets 02/04 (P2), not disposed here. Review base for this ticket is a30080d6..16dc1087 (44 files, +4290/−3023 src+tests).
