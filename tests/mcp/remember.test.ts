@@ -1807,12 +1807,19 @@ describe("remember tool (ticket 02)", () => {
         expect(edgeCount()).toBe(0);
       });
 
-      // D5b (Rev 3's own correction of a Rev 2 mistake): deleting a pair's
-      // LAST relation row must not make a citation the citing prose still
-      // asserts disappear — `restoreBareRowsForEmptiedPairs` puts a bare
-      // `text-ref` row back. `clear` is a new bulk retraction path and has
-      // to reuse that repair rather than reintroduce the defect it fixed.
-      test("D5b: deleting the lane's last relation on a pair the prose still names restores a bare row", () => {
+      // MAIN-AGENT-EDGES D1: D5b's bare-row RESTORATION is retired with the
+      // whole wordless write path. `restoreBareRowsForEmptiedPairs` and
+      // `clear`'s `bareRowsRestored` receipt field are deleted outright —
+      // nothing writes a `relation IS NULL` row any more, so a bulk retraction
+      // that put one back would be the one remaining writer of a retired
+      // population. The prose citation itself is not lost: `getEffective-
+      // Citations` still unions it in through `parseInlineCitations(content)`,
+      // which is where the `↳` pull-through has always come from.
+      //
+      // The test below is the old D5b fixture INVERTED: same seed (the citing
+      // turn's content still names the target), and the assertion is now that
+      // the row goes and nothing comes back.
+      test("D5b retired: clearing the lane's last relation on a pair the prose still names restores nothing", () => {
         const segmentId = createViaTool("clear d5b");
         seedSegmentTag(segmentId, "d5b-seg");
         declareLane(segmentId, "alpha");
@@ -1838,19 +1845,18 @@ describe("remember tool (ticket 02)", () => {
         const text = resultText(
           rememberTool(db, { verb: "clear", id: `E${segmentId}/#alpha` }),
         );
-        expect(text).toContain("1 bare row(s) restored");
+        expect(text).toContain(`Cleared E${segmentId}'s lane "alpha"`);
+        expect(text).toContain("1 edge(s) deleted");
+        expect(text).not.toContain("bare row(s) restored");
 
-        const outgoing = getOutgoingEdges(db, { kind: "turn", id: a });
-        expect(outgoing).toHaveLength(1);
-        expect(outgoing[0]?.relation).toBeNull();
-        expect(outgoing[0]?.provenance).toBe("text-ref");
-        expect(outgoing[0]?.cited).toEqual({ kind: "turn", id: b });
+        expect(getOutgoingEdges(db, { kind: "turn", id: a })).toEqual([]);
       });
 
-      // The negative of the D5b fixture above: when the prose does NOT name
-      // the target any more, nothing is restored — clear must not invent a
-      // citation the body never asserts.
-      test("D5b: no prose naming the target means no bare row comes back", () => {
+      // The prose-free half of the same fixture. It asserted the NEGATIVE side
+      // of a restoration rule that no longer exists (main-agent-edges D1), and
+      // survives only because its assertion — clear deletes the row and puts
+      // nothing back — is what both halves now say.
+      test("D5b retired: no prose naming the target, and still no bare row comes back", () => {
         const segmentId = createViaTool("clear d5b negative");
         seedSegmentTag(segmentId, "d5b-neg-seg");
         declareLane(segmentId, "alpha");
@@ -2533,19 +2539,19 @@ describe("remember tool (ticket 02)", () => {
       expect(text).toContain(`remember(close, id="E${segmentId}")`);
     });
 
-    test("citations in a written field create a memory edge (existing citation machinery reused)", () => {
-      const turn = seedTurn(1, 100);
-      const promptNumber = 1;
-      const segmentId = createSegmentId("write-citation");
-      rememberTool(db, {
-        verb: "write",
-        id: `E${segmentId}`,
-        field: "constraints",
-        value: `- ruled per [S${sessionId}/T${promptNumber}]`,
-      });
-      const edges = getOutgoingEdges(db, { kind: "segment", id: segmentId });
-      expect(edges.some((edge) => edge.cited.kind === "turn" && edge.cited.id === turn)).toBe(true);
-    });
+    // DELETED (main-agent-edges D1): "citations in a written field create a
+    // memory edge (existing citation machinery reused)". A `[S<n>/T<m>]` in a
+    // segment field used to mint a WORDLESS (`relation IS NULL`) `text-ref`
+    // row through `reconcileSegmentCitedPairs`, called from eight places in
+    // `db/segments.ts`. The wordless row is retired as a WRITE PATH outright —
+    // `writeMemoryEdges` refuses `relation: null` with `"bare-row-retired"` —
+    // and that reconciler is deleted with its call sites, so a segment field's
+    // prose mints nothing at all now.
+    //
+    // The loss is EXPECTED and is not repaired anywhere: the surviving prose
+    // pull-through (`getEffectiveCitations` unioning `parseInlineCitations`)
+    // is turn-scoped, so a segment field's citations have no reader-side
+    // union standing in for the row this test used to demand.
   });
 
   // ---------------------------------------------------------------------
@@ -2657,24 +2663,13 @@ describe("remember tool (ticket 02)", () => {
       expect(getSegment(db, segmentId)?.insight).toBe(before);
     });
 
-    test("dropping a row's only citation on edit removes its memory edge", () => {
-      seedTurn(1, 100);
-      const segmentId = createWithRow(
-        "edit-citation",
-        "constraints",
-        `ruled per [S${sessionId}/T1]`,
-      );
-      expect(getOutgoingEdges(db, { kind: "segment", id: segmentId }).length).toBeGreaterThan(0);
-
-      rememberTool(db, {
-        verb: "edit",
-        id: `E${segmentId}`,
-        field: "constraints",
-        oldString: `- ruled per [S${sessionId}/T1]`,
-        newString: "- ruled, no longer citing the source turn",
-      });
-      expect(getOutgoingEdges(db, { kind: "segment", id: segmentId }).length).toBe(0);
-    });
+    // DELETED (main-agent-edges D1): "dropping a row's only citation on edit
+    // removes its memory edge". The mirror of the `write` case deleted above —
+    // it depended on the edit having a wordless `text-ref` row to withdraw,
+    // and `reconcileSegmentCitedPairs` (the reconciler that both minted and
+    // withdrew one) is gone with the whole wordless write path. A segment
+    // field's prose neither creates nor deletes an edge now, so there is no
+    // withdrawal left to assert.
 
     test("refuses a write on a closed segment, naming close as the way back", () => {
       const segmentId = createWithRow("edit-closed", "goal", "ship it");

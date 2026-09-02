@@ -8,7 +8,6 @@ import {
   rekeyImpressionDebtsToSegment,
   type StoredImpression,
 } from "./impressions";
-import { reconcileCitedPairs } from "./memory-edges";
 import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSegmentToFTS } from "./search";
 import {
@@ -361,70 +360,20 @@ export function createSegment(
     throw new Error("Failed to create segment.");
   }
   indexSegment(db, inserted);
-  reconcileSegmentCitedPairs(db, inserted, input.nowEpoch);
   return inserted;
 }
 
-/**
- * Spec C6: a segment's title/content/insight is its whole citation-bearing
- * surface (type/tags/status are structured, not prose). Every write that lands
- * a segment row — creation and `applySegmentWrites`' compare-and-set rewrite
- * alike — calls this so a bare `[S<session>/T<n>]`/`[E<n>]` in any of those
- * fields is a real, storable citation and a rewrite that drops one drops the
- * pair.
- *
- * TICKET 14 (spec K7) ADMITTED `insight`. It is scanned in the SAME change
- * that gave the segment the field, deliberately: a prose field that carries
- * citations but is not scanned here produces the worst possible reading — the
- * author sees a citation, the graph has no edge, and nothing reports the
- * difference.
- *
- * The same resolver every other citation-bearing write uses, asking the one
- * question a pair's existence turns on: does the address name a real row.
- * This layer used to be the odd one out — it had no writer-session context to
- * gate against, so it skipped an exposure check the turn and session paths
- * applied, which left one reference kind licensed differently depending on
- * which body carried it. The gate is gone everywhere now, so there is nothing
- * left to be inconsistent about.
- *
- * TICKET 02 (spec "Data model") widened the scan to the Working State fields
- * alongside the summary layer: a `constraints` row citing its source is
- * exactly as real a citation as one in `content`, and scanning the whole
- * record here — rather than adding a second reconciler for the new columns —
- * is what keeps "every segment write reconciles its own citations" a single
- * invariant instead of two that could drift. Harmless on the settlement path
- * (`applySegmentWrites`), whose `UPDATE` never touches them: the `RETURNING`
- * row still carries their current stored value, so the scan simply re-confirms
- * citations that did not change.
- *
- * The RETIRED fields are absent for the reason they are absent everywhere
- * (ticket 05): they are not on `SegmentRecord`. A citation that only a retired
- * field carried therefore stops being asserted at this segment's next write —
- * the same consequence retiring the field has on every other surface, arriving
- * lazily rather than as a sweep.
- */
-function reconcileSegmentCitedPairs(
-  db: Database,
-  segment: SegmentRecord,
-  nowEpoch: number,
-): void {
-  const references = [
-    ...parseQualifiedReferences(segment.title),
-    ...parseQualifiedReferences(segment.content),
-    ...parseQualifiedReferences(segment.insight),
-    ...parseQualifiedReferences(segment.goal),
-    ...parseQualifiedReferences(segment.constraints),
-    ...parseQualifiedReferences(segment.reference),
-  ];
-  const resolved = validateReferences(db, references).accepted;
-  reconcileCitedPairs(
-    db,
-    { kind: "segment", id: segment.id },
-    resolved.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref",
-  );
-}
+// The segment-field CITATION RESCAN (`reconcileSegmentCitedPairs`) is DELETED
+// by main-agent-edges D1 / R10-2, along with its eight call sites — every
+// segment write path reached it. It kept one wordless
+// `segment -> turn|segment` row per address any of the record's six
+// citation-bearing fields happened to name: part of production's 1,883-row
+// wordless population, and a fact nothing acts on, because an edge is a class
+// and this scan asserted none. No replacement (D1: reproducing the kindful
+// endpoint space for a fact nobody reads is the cost that ruled a typed
+// identity table out). The addresses stay in the prose, where a reader reads
+// them.
+
 
 /**
  * Keep the segment's search row in step with the row it was written from.
@@ -587,7 +536,6 @@ export function replaceSegmentTaskImpression(
     return false;
   }
   indexSegment(db, updated);
-  reconcileSegmentCitedPairs(db, updated, input.nowEpoch);
   return true;
 }
 
@@ -1997,7 +1945,6 @@ export function applySegmentWrites(
       }
 
       indexSegment(db, updated);
-      reconcileSegmentCitedPairs(db, updated, options.nowEpoch);
       applied.push(updated);
     }
   } catch (error) {
@@ -2070,7 +2017,6 @@ export function appendSegmentWorkingStateRows(
   );
 
   if (updated) {
-    reconcileSegmentCitedPairs(db, updated, nowEpoch);
     // Ticket 03: the only production writer of these fields never reindexed
     // — a row appended through `remember` was invisible to `recall(query=…)`
     // until the next full rebuild, which nothing schedules.
@@ -2148,7 +2094,6 @@ export function replaceInSegmentWorkingStateField(
   );
 
   if (updated) {
-    reconcileSegmentCitedPairs(db, updated, nowEpoch);
     // Ticket 03 — see `appendSegmentWorkingStateRows`'s own note.
     indexSegment(db, updated);
   }
@@ -2222,7 +2167,6 @@ export function writeSegmentWorkingStateField(
   );
 
   if (updated) {
-    reconcileSegmentCitedPairs(db, updated, nowEpoch);
     indexSegment(db, updated);
   }
   return updated;
@@ -2876,7 +2820,6 @@ export function mergeSegments(
   // FTS + citation reconciliation, ONCE, now that step 3 has settled every
   // field — the corrected, final projection over step 2's premature one.
   indexSegment(db, mergedFields);
-  reconcileSegmentCitedPairs(db, mergedFields, nowEpoch);
 
   if (writer) {
     const stampIfChanged = (

@@ -537,143 +537,19 @@ describe("session queries", () => {
     expect(getSession(db, session.id)?.lastCompactTurn).toBe(1);
   });
 
-  // Spec C6/C10: a session field can carry a bare `[S<session>/T<n>]`
-  // citation, same grammar as a turn or segment body — `updateSessionSummaryRewrite`
-  // is the ONE session write path (spec D2), so it is where the recompute lives.
-  describe("cited pairs from a session summary (spec C6/C10)", () => {
-    function seedSessionAndTurn(): { sessionId: number; turnId: number } {
-      const session = upsertSession(db, {
-        contentSessionId: "session-cites",
-        project: "claude-mnemo",
-        title: null,
-        content: null,
-        insight: null,
-        createdAtEpoch: 100,
-        updatedAtEpoch: null,
-        completedAtEpoch: null,
-      });
-      const turnId = db
-        .query<{ id: number }, [number]>(
-          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-           VALUES (?, 1, 'extracted', 100) RETURNING id`,
-        )
-        .get(session.id)!.id;
-      return { sessionId: session.id, turnId };
-    }
-
-    // ticket 04 (spec D2): the seven fields are title/content/insight and
-    // next_steps/decision/done/reference — `current` is deleted.
-    const emptySummary = {
-      title: "",
-      content: "",
-      insight: "",
-      decision: "",
-      done: "",
-      nextSteps: "",
-      reference: "",
-    };
-
-    test("a bare qualified reference in ANY summary field creates an unattributed pair", () => {
-      const { sessionId, turnId } = seedSessionAndTurn();
-
-      updateSessionSummaryRewrite(
-        db,
-        sessionId,
-        { ...emptySummary, decision: `Chose the fold-in over a rewrite, per [S${sessionId}/T1].` },
-        200,
-      );
-
-      expect(
-        getOutgoingEdges(db, { kind: "session", id: sessionId }),
-      ).toEqual([
-        {
-          id: expect.any(Number),
-          citing: { kind: "session", id: sessionId },
-          cited: { kind: "turn", id: turnId },
-          relation: null,
-          tailTag: "",
-          headTag: "",
-          // relation-vocabulary-v13 ticket 02: a bare prose-citation row
-          // carries no class and no coverage.
-          relationClass: "",
-          relationCoverage: "",
-          provenance: "text-ref",
-          createdAtEpoch: 200,
-        },
-      ]);
-    });
-
-    // Acceptance criterion 3 (session side): the rewrite-drops-citation
-    // sequence, relation included.
-    test("a rewrite that drops a reference drops its pair", () => {
-      const { sessionId, turnId } = seedSessionAndTurn();
-      const other = db
-        .query<{ id: number }, [number]>(
-          `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-           VALUES (?, 2, 'extracted', 100) RETURNING id`,
-        )
-        .get(sessionId)!.id;
-      updateSessionSummaryRewrite(
-        db,
-        sessionId,
-        {
-          ...emptySummary,
-          decision: `[S${sessionId}/T1].`,
-          reference: `Also [S${sessionId}/T2].`,
-        },
-        200,
-      );
-      expect(
-        getOutgoingEdges(db, { kind: "session", id: sessionId }),
-      ).toHaveLength(2);
-
-      updateSessionSummaryRewrite(
-        db,
-        sessionId,
-        { ...emptySummary, decision: `Only [S${sessionId}/T1] now.` },
-        300,
-      );
-
-      // [S15069/T1728], container-unification D10: a session is a CONTAINER,
-      // not a relation node, so a session-sourced pair can only ever be BARE.
-      // The property under test is unchanged — a rewrite drops what it stopped
-      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
-      // now reads off the row's own creation stamp instead of a relation word
-      // it can no longer carry: a reconcile that deleted and reinserted the
-      // row would move that stamp.
-      const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
-      expect(surviving.map((edge) => edge.cited.id)).toEqual([turnId]);
-      expect(surviving[0]?.relation).toBeNull();
-      expect(surviving.some((edge) => edge.cited.id === other)).toBe(false);
-    });
-
-    test("a rewrite that still cites a pair leaves its row undisturbed", () => {
-      const { sessionId, turnId } = seedSessionAndTurn();
-      updateSessionSummaryRewrite(
-        db,
-        sessionId,
-        { ...emptySummary, decision: `[S${sessionId}/T1].` },
-        200,
-      );
-
-      updateSessionSummaryRewrite(
-        db,
-        sessionId,
-        { ...emptySummary, decision: `Restating [S${sessionId}/T1] once more.` },
-        300,
-      );
-
-      // [S15069/T1728], container-unification D10: a session is a CONTAINER,
-      // not a relation node, so a session-sourced pair can only ever be BARE.
-      // The property under test is unchanged — a rewrite drops what it stopped
-      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
-      // now reads off the row's own creation stamp instead of a relation word
-      // it can no longer carry: a reconcile that deleted and reinserted the
-      // row would move that stamp.
-      const surviving = getOutgoingEdges(db, { kind: "session", id: sessionId });
-      expect(surviving).toHaveLength(1);
-      // Created by the FIRST rewrite, not the second: the row was left alone.
-      expect(surviving[0]?.createdAtEpoch).toBe(200);
-    });
-  });
+  // THE SESSION CITATION RESCAN IS RETIRED (main-agent-edges D1 / R10-2).
+  //
+  // A whole `describe` block stood here, pinning that a bare `[S<n>/T<m>]` /
+  // `[E<n>]` in any of a session summary's seven fields wrote a wordless
+  // `session -> turn|segment` row, that a rewrite dropping the reference
+  // dropped the row, and that a rewrite still naming it left the row's
+  // creation stamp undisturbed. All three described the same mechanism:
+  // `reconcileCitedPairs` over the summary's prose, part of production's
+  // 1,883-row wordless population.
+  //
+  // It is deleted rather than adapted because there is no successor to adapt
+  // to: an edge is a class, a session asserts none, and D1 ruled out a
+  // replacement identity table (reproducing the kindful endpoint space for a
+  // fact nobody acts on). The addresses stay in the prose, which is where
+  // every reader of them already looks.
 });

@@ -139,7 +139,37 @@ interface Fixture {
   sessionDbId: number;
   t1: number;
   t2: number;
+  t3: number;
   job: NoteSettlementJob;
+}
+
+/**
+ * MAIN-AGENT-EDGES D3 (read-once 00 addendum): the FRESH-TURN EXCEPTION is why
+ * this fixture seeds an edge at all.
+ *
+ * `checkRelationsGate` now admits UNCONDITIONALLY when the citing turn carries
+ * no outgoing relation-bearing row: an empty set holds nothing a read could
+ * have delivered, so demanding one taught the writer to run a read that grants
+ * nothing. Both tests below are ABOUT the grant — one that it carries across
+ * the stage transition, one that it does not cross a generation — so an
+ * edgeless T1 would make both of them pass for the wrong reason (the exception,
+ * not the ledger). Seeding one stored edge out of T1 puts the turn in the state
+ * where the gate's rule has content.
+ *
+ * It points at a THIRD turn, not at T2: the pair the tests write is (T1, T2),
+ * and under D1 ("one pair, one row") a stored (T1, T2) row would turn that
+ * write into a promotion or a no-op instead of a landed relation. The row is
+ * inserted directly rather than through `writeMemoryEdges`, which would itself
+ * run the gate this fixture is setting up.
+ */
+function seedOutgoingRelation(db: Database, citingTurnId: number, citedTurnId: number): void {
+  db.query<unknown, [number, number, number]>(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, tail_tag, head_tag,
+       relation_class, relation_coverage, created_at_epoch
+     ) VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', '', '', 'use', '', ?)`,
+  ).run(citingTurnId, citedTurnId, NOW - 5_000);
 }
 
 function seedFixture(): Fixture {
@@ -157,6 +187,10 @@ function seedFixture(): Fixture {
   }).id;
   const t1 = insertTurn(db, sessionDbId, 1);
   const t2 = insertTurn(db, sessionDbId, 2);
+  // Outside the settlement window on purpose: it exists only to be the head of
+  // the pre-existing edge below. See `seedOutgoingRelation`.
+  const t3 = insertTurn(db, sessionDbId, 3);
+  seedOutgoingRelation(db, t1, t3);
   enqueueNoteSettlementWindows(
     db,
     [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 2, triggerType: "consecutive" }],
@@ -167,7 +201,7 @@ function seedFixture(): Fixture {
   if (!job) {
     throw new Error("fixture failed to claim a settlement job");
   }
-  return { db, sessionDbId, t1, t2, job };
+  return { db, sessionDbId, t1, t2, t3, job };
 }
 
 function baseRequest(fixture: Fixture, overrides: Record<string, unknown> = {}) {

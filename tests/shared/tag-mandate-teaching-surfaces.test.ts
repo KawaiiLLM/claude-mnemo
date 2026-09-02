@@ -385,12 +385,20 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // The assertion describes (shared zod objects — both write surfaces inherit)
   // -------------------------------------------------------------------------
 
-  // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the relation
-  // describes are BACK on `noteInputShape`, the owning declaration — RESTORED
-  // after lane-model-v12 ticket 08 had moved them to `settlementNoteInputShape`
-  // on a misreading of this same ruling. `settlementNoteInputShape` borrows
-  // the identical field objects, so reading either surface's describe reads
-  // the same text.
+  // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]) had the two
+  // surfaces sharing ONE field object per class, so reading either surface's
+  // describe read the same text. MAIN-AGENT-EDGES D3 / R10-5 SPLIT THEM: the
+  // main agent writes a node fact and no lane sides, settlement additionally
+  // DECLARES an ambiguous side, so the ENTRY SHAPES differ and the two surfaces
+  // declare their own fields.
+  //
+  // What is still one thing, and what these tests moved to pinning, is the
+  // VOCABULARY: both surfaces derive their parameter names from
+  // `db/citations.ts`'s `RELATION_FIELD_ENTRIES`, and each class means the same
+  // thing on both. The two-sided admission test below is asserted on the
+  // SETTLEMENT surface only, because it is the only surface that can place a
+  // side at all — asserting it on `note` would be pinning teaching the main
+  // agent must not act on.
   describe("assertion describes offer both entry forms for ALL THREE classes", () => {
     for (const field of RELATION_CLASSES) {
       test(`${field}'s describe offers the draft form and states the two-sided admission test`, () => {
@@ -406,16 +414,30 @@ describe("no teaching surface still states the retired tag mandate", () => {
         expect(description).not.toContain("continuation names its lane");
       });
 
-      test(`the main agent's \`note\` has the ${field} field, the SAME object settlement reads`, () => {
+      test(`the main agent's \`note\` has the ${field} field, with its own PUBLIC entry shape`, () => {
         expect(field in noteInputShape).toBe(true);
-        expect((noteInputShape as Record<string, unknown>)[field]).toBe(
-          settlementNoteInputShape[field],
-        );
         const retractField = `retract${field.charAt(0).toUpperCase()}${field.slice(1)}`;
         expect(retractField in noteInputShape).toBe(true);
-        expect((noteInputShape as Record<string, unknown>)[retractField]).toBe(
-          (settlementNoteInputShape as Record<string, unknown>)[retractField],
-        );
+
+        // NOT the same object any more (D3 / R10-5), and the difference is
+        // asserted rather than merely allowed: the public arm REFUSES a
+        // two-sided entry, the settlement arm accepts it. Pinning both
+        // directions is what catches an accidental re-merge of the two shapes
+        // — which would either hand the main agent lane parameters it must not
+        // use, or take settlement's declaration form away.
+        const publicField = (noteInputShape as Record<string, unknown>)[field] as {
+          safeParse: (value: unknown) => { success: boolean };
+        };
+        const settlementField = settlementNoteInputShape[field] as unknown as {
+          safeParse: (value: unknown) => { success: boolean };
+        };
+        const twoSided = [{ turn: "S1/T2", tailTag: "#a", headTag: "#a" }];
+        expect(publicField.safeParse(twoSided).success).toBe(false);
+        expect(settlementField.safeParse(twoSided).success).toBe(true);
+
+        // The public arm still takes what the main agent actually writes.
+        const bare = field === "correct" ? [{ turn: "S1/T2", coverage: "full" }] : ["S1/T2"];
+        expect(publicField.safeParse(bare).success).toBe(true);
       });
     }
   });

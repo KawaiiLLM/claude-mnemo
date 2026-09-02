@@ -14,7 +14,11 @@ import {
   computeSettlementShapeNumbers,
   readSettlementFrozenScope,
 } from "../../src/worker/note-settlement-shape-numbers";
-import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
+import {
+  deriveSideTags,
+  retractMemoryEdges,
+  writeMemoryEdges,
+} from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   computeSettlementWritableTurnIds,
@@ -1193,10 +1197,33 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
         db,
         [
           { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
-          { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["vocab-fixture"]) },
         ],
         NOW,
       );
+      // The `indexes` row on the SAME pair, which main-agent-edges D1 took away
+      // from `writeMemoryEdges`: one pair holds one row, `indexes` and
+      // `extends` are both class `use`, so a second write onto this pair is now
+      // a no-op and the lane's two-word tally below would silently become one.
+      // A legacy multi-row pair is still legitimate STOCK — this whole fixture
+      // is about what the checker makes of stock it cannot have written — so
+      // the row is inserted at the storage layer, beside the out-of-vocabulary
+      // one below and for the same reason.
+      const indexesRowId = db
+        .query<{ id: number }, [number, number]>(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+              tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'indexes', 'asserted',
+                   'vocab-fixture', 'vocab-fixture', '', '', ${NOW})
+           RETURNING id`,
+        )
+        .get(t2, t1)!.id;
+      for (const side of ["tail", "head"] as const) {
+        db.query<unknown, [number, string]>(
+          `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag)
+           VALUES (?, ?, 'vocab-fixture')`,
+        ).run(indexesRowId, side);
+      }
       // The out-of-vocabulary row, written the only way one can now exist.
       db.exec("PRAGMA ignore_check_constraints = ON");
       db.query<unknown, [number, number]>(
@@ -3635,6 +3662,8 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
     sessionDbId: number;
     t1: number;
     t2: number;
+    /** The stock edges' far end — outside the window, and never written to. */
+    t3: number;
     job: NoteSettlementJob;
   } {
     const sessionDbId = seedPullSession(db, "settlement-pull-grant");
@@ -3646,11 +3675,40 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       title: "another turn the run never reads",
       content: "Also the main agent's.",
     });
+    const t3 = insertTypedTurn(db, sessionDbId, 3, {
+      title: "the far end of the stock edges",
+      content: "Outside the window.",
+    });
     // The main agent owns both fields, so the gate must consult a read grant
     // rather than admitting on the never-written rule.
     stampField(db, "turn", t1, "content", sessionWriterId(sessionDbId), NOW - 500);
     stampField(db, "turn", t2, "content", sessionWriterId(sessionDbId), NOW - 500);
-    return { sessionDbId, t1, t2, job: claimWindow(db, sessionDbId, 1, 2) };
+    // MAIN-AGENT-EDGES D3 (read-once 00 addendum): THE FRESH-TURN EXCEPTION,
+    // and why this fixture now carries stock edges.
+    //
+    // `checkRelationsGate` admits UNCONDITIONALLY when the citing turn holds no
+    // relation-bearing row — an empty set is nothing a read could have
+    // delivered, so demanding one taught the writer to run a read that grants
+    // nothing. Both turns under test here would have been edgeless, so the
+    // NEGATIVE half of these tests — the half that carries their whole weight,
+    // because a positive-only test also passes with the gate switched off —
+    // would have refused nothing.
+    //
+    // One stored edge out of each puts them in the state where the gate's rule
+    // has content. They point at a THIRD turn so the pairs these tests write
+    // (T1 -> T2 and T2 -> T1) are still free, and they are inserted at the
+    // storage layer because every write facade runs the gate this is setting
+    // up.
+    for (const citing of [t1, t2]) {
+      db.query<unknown, [number, number]>(
+        `INSERT INTO memory_edges (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag,
+           relation_class, relation_coverage, created_at_epoch
+         ) VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', '', '', 'use', '', ${NOW - 800})`,
+      ).run(citing, t3);
+    }
+    return { sessionDbId, t1, t2, t3, job: claimWindow(db, sessionDbId, 1, 2) };
   }
 
   test("recall first, then the whole-field write lands; the turn never recalled is still refused", async () => {
@@ -3659,8 +3717,13 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       db = createDatabase(":memory:");
       initializeSchema(db);
       seedTagContainers(db);
-      const { sessionDbId, t1, t2, job } = seedForeignOwnedNote(db);
+      const { sessionDbId, t1, t2, t3, job } = seedForeignOwnedNote(db);
       const capturedDb = db;
+      /** This run's own writes, with the fixture's stock edge toward T3 set aside. */
+      const writtenOut = (citing: number) =>
+        getOutgoingEdges(capturedDb, { kind: "turn", id: citing }).filter(
+          (edge) => edge.cited.id !== t3,
+        );
 
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
@@ -3678,7 +3741,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
             use: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
           expect(refused.content[0]!.text).toContain("were not delivered to this run");
-          expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t1 })).toHaveLength(0);
+          expect(writtenOut(t1)).toHaveLength(0);
 
           // Step 0's coverage read, through the registered tool.
           await handlers.get("recall")!({
@@ -3699,7 +3762,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
             use: [{ turn: `S${sessionDbId}/T1` }],
           })) as { content: Array<{ text: string }> };
           expect(stillRefused.content[0]!.text).toContain("were not delivered to this run");
-          expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t2 })).toHaveLength(0);
+          expect(writtenOut(t2)).toHaveLength(0);
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -3730,8 +3793,10 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
       });
 
       // The write landed under THIS run's claim identity — the same string
-      // the recall recorded its grant under.
-      expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toHaveLength(1);
+      // the recall recorded its grant under. Two rows out of T1: the fixture's
+      // stock edge toward T3, and this run's own.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t1 })).toHaveLength(2);
+      expect(writtenOut(t1)).toHaveLength(1);
       const grant = db
         .query<{ count: number }, [string, number]>(
           "SELECT COUNT(*) AS count FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn' AND entity_id = ?",
@@ -5473,7 +5538,15 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         // The homeless retractions, each with its cause.
         expect(committed).toContain("HOMELESS-MOTIVATED RETRACTIONS (2)");
         expect(committed).toContain('"an orphan line"');
-        expect(committed).toContain("relation retracted, bare restored");
+        // MAIN-AGENT-EDGES D1: the "; relation retracted, bare restored" suffix
+        // is no longer producible. It marked a retraction that had put the
+        // WORDLESS citation row back because the citing prose still named the
+        // target — "the classification is gone" as against "the citation is
+        // gone". The wordless population is retired as a write path, so only
+        // the second can happen and every new audit row is a plain `retracted`.
+        // The renderer still knows the old value (pre-release rows carry it),
+        // which is why this asserts its absence rather than trusting it gone.
+        expect(committed).not.toContain("bare restored");
 
         // ---- Round-5 P1: the idempotent SECOND commit replays nothing ------
         // The first call's shape/retraction artifacts live in the handler
@@ -5505,10 +5578,23 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       // The debt is discharged and the homeless drafts are gone.
       expect(getOutgoingEdges(db, { kind: "turn", id: fixture.citer })).toHaveLength(0);
       const fromHomeless = getOutgoingEdges(db, { kind: "turn", id: fixture.homeless });
-      // The bare citation the prose still asserts is BACK; the relation is not.
-      expect(fromHomeless).toHaveLength(1);
-      expect(fromHomeless[0]!.relation).toBeNull();
-      expect(fromHomeless[0]!.cited.id).toBe(a1);
+      // MAIN-AGENT-EDGES D1: THE ROW DOES NOT COME BACK ANY MORE.
+      //
+      // The prose of the homeless turn still names a1, and the retraction used
+      // to answer that by RESTORING the wordless citation row — leaving the
+      // pair present-but-unclassified rather than gone. Nothing writes a
+      // wordless row now (`restoreBareRowsForEmptiedPairs` is deleted with the
+      // whole population), so the retraction simply empties the pair.
+      //
+      // The loss is DELIBERATE and named in the spec: what the restored row
+      // added was a stored assertion that a citation exists without saying what
+      // it claims, and nothing acts on that — an edge is a class, and a pair
+      // with no class is not an edge. The prose itself is untouched and still
+      // says what it said; only the shadow row it used to cast is gone.
+      expect(fromHomeless).toHaveLength(0);
+      expect(getTurnById(db, fixture.homeless)!.content).toContain(
+        `[S${sessionDbId}/T1]`,
+      );
 
       // The session narrative, written by this pass.
       const session = db
@@ -5531,7 +5617,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
     }
   });
 
-  test("a homeless-motivated retraction records the deleted row's full composite identity, and the last relation records the bare restore", async () => {
+  test("a homeless-motivated retraction records the deleted row's full composite identity, and every outcome is a plain retraction now", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -5572,10 +5658,20 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       expect(grounds.headTag).toBe("");
       expect(grounds.createdAtEpoch).toBe(NOW);
 
-      // The (homeless, a1) pair is the one the prose still names, so its last
-      // relation leaving RESTORES the bare row — and the record says so.
-      expect(grounds.outcome).toBe("retracted-bare-restored");
-      // The (homeless, a3) pair is named nowhere, so nothing came back.
+      // MAIN-AGENT-EDGES D1 COLLAPSED THE TWO OUTCOMES INTO ONE.
+      //
+      // The (homeless, a1) pair is still the one the citing prose names, and
+      // that used to matter here: emptying it of relations RESTORED the
+      // wordless citation row, so the audit recorded
+      // `retracted-bare-restored` — "the classification is gone" as against
+      // "the citation is gone", two different facts about the same delete. The
+      // wordless population is retired as a write path (nothing restores one,
+      // `restoreBareRowsForEmptiedPairs` is deleted), so only the second fact
+      // can happen and BOTH rows read `retracted`. The prose-named pair is kept
+      // in the fixture rather than levelled: it is the case that used to
+      // diverge, so it is the case worth asserting no longer does.
+      expect(grounds.outcome).toBe("retracted");
+      // The (homeless, a3) pair is named nowhere, and answers identically.
       expect(consume.citedId).toBe(a3);
       expect(consume.outcome).toBe("retracted");
     } finally {
@@ -5620,6 +5716,19 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       const fixture = seedStageTwoFixture(db);
       const { taskId, alpha, beta } = fixture;
       const [a1, a2, a3] = alpha;
+
+      // MAIN-AGENT-EDGES D1/D4: the fixture's PRE-EXISTING DRAFT on (a2, a1)
+      // has to go before the placed row can exist.
+      //
+      // `seedStageTwoFixture` seeds that pair as a bare draft (both sides
+      // unsettled). A write is no longer what places a side: the pair already
+      // holds a row, the incoming class is the same `use`, so the write is a
+      // no-op that leaves both sides unsettled — and the in-lane edge this test
+      // counts would never appear. Retract, then place, which is the same
+      // reconciliation the seam-driven run above performs through the facade.
+      retractMemoryEdges(db, [
+        { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 } },
+      ]);
 
       // a1 <- a2 in-lane; a3 is a frozen member no edge touches.
       writeMemoryEdges(

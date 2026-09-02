@@ -8,9 +8,7 @@ import {
   getSessionEffectiveCitations,
   getTurnCitations,
   parseInlineCitations,
-  recomputeTurnCitedPairs,
   retractTurnRelations,
-  type RecomputeTurnCitedPairsFields as RecomputeFields,
   type RelationTargetEntry,
 } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
@@ -125,13 +123,11 @@ describe("inline citation grammar", () => {
   });
 });
 
-// The generic body-free structured edge write (`replaceTurnCitations`, spec
-// C6) is retired outright — a `{turn, relation}` list with no prose backing
-// it made every rule in the `recomputeTurnCitedPairs` describe block below
-// bypassable in one call. These fixtures now seed edges through
-// `writeMemoryEdges` directly — the primitive both the old function and
-// `recomputeTurnCitedPairs` are built on — so the schema/delete-trigger
-// coverage (spec C15) they exist for survives the retirement unchanged.
+// These fixtures seed edges through `writeMemoryEdges` directly, so the
+// schema/delete-trigger coverage (spec C15) they exist for stands on the
+// storage primitive alone — it survived the retirement of the body-free
+// `replaceTurnCitations` write, and it survives main-agent-edges D1's
+// retirement of the prose rescan (`recomputeTurnCitedPairs`) the same way.
 describe("memory_edges schema and delete triggers (spec C15)", () => {
   let db: Database;
   let sessionA: number;
@@ -222,29 +218,26 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
     expect(getSessionCitationInDegree(db, sessionB).size).toBe(0);
   });
 
-  test("a second relation on the same pair is a second row, and still one citer of the target", () => {
-    // Edge-mechanism-revision D2: identity is (pair, relation), so the second
-    // write ADDS a row rather than relabelling the first (memory-edges.test.ts
-    // covers the write path itself). What must still hold here is that
-    // in-degree counts the citing turn ONCE — it is one piece of work
-    // consuming the target, however many claims it filed about it.
+  test("a second class on the same pair PROMOTES the one row, and the target still has one citer", () => {
+    // main-agent-edges D5 inverted the first half of this. Identity used to be
+    // (pair, relation), so a second write ADDED a row and this test read two
+    // back; identity is the PAIR now, so the second write promotes the row it
+    // finds — `verifies` (class `verify`) then `narrows` (class
+    // `correct/partial`) is one edge that ends up `correct`.
+    //
+    // The second half is untouched, and it is why this test sits in this file
+    // rather than in the write path's own: in-degree counts the citing turn
+    // ONCE. That was true when one citer could file several claims, and it is
+    // true now that it cannot — it answers "how many pieces of work consumed
+    // this", which never depended on the row count.
     citeFrom(turns[1]!, turns[0]!, "verifies");
     citeFrom(turns[1]!, turns[0]!, "narrows");
 
-    // Alphabetical by relation, not insertion order: 'narrows' < 'verifies'.
-    // (The pair used to be written 'supersedes'/'verifies'; lane-model-v12
-    // ticket 03 retired that word, and the ordering point is the same.)
     expect(getTurnCitations(db, turns[1]!)).toEqual([
       {
         citingTurnId: turns[1]!,
         citedTurnId: turns[0]!,
         relation: "narrows",
-        createdAtEpoch: 500,
-      },
-      {
-        citingTurnId: turns[1]!,
-        citedTurnId: turns[0]!,
-        relation: "verifies",
         createdAtEpoch: 500,
       },
     ]);
@@ -429,239 +422,21 @@ describe("memory_edges schema and delete triggers (spec C15)", () => {
   });
 });
 
-describe("recomputeTurnCitedPairs (spec C6)", () => {
-  let db: Database;
-  let sessionId: number;
-  let otherSessionId: number;
-  let turns: number[];
-
-  const insertTurn = (sessionDbId: number, promptNumber: number): number =>
-    db
-      .query<{ id: number }, [number, number]>(
-        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
-         VALUES (?, ?, 'extracted', 'fixture', 100) RETURNING id`,
-      )
-      .get(sessionDbId, promptNumber)!.id;
-
-  /** Exposes every turn id to `sessionId`'s ledger — recomputeTurnCitedPairs' own gate. */
-  beforeEach(() => {
-    db = createDatabase(":memory:");
-    initializeSchema(db);
-    sessionId = upsertSession(db, {
-      contentSessionId: "recompute-a",
-      project: "claude-mnemo",
-      title: "A",
-      insight: null,
-      createdAtEpoch: 100,
-      updatedAtEpoch: 100,
-      completedAtEpoch: null,
-    }).id;
-    otherSessionId = upsertSession(db, {
-      contentSessionId: "recompute-b",
-      project: "claude-mnemo",
-      title: "B",
-      insight: null,
-      createdAtEpoch: 200,
-      updatedAtEpoch: 200,
-      completedAtEpoch: null,
-    }).id;
-    turns = [1, 2, 3, 4].map((promptNumber) => insertTurn(sessionId, promptNumber));
-  });
-
-  afterEach(() => {
-    db.close();
-  });
-
-  // Acceptance criterion 1: a bare `[S/T]` in a citation-bearing field creates
-  // an unattributed (relation: null) pair — no relation field, no separate
-  // structured input, the body alone.
-  test("a bare qualified reference in content creates an unattributed pair", () => {
-
-    const result = recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `Builds on [S${sessionId}/T1].`, insight: null },
-      500,
-      sessionId,
-    );
-
-    expect(result.rejected).toEqual([]);
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((edge) => [
-        edge.cited,
-        edge.relation,
-      ]),
-    ).toEqual([[{ kind: "turn", id: turns[0]! }, null]]);
-  });
-
-  test("title and insight are citation-bearing fields too", () => {
-
-    recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      {
-        title: `design: reverses [S${sessionId}/T1]`,
-        content: null,
-        insight: `Same lesson as [S${sessionId}/T2].`,
-      },
-      500,
-      sessionId,
-    );
-
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: turns[2]! })
-        .map((edge) => edge.cited.id)
-        .sort((a, b) => a - b),
-    ).toEqual([turns[0]!, turns[1]!]);
-  });
-
-  // Acceptance criterion 3: reproduce the SEQUENCE — write a body citing two
-  // turns (one carrying a relation another writer already attached), rewrite
-  // it citing only one, and prove the dropped pair is gone along with its
-  // relation. Not merely "a delete helper exists".
-  test("a rewrite that drops a reference drops its pair and any relation it carried", () => {
-
-    recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `[S${sessionId}/T1] and [S${sessionId}/T2].`, insight: null },
-      500,
-      sessionId,
-    );
-    // A relation lands on the T1 pair from elsewhere (settlement, in
-    // production, through its own pre-state fence) — never this function's
-    // own job to create.
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: turns[2]! },
-          cited: { kind: "turn", id: turns[0]! },
-          relation: "narrows",
-          provenance: "judged",
-        },
-      ],
-      500,
-    );
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }),
-    ).toHaveLength(2);
-
-    const result = recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `Only [S${sessionId}/T1] now.`, insight: null },
-      600,
-      sessionId,
-    );
-
-    // T2's bare pair is gone …
-    const surviving = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
-    expect(surviving.map((edge) => edge.cited.id)).toEqual([turns[0]!]);
-    // … and the deleted pair's relation is reported, not silently dropped.
-    expect(result.deleted).toHaveLength(1);
-    expect(result.deleted[0]?.cited).toEqual({ kind: "turn", id: turns[1]! });
-  });
-
-  // Acceptance criterion 4: a relation on a pair the rewrite STILL cites
-  // survives untouched — the bare re-scan must not clear or relabel it.
-  test("a relation on a surviving pair is not disturbed by a rewrite that still cites it", () => {
-    recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `[S${sessionId}/T1].`, insight: null },
-      500,
-      sessionId,
-    );
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: turns[2]! },
-          cited: { kind: "turn", id: turns[0]! },
-          relation: "verifies",
-          provenance: "judged",
-        },
-      ],
-      500,
-    );
-
-    recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `Restating [S${sessionId}/T1] once more.`, insight: null },
-      600,
-      sessionId,
-    );
-
-    const surviving = getOutgoingEdges(db, { kind: "turn", id: turns[2]! });
-    expect(surviving).toHaveLength(1);
-    expect(surviving[0]?.relation).toBe("verifies");
-  });
-
-  // The exposure gate is gone: a citation is legal iff its address resolves.
-  // The ledger only recorded the addresses the note machinery handed over,
-  // so gating on it dropped anything a writer found through recall or
-  // timeline — and "did this agent see it" is not an auditable fact anyway.
-  test("a reference to a turn this session was never handed is written, because it resolves", () => {
-    // turns[0] deliberately NOT exposed.
-    const result = recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `[S${sessionId}/T1].`, insight: null },
-      500,
-      sessionId,
-    );
-
-    expect(result.rejected).toHaveLength(0);
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((e) => e.cited),
-    ).toEqual([{ kind: "turn", id: turns[0]! }]);
-  });
-
-  test("an address that resolves to nothing is still dropped", () => {
-    const result = recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `[S${sessionId}/T4242].`, insight: null },
-      500,
-      sessionId,
-    );
-
-    expect(result.rejected.map((entry) => entry.reason)).toEqual(["unresolved"]);
-    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
-  });
-
-  test("a cross-session reference is written as provenance", () => {
-    const foreign = insertTurn(otherSessionId, 1);
-
-    recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: `[S${otherSessionId}/T1].`, insight: null },
-      500,
-      sessionId,
-    );
-
-    expect(
-      getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map((edge) => edge.cited.id),
-    ).toEqual([foreign]);
-  });
-
-  test("no citation-bearing field leaves the turn's outgoing set untouched at empty", () => {
-    const result = recomputeTurnCitedPairs(
-      db,
-      turns[2]!,
-      { title: null, content: null, insight: null },
-      500,
-      sessionId,
-    );
-
-    expect(result.written).toEqual([]);
-    expect(result.deleted).toEqual([]);
-    expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
-  });
-});
+// `recomputeTurnCitedPairs` IS DELETED (main-agent-edges D1 / R10-2), and a
+// whole `describe` block of its rules went with it: a bare `[S<n>/T<m>]` in
+// title, content or insight writing one wordless `text-ref` row, a rewrite
+// that stops naming an address dropping that row, an unresolvable or unshown
+// address being dropped and logged, and relation rows surviving a prose
+// rewrite untouched.
+//
+// The wordless population is retired outright — an edge is a class, and prose
+// that merely NAMES a turn asserts none — so there is no successor these
+// could be adapted to. The one rule among them that outlives the mechanism,
+// "a relation row is a standalone claim that dies by retraction and never by
+// prose drift", is now true by construction: no code path reads a citing
+// turn's prose on the way to `memory_edges` at all. The prose itself is still
+// read, by `getEffectiveCitations` below, which is where the `↳`
+// pull-through's own tests live.
 
 /**
  * relation-vocabulary-v13 ticket 02: a `correct` entry MUST carry its
@@ -736,13 +511,16 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
   // Ticket 02 (D1): the retired C7 premise, tested from the other side. The
   // body here names T1 and nothing else; the relation targets T2, which the
   // old contract rejected as `not-cited`.
-  test("attaches to a target the body does not name — the bare pair is no longer a prerequisite", () => {
-    recomputeTurnCitedPairs(
-      db,
+  //
+  // main-agent-edges D1: the body is now set on the ROW rather than run
+  // through a prose rescan, because the rescan is deleted. The premise being
+  // refuted is unchanged — prose naming one turn licenses nothing about an
+  // edge to another — and it is if anything more directly stated: no code path
+  // reads the citing turn's prose on the way to `memory_edges` at all.
+  test("attaches to a target the body does not name — the prose is no longer a prerequisite", () => {
+    db.query("UPDATE turns SET content = ? WHERE id = ?").run(
+      `Mentions [S${sessionId}/T1].`,
       turns[2]!,
-      { title: null, content: `Mentions [S${sessionId}/T1].`, insight: null },
-      500,
-      sessionId,
     );
 
     const result = attachTurnRelations(
@@ -755,18 +533,29 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(result.rejected).toEqual([]);
     expect(result.written).toHaveLength(1);
     expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turns[1]! });
-    // The body's own bare pair to T1 is untouched alongside it (the sort is
-    // lexical, so the bare `null` row lands last).
+    // ONE row, and it is the relation's. The bare `null` row the prose used to
+    // put beside it does not exist — main-agent-edges D1 retired the wordless
+    // write path, which is the sharpest possible form of "prose and edges are
+    // decoupled": the body still names T1 and the graph holds nothing about it.
+    //
     // relation-vocabulary-v13 ticket 02: a `use` write lands in the `relation`
     // column as `extends` — the INTERIM equivalence
-    // (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`), which ticket 05a
-    // replaces. The stored word, not the class, is what `relationsOn` reads.
-    expect(relationsOn(turns[2]!)).toEqual(["extends", null]);
+    // (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`). The stored
+    // word, not the class, is what `relationsOn` reads.
+    expect(relationsOn(turns[2]!)).toEqual(["extends"]);
   });
 
-  // Ticket 02 (D2): the tool-surface "one relation per pair" refusal is gone,
-  // and a restatement is reported rather than counted as new work.
-  test("two relations on one pair coexist, and a restated one lands in `restated`", () => {
+  // main-agent-edges D5 rewrote this. Two classes on one pair used to COEXIST
+  // as two rows; now the most specific of them wins WITHIN the call and
+  // promotes the stored row in place, so the second call lands one `correct`
+  // and reports nothing restated — the weaker `verify` beside it was absorbed,
+  // neither written nor re-stated.
+  //
+  // What survives unchanged is the reason `restated` exists at all, and that
+  // neither a promotion nor a restatement may move `created_at_epoch`: a
+  // writer must be able to tell its own no-op from new work, and the row
+  // records the FIRST sighting of the claim.
+  test("a stronger class in a second call promotes the one row, keeping its first sighting", () => {
     attachTurnRelations(
       db,
       turns[2]!,
@@ -786,11 +575,20 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     expect(second.rejected).toEqual([]);
     expect(second.written.map((edge) => edge.relation)).toEqual(["narrows"]);
-    expect(second.restated.map((edge) => edge.relation)).toEqual(["verifies"]);
-    // Alphabetical by relation, not insertion order: 'narrows' < 'verifies'.
-    expect(relationsOn(turns[2]!)).toEqual(["narrows", "verifies"]);
-    // The restated row keeps its FIRST sighting, not this call's clock.
-    expect(second.restated[0]?.createdAtEpoch).toBe(500);
+    expect(second.restated).toEqual([]);
+    expect(relationsOn(turns[2]!)).toEqual(["narrows"]);
+    expect(second.written[0]?.createdAtEpoch).toBe(500);
+
+    // The weaker class alone, a call later, IS the restatement case.
+    const third = attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
+      700,
+    );
+    expect(third.written).toEqual([]);
+    expect(third.restated.map((edge) => edge.relation)).toEqual(["narrows"]);
+    expect(third.restated[0]?.createdAtEpoch).toBe(500);
   });
 
   test("rejects a relation naming the citing turn itself, before anything is written", () => {
@@ -912,19 +710,24 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
   // Retraction (D3)
   // ------------------------------------------------------------------
 
-  test("retracts exactly the addressed (pair, relation) row, leaving the pair's others", () => {
+  // main-agent-edges D4/D5 and the T2432 P1 pin. A retraction used to address
+  // (pair, relation, tail, head) — one physical row out of a pair that could
+  // hold several. It addresses the PAIR now: one pair is one edge, so there
+  // are no "others" left on it to leave behind, and the class it names is a
+  // COMPARE-AND-SWAP PRECONDITION rather than a selector.
+  test("retracts the pair's edge when the class precondition matches, and leaves other PAIRS alone", () => {
     attachTurnRelations(
       db,
       turns[2]!,
       [
-        { relationClass: "verify", targets: [`S${sessionId}/T1`] },
+        { relationClass: "verify", targets: [`S${sessionId}/T2`] },
         { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
       ],
       500,
     );
 
     const result = retractTurnRelations(db, turns[2]!, [
-      { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
+      { relationClass: "correct", targets: [`S${sessionId}/T1`] },
     ]);
 
     expect(result.rejected).toEqual([]);
@@ -932,7 +735,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
   });
 
-  test("an address carrying no such relation rejects the whole call and deletes nothing", () => {
+  test("an address carrying no edge at all rejects the whole call and deletes nothing", () => {
     attachTurnRelations(
       db,
       turns[2]!,
@@ -942,22 +745,57 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
 
     const result = retractTurnRelations(db, turns[2]!, [
       { relationClass: "verify", targets: [`S${sessionId}/T1`] },
-      { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
+      { relationClass: "correct", targets: [`S${sessionId}/T2`] },
     ]);
 
     expect(result.deleted).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "correct", raw: `S${sessionId}/T1`, reason: "no-such-edge" },
+      { relation: "correct", raw: `S${sessionId}/T2`, reason: "no-such-edge" },
     ]);
     // The one that WAS there survives — all-or-nothing, same as the attach path.
     expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
   });
 
-  // Ticket 10, acceptance criterion 2: the fixture turns carry `title:
-  // 'fixture'` and no body, so nothing re-asserts the citation and the pair
-  // stays gone. This is the CURRENT behaviour pinned, not the old one: the
-  // bare row comes back only for a body that still names the target.
-  test("retracting a pair's last relation leaves the pair with no row at all when no prose names the target", () => {
+  // The T2432 P1 pin's own case at this layer: the pair HAS an edge, and the
+  // class named is not the one it carries. `no-such-edge` would be a lie —
+  // the edge is right there — so the refusal names the class it now reads as,
+  // which is the only thing a caller can act on.
+  test("a class precondition that no longer matches refuses by name and deletes nothing", () => {
+    attachTurnRelations(
+      db,
+      turns[2]!,
+      [{ relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") }],
+      500,
+    );
+
+    const result = retractTurnRelations(db, turns[2]!, [
+      { relationClass: "use", targets: [`S${sessionId}/T1`] },
+    ]);
+
+    expect(result.deleted).toEqual([]);
+    expect(result.rejected).toEqual([
+      {
+        relation: "use",
+        raw: `S${sessionId}/T1`,
+        reason: "stale-class",
+        currentClass: "correct",
+      },
+    ]);
+    expect(relationsOn(turns[2]!)).toEqual(["override"]);
+  });
+
+  // main-agent-edges D1: the pair is left with NO row, and the citing body is
+  // never consulted on the way out. The fixture gives the citing turn prose
+  // that still names the target precisely to pin that — under the retired
+  // ticket-10 restore this was the case that put a wordless row back.
+  test("retracting an edge leaves the pair with no row at all, even when the prose still names the target", () => {
+    // The INLINE form (`[T<dbid>]`), which is what the surviving prose reader
+    // parses. The deleted rescan read the QUALIFIED `[S<n>/T<m>]` form as well,
+    // so a body that names its target only in the qualified form no longer
+    // reaches `getEffectiveCitations` — a real, EXPECTED narrowing of D1, and
+    // the reason this fixture states which form it is using.
+    const body = `Still names [T${turns[0]!}].`;
+    db.query("UPDATE turns SET content = ? WHERE id = ?").run(body, turns[2]!);
     attachTurnRelations(
       db,
       turns[2]!,
@@ -969,241 +807,28 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       { relationClass: "verify", targets: [`S${sessionId}/T1`] },
     ]);
 
-    expect(result.restored).toEqual([]);
+    expect(result.rejected).toEqual([]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
+    // The citation the prose asserts is not lost with the row — it is read
+    // from the prose, which is where it always was.
+    expect(
+      getEffectiveCitations(db, { id: turns[2]!, content: body }).citedTurnIds,
+    ).toEqual([turns[0]!]);
   });
 
-  // ------------------------------------------------------------------
-  // Bare restore on retraction (ticket 10, peer 终审必改 3)
-  // ------------------------------------------------------------------
-
-  describe("bare restore when a retraction empties a pair the body still names", () => {
-    const setBody = (turnId: number, fields: Partial<RecomputeFields>): void => {
-      db.query<unknown, [string | null, string | null, string | null, number]>(
-        "UPDATE turns SET title = ?, content = ?, insight = ? WHERE id = ?",
-      ).run(
-        fields.title ?? null,
-        fields.content ?? null,
-        fields.insight ?? null,
-        turnId,
-      );
-    };
-
-    // The whole reproduction chain in one test, because the bug is the
-    // COMPOSITION of three individually-correct rules, not any one of them:
-    // prose creates a bare row, a relation write REPLACES it (D2 one-fact-
-    // one-row), and a retraction hard-deletes without downgrading (D3). Only
-    // the sequence shows the citation evaporating.
-    test("prose → bare; relation replaces it; retraction puts it back", () => {
-      const body = `Builds on [S${sessionId}/T1].`;
-      setBody(turns[2]!, { content: body });
-
-      recomputeTurnCitedPairs(
-        db,
-        turns[2]!,
-        { title: null, content: body, insight: null },
-        500,
-        sessionId,
-      );
-      expect(relationsOn(turns[2]!)).toEqual([null]);
-
-      attachTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        600,
-      );
-      // Replaced, not accompanied — the pair holds exactly one row.
-      expect(relationsOn(turns[2]!)).toEqual(["extends"]);
-
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        700,
-      );
-
-      expect(result.rejected).toEqual([]);
-      expect(result.deleted.map((edge) => edge.relation)).toEqual(["extends"]);
-      expect(result.restored).toHaveLength(1);
-      expect(result.restored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
-      expect(result.restored[0]?.relation).toBeNull();
-      // Provenance is the BODY's fact, not the withdrawn writer's assertion.
-      expect(result.restored[0]?.provenance).toBe("text-ref");
-      expect(result.restored[0]?.createdAtEpoch).toBe(700);
-
-      // Back to the post-prose state exactly: one bare row, and every
-      // downstream count (`↳` pull-through, cited counts) reads the same as
-      // it did before any relation was ever written.
-      expect(relationsOn(turns[2]!)).toEqual([null]);
-      expect(
-        getEffectiveCitations(db, { id: turns[2]!, content: body }).citedTurnIds,
-      ).toEqual([turns[0]!]);
-      expect(getEdgeInDegree(db, { kind: "turn", id: turns[0]! })).toBe(1);
-    });
-
-    test("title and insight re-assert the citation too, same three fields the recompute scans", () => {
-      setBody(turns[2]!, {
-        title: `reverses [S${sessionId}/T1]`,
-        insight: `same lesson as [S${sessionId}/T2]`,
-      });
-      attachTurnRelations(
-        db,
-        turns[2]!,
-        [
-          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
-          { relationClass: "use", targets: [`S${sessionId}/T2`] },
-        ],
-        600,
-      );
-
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [
-          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
-          { relationClass: "use", targets: [`S${sessionId}/T2`] },
-        ],
-        700,
-      );
-
-      expect(
-        result.restored.map((edge) => edge.cited.id).sort((a, b) => a - b),
-      ).toEqual([turns[0]!, turns[1]!]);
-      expect(relationsOn(turns[2]!)).toEqual([null, null]);
-    });
-
-    // The bare row stays the existence record OF LAST RESORT: a pair that
-    // still carries a relation records itself, so restoring one there would
-    // reverse ticket 01's one-fact-one-row de-dup and double the reader's
-    // row count.
-    test("a pair keeping another relation gets no bare row", () => {
-      setBody(turns[2]!, { content: `Builds on [S${sessionId}/T1].` });
-      attachTurnRelations(
-        db,
-        turns[2]!,
-        [
-          { relationClass: "verify", targets: [`S${sessionId}/T1`] },
-          { relationClass: "use", targets: [`S${sessionId}/T1`] },
-        ],
-        600,
-      );
-
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        700,
-      );
-
-      expect(result.restored).toEqual([]);
-      expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
-    });
-
-    // A retraction is not a reconcile: it repairs only what it just emptied.
-    // A target the body names but that carries no row at all is
-    // `recomputeTurnCitedPairs`' business, on the next prose write.
-    test("only the emptied pair is restored, never every address the body names", () => {
-      setBody(turns[2]!, {
-        content: `[S${sessionId}/T1] and [S${sessionId}/T2].`,
-      });
-      attachTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        600,
-      );
-
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        700,
-      );
-
-      expect(result.restored.map((edge) => edge.cited.id)).toEqual([turns[0]!]);
-      expect(
-        getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).map(
-          (edge) => edge.cited.id,
-        ),
-      ).toEqual([turns[0]!]);
-    });
-
-    // The cited side may be a segment (`[E<n>]`), so the restore has to match
-    // on the whole node address, not on a turn id.
-    // [S15069/T1728] The scenario this test used to run is now UNREACHABLE, and
-    // that is the point rather than a loss of coverage. Restoration exists
-    // because a relation row REPLACES the pair's bare row, so retracting the
-    // last relation would otherwise leave prose asserting a citation no row
-    // records. After D10 a segment antecedent can never carry a relation, so
-    // its bare row is never replaced and never needs putting back.
-    //
-    // The property that mattered — prose naming a segment keeps its graph
-    // record — is asserted directly instead: the bare row is simply never
-    // suppressed, because nothing is able to suppress it.
-    test("a segment antecedent's bare row is never suppressed, so it never needs restoring", () => {
-      const segment = createSegment(db, { title: "Prior chapter", nowEpoch: 200 });
-      const body = { title: null, content: `Continues [E${segment.id}].`, insight: null };
-      setBody(turns[2]!, { content: body.content });
-      // Prose is what mints a bare row, so derive it explicitly — the sibling
-      // tests above get theirs from the relation write they are about to
-      // retract, and that write is exactly what is no longer possible here.
-      recomputeTurnCitedPairs(db, turns[2]!, body, 500, sessionId);
-      const before = getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
-        (edge) => edge.cited.kind === "segment" && edge.cited.id === segment.id,
-      );
-      expect(before).toHaveLength(1);
-      expect(before[0]?.relation).toBeNull();
-
-      // The only write that could have replaced it is refused outright, by
-      // name — so the bare row simply stays, and no restoration is owed.
-      const attach = attachTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`E${segment.id}`] }],
-        600,
-      );
-      expect(attach.written).toEqual([]);
-      expect(attach.rejected).toEqual([
-        {
-          relation: "use",
-          raw: `E${segment.id}`,
-          reason: "segment-not-a-relation-node",
-        },
-      ]);
-
-      const after = getOutgoingEdges(db, { kind: "turn", id: turns[2]! }).filter(
-        (edge) => edge.cited.kind === "segment" && edge.cited.id === segment.id,
-      );
-      expect(after).toEqual(before);
-    });
-
-    // All-or-nothing survives the addition: a rejected address means nothing
-    // was deleted, so there is nothing to restore either.
-    test("a rejected retraction restores nothing", () => {
-      setBody(turns[2]!, { content: `Builds on [S${sessionId}/T1].` });
-      attachTurnRelations(
-        db,
-        turns[2]!,
-        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
-        600,
-      );
-
-      const result = retractTurnRelations(
-        db,
-        turns[2]!,
-        [
-          { relationClass: "use", targets: [`S${sessionId}/T1`] },
-          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
-        ],
-        700,
-      );
-
-      expect(result.restored).toEqual([]);
-      expect(result.deleted).toEqual([]);
-      expect(relationsOn(turns[2]!)).toEqual(["extends"]);
-    });
-  });
+  // THE BARE-RESTORE DESCRIBE IS RETIRED (main-agent-edges D1). Ticket 10's
+  // repair — retracting a pair's last relation put the wordless row back when
+  // the citing prose still named the target, so the `↳` pull-through survived
+  // — existed only because the wordless layer was the pair's existence record
+  // of last resort. It is not, any more: `restoreBareRowsForEmptiedPairs` and
+  // `readTurnBodyFields` are deleted, `RetractTurnRelationsResult` lost its
+  // `restored` field, and the retraction receipt carries one number.
+  //
+  // The DEFECT ticket 10 closed does not come back with it. The pull-through
+  // reads the prose directly (`getEffectiveCitations` unions
+  // `parseInlineCitations(content)` onto the edge set), so a retraction never
+  // takes a citation the body still asserts away from a reader — the bare row
+  // was a stored copy of that same prose, and copies are what D1 removed.
 });
 
 describe("effective citations predicate", () => {

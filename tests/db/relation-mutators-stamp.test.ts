@@ -113,6 +113,31 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     ).written[0]!.id;
   }
 
+  /**
+   * A LEGACY SECOND ROW on a pair, written PAST the write path.
+   *
+   * main-agent-edges D5 made the pair the whole of a row's identity, so
+   * `writeMemoryEdges` cannot mint a second row for one pair under any side
+   * arguments. Production still holds 109 such pairs until ticket 01's cutover
+   * folds them, and the lane merge's COLLISION arm exists for exactly that
+   * stock — so the fixture that needs one states it in SQL.
+   */
+  function legacyEdge(
+    citing: number,
+    cited: number,
+    sides: { tailTag?: string; headTag?: string } = {},
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, string]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, '', '', ${NOW})
+         RETURNING id`,
+      )
+      .get(citing, cited, sides.tailTag ?? "", sides.headTag ?? "")!.id;
+  }
+
   /** The grant D0 measures against: this run SAW the set, at this sequence. */
   function grantRelationsRead(turnId: number): void {
     recordFieldCompleteness(
@@ -158,9 +183,11 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     insertLane(db, segmentId, "lane-b", NOW);
     const citing = seedTurn(1);
     const cited = seedTurn(2);
-    // Two rows that become one identity key once `lane-a` folds into `lane-b`.
-    seedEdge(citing, cited, { tailTag: "lane-a", headTag: "lane-a" });
-    seedEdge(citing, cited, { tailTag: "lane-b", headTag: "lane-b" });
+    // Two rows that become one identity key once `lane-a` folds into `lane-b`
+    // — pre-cutover stock, seeded past the write path, because under
+    // main-agent-edges D5 no writer can put two rows on one pair any more.
+    legacyEdge(citing, cited, { tailTag: "lane-a", headTag: "lane-a" });
+    legacyEdge(citing, cited, { tailTag: "lane-b", headTag: "lane-b" });
 
     grantRelationsRead(citing);
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW + 1);
@@ -187,7 +214,15 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     insertLane(db, segmentId, "lane-a", NOW);
     const citing = seedTurn(1, ["home", "lane-a"]);
     const cited = seedTurn(2, ["home", "lane-a"]);
+    const elsewhere = seedTurn(3);
     seedEdge(citing, cited, { tailTag: "lane-a", headTag: "lane-a" });
+    // A SURVIVING edge on another pair, unplaced. main-agent-edges D3's
+    // fresh-turn exception admits a citing turn whose outgoing relation set is
+    // EMPTY, writer-agnostic, before the completeness lookup runs — so the
+    // refusal this case is about is only observable while the turn still holds
+    // an edge, which is also the only state in which it means anything: a turn
+    // with nothing left to re-read owes no re-read.
+    seedEdge(citing, elsewhere);
 
     grantRelationsRead(citing);
     const outcome = clearLane(db, segmentId, "lane-a", NOW + 1, false);
@@ -196,7 +231,18 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     expectStale(citing, LANE_CLEAR_WRITER);
   });
 
-  test("compact occupied-turn repair: emptying a turn's outgoing set stales its grant, naming compact:repair", () => {
+  /**
+   * The repair deletes the occupied turn's WHOLE outgoing set, which
+   * main-agent-edges D3's fresh-turn exception then admits unconditionally —
+   * a turn holding zero relation atoms has nothing to re-read, so the gate
+   * never reaches the stamp. That does not make the stamp optional: it is what
+   * a LATER edge write on the turn is measured against, and a repair that
+   * stamped nothing would leave a grant earned before the wipe standing over
+   * the set the turn rebuilds. So this case asserts the stamp itself and its
+   * writer id, where the earlier `clearLane` case (which leaves a survivor
+   * behind) asserts the refusal.
+   */
+  test("compact occupied-turn repair: emptying a turn's outgoing set stamps its grant, naming compact:repair", () => {
     const cited = seedTurn(1);
     const occupied = db
       .query<{ id: number }, [number]>(
@@ -228,7 +274,18 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     );
     expect(outcome.converted).toBe(1);
 
-    expectStale(occupied, COMPACT_REPAIR_WRITER);
+    // The set really is gone, and the stamp really is there, under the id that
+    // tells a settlement run WHICH path moved the rows.
+    expect(
+      db
+        .query<{ c: number }, [number]>(
+          "SELECT count(*) AS c FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?",
+        )
+        .get(occupied)!.c,
+    ).toBe(0);
+    expect(getFieldStamp(db, "turn", occupied, RELATIONS_GATE_FIELD)?.writer).toBe(
+      COMPACT_REPAIR_WRITER,
+    );
   });
 
   test("compact repair of a turn that cited NOTHING stamps nothing — no set moved, no re-read owed", () => {
@@ -271,16 +328,23 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
   test("a cited turn deleted by DIRECT SQL stales the surviving citer, naming trigger:prune", () => {
     const citing = seedTurn(1);
     const cited = seedTurn(2);
+    const elsewhere = seedTurn(3);
     seedEdge(citing, cited);
+    // A second edge that the prune leaves alone, for the reason stated in the
+    // `clearLane` case above: D3's fresh-turn exception admits a citing turn
+    // with an empty outgoing relation set, so the refusal is observable only
+    // while the turn still holds one.
+    seedEdge(citing, elsewhere);
 
     grantRelationsRead(citing);
     // No API, no transaction wrapper, no chance for a TypeScript guard to
     // run: exactly what the prune trigger exists to cover.
     db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(cited);
 
+    // One row gone, one standing.
     expect(
       db.query<{ c: number }, []>("SELECT count(*) AS c FROM memory_edges").get()!.c,
-    ).toBe(0);
+    ).toBe(1);
     expectStale(citing, PRUNE_TRIGGER_WRITER);
   });
 
@@ -302,6 +366,9 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
       )
       .get(otherSession)!.id;
     seedEdge(citing, cited);
+    // Survives the cascade (it is in THIS session), and keeps the citing turn
+    // out of D3's fresh-turn exception — see the direct-SQL case above.
+    seedEdge(citing, seedTurn(2));
 
     grantRelationsRead(citing);
     db.query<unknown, [number]>("DELETE FROM sessions WHERE id = ?").run(otherSession);
@@ -354,6 +421,9 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
     const citing = seedTurn(1);
     const cited = seedTurn(2);
     seedEdge(citing, cited);
+    // Keeps the citing turn out of D3's fresh-turn exception once the prune
+    // lands — see the direct-SQL case above.
+    seedEdge(citing, seedTurn(3));
     grantRelationsRead(citing);
     db.query<unknown, [number]>("DELETE FROM turns WHERE id = ?").run(cited);
 

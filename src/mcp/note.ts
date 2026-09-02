@@ -7,13 +7,12 @@ import {
   normalizeRelationTargetEntry,
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
-  recomputeTurnCitedPairs,
   retractTurnRelations,
   type AttachTurnRelationsResult,
-  type RecomputeTurnCitedPairsResult,
   type RelationTargetEntry,
   type RetractTurnRelationsResult,
   type TurnRelationFieldInput,
+  type TurnRetractionFieldInput,
 } from "../db/citations";
 import {
   isRelationClass,
@@ -524,8 +523,12 @@ function isRelationTargetEntry(value: unknown): value is RelationTargetEntry {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate.turn === "string" &&
-    typeof candidate.tailTag === "string" &&
-    typeof candidate.headTag === "string" &&
+    // MAIN-AGENT-EDGES D3: NO LANE SIDES ON THIS SURFACE. A two-sided entry is
+    // refused here exactly as `publicRelationTargetEntryShape`'s `.strict()`
+    // refuses it one layer up — a main agent that learned the old shape is
+    // TOLD the shape moved, rather than having its placement silently dropped.
+    candidate.tailTag === undefined &&
+    candidate.headTag === undefined &&
     // relation-vocabulary-v13 ticket 02: the coverage bit's SHAPE only. Whether
     // this class may carry one at all is the write path's judgment
     // (`shared/relation-class.ts`'s `checkRelationCoverage`), which is where
@@ -552,7 +555,7 @@ function collectRelationFields(
     }
     if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
       fail(
-        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects (with an optional "coverage" of "full" or "partial") when present.`,
+        `${key} must be an array of bare addresses, or {turn, coverage} objects for \`correct\` (coverage "full" or "partial"), when present. Lane sides are not written here: an edge's lane is resolved from its endpoints' own tags, and an ambiguous side is declared by settlement.`,
       );
     }
     if (provided.length > 0) {
@@ -717,7 +720,14 @@ function resolveRetractionFields(
   if (fields.length === 0) {
     return null;
   }
-  const result = retractTurnRelations(db, citingTurnId, fields, nowEpoch);
+  // T2432 P1: each `retract…` parameter supplies its own class as the
+  // compare-and-swap PRECONDITION — an edge another writer has since promoted
+  // out from under this caller is refused by name, not silently deleted.
+  const preconditions: TurnRetractionFieldInput[] = fields.map((field) => ({
+    relationClass: field.relationClass,
+    targets: field.targets,
+  }));
+  const result = retractTurnRelations(db, citingTurnId, preconditions, nowEpoch);
   if (result.rejected.length > 0) {
     fail(formatRelationRejections(result.rejected, "retraction"));
   }
@@ -806,7 +816,6 @@ interface TurnWriteTransactionResult {
   finalInsight: string | null | undefined;
   finalType: string[] | undefined;
   finalTags: string[] | undefined;
-  citations: RecomputeTurnCitedPairsResult | null;
   relations: AttachTurnRelationsResult | null;
   retractions: RetractTurnRelationsResult | null;
   stripped: boolean;
@@ -1266,7 +1275,6 @@ function handleTurnWrite(
       }
 
       let updatedTurn = freshTurn;
-      let citations: RecomputeTurnCitedPairsResult | null = null;
 
       const promotesThisWrite = touchedProse && promotesTurnRecord;
       const wantsFieldsWrite =
@@ -1361,20 +1369,6 @@ function handleTurnWrite(
         }
       }
 
-      if (touchedProse && promotesTurnRecord) {
-        citations = recomputeTurnCitedPairs(
-          db,
-          turn.id,
-          {
-            title: updatedTurn.title,
-            content: updatedTurn.content,
-            insight: updatedTurn.insight,
-          },
-          nowEpoch,
-          updatedTurn.sessionId,
-        );
-      }
-
       // Retraction runs BEFORE the attach: correcting a wrong relation is
       // "retract it, then write the right one" (D2/D3), and a caller doing
       // both in one call means them in that order.
@@ -1401,11 +1395,6 @@ function handleTurnWrite(
       if ((relations?.written.length ?? 0) > 0 || (retractions?.deleted.length ?? 0) > 0) {
         stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
       }
-
-      // `recomputeTurnCitedPairs` above is a SEPARATE mechanism from the
-      // relation attach/retract pair, not a duplicate of it: it maintains the
-      // BARE existence rows prose itself names (`[S<n>/T<m>]` in the body),
-      // which have no relation word and belong to no lane.
 
       // Write gate (ticket 01, read-write-contract spec "字段映射"): stamp
       // whichever fields this write actually touched, writer = the caller's
@@ -1441,7 +1430,6 @@ function handleTurnWrite(
         finalInsight,
         finalType: typeResolution?.value,
         finalTags: tagsResolution?.value,
-        citations,
         relations,
         retractions,
         stripped,
@@ -1526,23 +1514,10 @@ function handleTurnWrite(
     parts.push(`tags: ${result.finalTags.length > 0 ? result.finalTags.join(", ") : "(none)"}.`);
   }
 
-  if (result.citations) {
-    if (result.citations.written.length > 0 || result.citations.deleted.length > 0) {
-      let citeLine = `Cites ${result.citations.written.length} pair(s)`;
-      if (result.citations.deleted.length > 0) {
-        citeLine += `, dropped ${result.citations.deleted.length} no longer referenced`;
-      }
-      citeLine += ".";
-      parts.push(citeLine);
-    }
-    if (result.citations.rejected.length > 0) {
-      parts.push(
-        `Dropped ${result.citations.rejected.length} unresolvable reference(s): ${result.citations.rejected
-          .map((entry) => `${entry.reference.raw} (${entry.reason})`)
-          .join(", ")}.`,
-      );
-    }
-  }
+  // The "Cites N pair(s)" line is DELETED (main-agent-edges D1). It counted
+  // the wordless rows a prose rescan maintained, and both the rescan and the
+  // rows are retired: a receipt line whose number can only ever be zero is a
+  // stale teacher, not a diagnostic.
 
   // Ticket 02: a relation write is additive AND idempotent (D2), so the
   // receipt says which of the two happened — "attached" for a row this call
@@ -1550,12 +1525,11 @@ function handleTurnWrite(
   // tell them apart reads its own no-op as new work.
   if (result.retractions) {
     // Ticket 11: one shared register with the settlement facade
-    // (`db/citations.ts`'s `formatRetractionReceipt`), and it carries ticket
-    // 10's restored count — "classification removed, citation stands" is
-    // visible on the receipt instead of only in the graph.
+    // (`db/citations.ts`'s `formatRetractionReceipt`). Its second number, the
+    // bare rows a retraction used to put back, went with the wordless
+    // population (main-agent-edges D1).
     const retractionLine = formatRetractionReceipt({
       retracted: result.retractions.deleted.length,
-      restored: result.retractions.restored.length,
     });
     if (retractionLine) {
       parts.push(retractionLine);

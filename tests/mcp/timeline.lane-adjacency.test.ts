@@ -127,6 +127,44 @@ function makeEdge(
   );
 }
 
+/**
+ * A SECOND physical row on a pair that already has one — pre-cutover stock,
+ * seeded past the write path on purpose.
+ *
+ * main-agent-edges D5 gives one pair one row: `writeMemoryEdges` would promote
+ * the stored row in place (or no-op) rather than mint this, so a corpus whose
+ * SUBJECT is a multi-relation pair can no longer be built through `makeEdge`.
+ * A database that predates ticket 01's rebuild holds exactly this shape (109
+ * such pairs in production), and every reader below is untouched by D5 — the
+ * lane view still has to render a multi-relation pair correctly for as long as
+ * one can be read. So the extra row goes in as SQL, alongside the side-tag
+ * index rows a relation write maintains, which is what the lane readers join
+ * against.
+ */
+function makeLegacyEdgeRow(
+  db: Database,
+  citingTurnId: number,
+  citedTurnId: number,
+  relation: CitationRelation,
+  tailTag: string,
+  headTag: string,
+): void {
+  const row = db
+    .query<{ id: number }, [number, number, string, string, string]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'judged', ?, ?, '', '', ${BASE_EPOCH})
+       RETURNING id`,
+    )
+    .get(citingTurnId, citedTurnId, relation, tailTag, headTag)!;
+  const insertSideTag = db.query<unknown, [number, string, string]>(
+    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+  );
+  if (tailTag !== "") insertSideTag.run(row.id, "tail", tailTag);
+  if (headTag !== "") insertSideTag.run(row.id, "head", headTag);
+}
+
 /** One lane's page text via the single-lane canonical address (page 1/1 in this ticket's single-page scope). */
 function renderLane(db: Database, segmentId: number, tag: string, pageBudget?: number): string {
   const view = buildSegmentLaneListView(
@@ -387,14 +425,14 @@ function seedRichWorld(db: Database) {
   //   a2 -extends-> infra (cross-lane forward stub)
   makeEdge(db, a6, a1, "override", "auth", "auth");
   makeEdge(db, a6, a3, "extends", "auth", "auth");
-  makeEdge(db, a6, a1, "narrows", "auth", "auth");
+  makeLegacyEdgeRow(db, a6, a1, "narrows", "auth", "auth");
   makeEdge(db, a3, a2, "grounds", "auth", "auth");
   makeEdge(db, a2, infra, "extends", "auth", "infra");
   // Cross-lane inbound mirrors onto a6: two same-relation sources (fold) plus
   // a lighter-weight relation that must sort after them.
   makeEdge(db, b1, a6, "override", "legal", "auth");
   makeEdge(db, infra, a6, "override", "infra", "auth");
-  makeEdge(db, b1, a6, "extends", "legal", "auth");
+  makeLegacyEdgeRow(db, b1, a6, "extends", "legal", "auth");
 
   return { s1, s2, taskA, taskB, a1, a2, a3, a4, infra, a6, b1, frontier };
 }

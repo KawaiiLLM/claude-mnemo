@@ -229,6 +229,46 @@ function legacyOutOfVocabularyEdge(citingId: number, citedId: number, relation: 
 }
 
 /**
+ * A SECOND row on a pair that already carries one — pre-cutover stock, written
+ * past the write path, with its side-index rows and lane claims exactly as
+ * `tagEdge` would have left them.
+ *
+ * main-agent-edges D5 made the pair the whole of a row's identity: a second
+ * write onto a pair PROMOTES its row (a strictly more specific class) or is a
+ * no-op, and never mints another, so `writeMemoryEdges` cannot produce the
+ * two-rows-on-one-pair shape any more. Production still holds 109 such pairs
+ * until ticket 01's cutover folds them, and the loader reads over exactly that
+ * stock — a per-ROW projection count, an E4 error per row, a pair naming two
+ * lanes at once — so the fixtures that need it state it in SQL rather than
+ * pretending a writer will still produce it.
+ */
+function legacyTagEdge(
+  citingId: number,
+  citedId: number,
+  relation: string,
+  tags: readonly string[],
+): void {
+  const { tailTag, headTag } = deriveSideTags([...tags]);
+  const row = db
+    .query<{ id: number }, [number, number, string, string, string]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, '', '', ${NOW})
+       RETURNING id`,
+    )
+    .get(citingId, citedId, relation, tailTag, headTag)!;
+  const insertSide = db.query<unknown, [number, string, string]>(
+    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+  );
+  if (tailTag !== "") {
+    insertSide.run(row.id, "tail", tailTag);
+    insertSide.run(row.id, "head", headTag);
+  }
+  recordLaneClaims([citingId, citedId], tailTag === "" ? [] : tags);
+}
+
+/**
  * A CROSS-LANE edge — `tail_tag !== head_tag`, both settled (the merged set
  * ticket 09 retired had no form for two different ends; spec problem 2).
  *
@@ -970,7 +1010,11 @@ describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader s
     const t1 = insertTurn(sessionId, 1);
     const t2 = insertTurn(sessionId, 2);
     tagEdge(t2, t1, "extends", ["ownership"]);
-    tagEdge(t2, t1, "indexes", ["ownership"]);
+    // The pair's SECOND in-vocabulary row is pre-cutover stock (see
+    // `legacyTagEdge`): main-agent-edges D5 made the pair one row, so a second
+    // `writeMemoryEdges` call here would be a no-op rather than the second
+    // tallied edge this case counts.
+    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
     legacyOutOfVocabularyEdge(t2, t1, "supersedes"); // pre-migration stock, never in EDGE_RELATIONS
 
     const projection = loadLaneCheckScope(db, {
@@ -1088,7 +1132,10 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
     tagEdge(t2, t1, "extends", ["ownership"]);
-    tagEdge(t2, t1, "indexes", ["ownership"]);
+    // Pre-cutover stock, see `legacyTagEdge` — under main-agent-edges D5 a
+    // second write onto this pair is a no-op, so a second ROW has to be
+    // seeded, and it is a second row this projection carries.
+    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
 
     const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
     expect(projection.turns.map((turn) => turn.tags)).toEqual([["ownership"], ["ownership"]]);
@@ -1100,7 +1147,10 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
     tagEdge(t2, t1, "extends", ["ownership"]);
-    tagEdge(t2, t1, "indexes", ["ownership"]);
+    // Two STORED rows on one pair (pre-cutover stock, see `legacyTagEdge`) —
+    // the projection carries one E4 per row, which is what the two errors
+    // below count.
+    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
     // Settle the fixture's own membership claims BEFORE the edit, so the edit
     // is the last word on this turn's tags (see `recordLaneClaims`).
     applyPendingLaneClaims();
@@ -1266,7 +1316,11 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
     const t20 = insertTurn(sessionId, 20, { tags: ["b"] });
     const t21 = insertTurn(sessionId, 21, { tags: ["b"] });
     tagEdge(t2, t1, "extends", ["a"]); // the seed pair's lane-{a} row
-    tagEdge(t2, t1, "extends", ["b"]); // …and its lane-{b} row (post-M-A shape)
+    // …and its lane-{b} row (post-M-A shape). Pre-cutover stock, seeded past
+    // the write path: main-agent-edges D5 made the pair one row, so the state
+    // this case is about — ONE pair naming TWO lanes — is exactly the legacy
+    // multi-row stock the loader still has to fan out from.
+    legacyTagEdge(t2, t1, "extends", ["b"]);
     tagEdge(t11, t10, "extends", ["a"]); // lane {a}'s other edge, far outside the range
     tagEdge(t21, t20, "extends", ["b"]); // lane {b}'s other edge, far outside the range
 

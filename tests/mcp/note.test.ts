@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 
-import { attachTurnRelations } from "../../src/db/citations";
+import { attachTurnRelations, getEffectiveCitations } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
@@ -1347,11 +1348,25 @@ describe("note tool", () => {
   });
 });
 
-// Spec C6: a bare `[S<session>/T<n>]` in an era-promoted note's title,
-// content or insight creates the pair — no relation, no separate structured
-// input. Era-promoted only: a legacy-era note never touches `turns`
-// (P1 isolation), so there is no new body state for `memory_edges` to agree
-// with (see noteTool's promotesTurnRecord branch).
+// Spec C6 USED to say: a bare `[S<session>/T<n>]` in an era-promoted note's
+// title, content or insight CREATES the pair — a wordless (`relation IS NULL`)
+// `text-ref` row, no relation word, no separate structured input.
+//
+// MAIN-AGENT-EDGES D1 RETIRES THE WORDLESS ROW AS A WRITE PATH. `writeMemory-
+// Edges` refuses a `relation: null` input by name (`"bare-row-retired"`), and
+// `recomputeTurnCitedPairs` — the prose rescan that minted and withdrew those
+// rows on every note write — is deleted outright. So prose no longer writes
+// anything into `memory_edges` at all.
+//
+// The CITATION itself is not lost, and that is why this is a retirement rather
+// than a regression: `getEffectiveCitations`/`getSessionEffectiveCitations`
+// still union the prose in through `parseInlineCitations(content)`, which is
+// where the `↳` pull-through has always come from. What IS lost is prose in
+// `title`/`insight`, which only the deleted rescan ever scanned — an expected
+// delta, not a defect.
+//
+// What survives here is the DECOUPLING property this block also held: a
+// relation row is a standalone claim, and prose drift can never delete one.
 describe("note tool citations (spec C6)", () => {
   let db: Database;
   let sessionId: number;
@@ -1385,10 +1400,20 @@ describe("note tool citations (spec C6)", () => {
     db.close();
   });
 
-  // Acceptance criterion 1: a bare `[S/T]` in a note body creates an
-  // unattributed pair.
-  test("a bare qualified reference in content creates an unattributed pair", () => {
-
+  // ADAPTED (main-agent-edges D1). This was acceptance criterion 1: "a bare
+  // `[S/T]` in a note body creates an unattributed pair", asserting the whole
+  // wordless row it minted (relation null, both sides `''`, provenance
+  // `text-ref`). Nothing is written any more, and the two halves are pinned
+  // together because "no row" on its own would read as a lost citation:
+  //
+  //   - the QUALIFIED `[S<n>/T<m>]` form writes no row. Its reader-side
+  //     standing is gone with the rescan too — `parseInlineCitations` has
+  //     never read that form, so this is a real delta of D1 and not something
+  //     the prose union quietly covers.
+  //   - the BARE `[T<db id>]` form, which is what `parseInlineCitations` does
+  //     read, still reaches `getEffectiveCitations` with no row behind it.
+  //     That union is the whole surviving mechanism for the `↳` pull-through.
+  test("a reference in content writes NO row, and the bare form still reads as a citation", () => {
     const result = noteTool(
       db,
       {
@@ -1400,24 +1425,32 @@ describe("note tool citations (spec C6)", () => {
     );
 
     expect(isNoteSuccess(result)).toBe(true);
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
     expect(
-      getOutgoingEdges(db, { kind: "turn", id: targetTurnId }),
-    ).toEqual([
+      getEffectiveCitations(db, {
+        id: targetTurnId,
+        content: `Reverses [S${sessionId}/T1].`,
+      }).citedTurnIds,
+    ).toEqual([]);
+
+    noteTool(
+      db,
       {
-        id: expect.any(Number),
-        citing: { kind: "turn", id: targetTurnId },
-        cited: { kind: "turn", id: citedTurnId },
-        relation: null,
-        tailTag: "",
-        headTag: "",
-        // relation-vocabulary-v13 ticket 02: a bare prose-citation row carries
-        // no class and no coverage.
-        relationClass: "",
-        relationCoverage: "",
-        provenance: "text-ref",
-        createdAtEpoch: 900,
+        turn: `S${sessionId}/T2`,
+        title: "design+routing: reverses an earlier call",
+        content: `Reverses [T${citedTurnId}].`,
+        mode: { title: "write", content: "write" },
       },
-    ]);
+      { now: () => 950, env: {}, eraCutoffEpoch: 1 },
+    );
+
+    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
+    const effective = getEffectiveCitations(db, {
+      id: targetTurnId,
+      content: `Reverses [T${citedTurnId}].`,
+    });
+    expect(effective.edges).toEqual([]);
+    expect(effective.citedTurnIds).toEqual([citedTurnId]);
   });
 
   test("a rewrite (mode: overwrite) that drops a reference drops the bare row but never a relation (decoupling, edge-revision D1)", () => {
@@ -1455,38 +1488,21 @@ describe("note tool citations (spec C6)", () => {
     );
 
     // The relation row is a standalone claim — prose drift cannot delete it;
-    // only retraction can. The prose's own bare record is what a bare-only
-    // pair would have lost (the relation write already replaced it here, so
-    // the surviving set is exactly the relation row).
+    // only retraction can. Under main-agent-edges D1 the prose never had a row
+    // of its own to lose here, so the surviving set is exactly the relation
+    // row, which is what the decoupling was always about.
     const survivors = getOutgoingEdges(db, { kind: "turn", id: targetTurnId });
     expect(survivors).toHaveLength(1);
     expect(survivors[0]?.relation).toBe("narrows");
   });
 
-  test("a rewrite that drops a reference deletes a BARE-only pair outright", () => {
-    noteTool(
-      db,
-      {
-        turn: `S${sessionId}/T2`,
-        title: "design+routing: first pass",
-        content: `Cites [S${sessionId}/T1].`,
-      },
-      { now: () => 900, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    noteTool(
-      db,
-      {
-        turn: `S${sessionId}/T2`,
-        title: "design+routing: revised, no longer citing T1",
-        content: "Stands on its own now.",
-        mode: { title: "write", content: "write" },
-      },
-      { now: () => 1000, env: {}, eraCutoffEpoch: 1 },
-    );
-
-    expect(getOutgoingEdges(db, { kind: "turn", id: targetTurnId })).toEqual([]);
-  });
+  // DELETED (main-agent-edges D1): "a rewrite that drops a reference deletes a
+  // BARE-only pair outright". It wrote a note whose prose cited T1, rewrote it
+  // without the citation, and demanded the wordless row be gone — the
+  // WITHDRAWAL half of the rescan whose creation half the first test in this
+  // block used to pin. With no rescan and no wordless row, the edge table is
+  // empty at both ends of that sequence, so the test could only assert an
+  // emptiness it never had to earn.
 });
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +1515,17 @@ describe("note tool citations (spec C6)", () => {
 // parameter writes the edge, a `retract…` mirror removes it, the write is
 // byte-identical in shape to what settlement's own writer produces for the
 // same input, and every pre-existing legality refusal still refuses.
+//
+// MAIN-AGENT-EDGES D3 NARROWS WHAT THAT SURFACE CARRIES. An edge is a fact
+// about two nodes — citing, cited, class, coverage — and that is the whole of
+// what the main agent writes here. A lane SIDE is an attribution resolved at
+// read time (declared -> unique -> none) and DECLARED only where an endpoint
+// sits in several lanes, which is settlement's job alone (D4,
+// `declareEdgeSides`). So a public entry is a bare address string, or
+// `{turn, coverage}` for `correct`, and `{turn, tailTag, headTag}` is a NAMED
+// PARSE ERROR rather than a silently dropped placement. The fixtures below
+// still place both endpoints in a lane on purpose: the endpoints ARE in one,
+// and the edge still stores unsettled sides, which is exactly the split.
 // ---------------------------------------------------------------------------
 
 describe("`note` restores its relation surface (main-agent-edge-capability ticket 01)", () => {
@@ -1556,7 +1583,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [`S${sessionId}/T1`],
     });
     const text = resultText(result);
     expect(text).toStartWith("Noted ");
@@ -1571,13 +1598,17 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     expect(edges[0]?.relation).toBe("extends");
     expect(edges[0]?.relationClass).toBe("use");
     expect(edges[0]?.relationCoverage).toBe("");
-    expect(edges[0]?.tailTag).toBe("lane-a");
-    expect(edges[0]?.headTag).toBe("lane-a");
+    // MAIN-AGENT-EDGES D3: BOTH sides stay UNSETTLED even though both
+    // endpoints carry `lane-a`. The main agent states the node fact and says
+    // nothing about lanes; the side is resolved at read time, and declared —
+    // where an endpoint is genuinely ambiguous — by settlement alone.
+    expect(edges[0]?.tailTag).toBe("");
+    expect(edges[0]?.headTag).toBe("");
     expect(edges[0]?.cited.id).toBe(citedTurnId);
     expect(edges[0]?.provenance).toBe("asserted");
   });
 
-  test("a retract… mirror parameter works the same way — deletes exactly the placement it names, asserted at the tool boundary", () => {
+  test("a retract… mirror parameter works the same way — deletes exactly the pair it names, asserted at the tool boundary", () => {
     const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
     placeBothEndpoints(segmentTag, ["lane-a"]);
 
@@ -1585,16 +1616,19 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [`S${sessionId}/T1`],
     });
     expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
 
-    // A retraction is keyed on (pair, relation, tailTag, headTag) — the SAME
-    // key the write landed under (db/citations.ts's `relationRowKey`) — so the
-    // mirror has to carry the identical two-sided form, not a bare address.
+    // MAIN-AGENT-EDGES D4 / T2432 P1: a retraction is addressed by the PAIR
+    // and nothing else. The class comes from the parameter name and acts as a
+    // compare-and-swap PRECONDITION, not as a selector, and the side tags left
+    // the address entirely — so the mirror carries a bare address, and a
+    // retraction can no longer fail because somebody else declared a lane on
+    // the edge in the meantime.
     const result = note({
       turn: `S${sessionId}/T2`,
-      retractUse: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      retractUse: [`S${sessionId}/T1`],
     });
     const text = resultText(result);
     expect(text).not.toStartWith("Parameter error");
@@ -1630,17 +1664,16 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [`S${sessionId}/T1`],
     });
+    // THE SAME INPUT, and under main-agent-edges D3 that means the same BARE
+    // address: settlement may additionally declare a side (`declareEdgeSides`,
+    // D4), but a side is not part of the edge, so the input whose two writes
+    // this test compares is the node fact both surfaces can state.
     attachTurnRelations(
       db,
       settlementCitingTurnId,
-      [
-        {
-          relationClass: "use",
-          targets: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
-        },
-      ],
+      [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
       1000,
       "judged",
     );
@@ -1664,13 +1697,16 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
   // -------------------------------------------------------------------------
 
   describe("the three-class surface accepts, refuses and stores the coverage bit", () => {
+    // MAIN-AGENT-EDGES D3: the entry lost its two sides. What is left is the
+    // address plus, on `correct`, the coverage bit — the whole of what a
+    // public entry may carry. The helper keeps its name because what it builds
+    // is still one addressed entry; it just no longer PLACES anything.
     function placed(coverage?: "full" | "partial") {
-      return {
-        turn: `S${sessionId}/T1`,
-        tailTag: "lane-a",
-        headTag: "lane-a",
-        ...(coverage ? { coverage } : {}),
-      };
+      return { turn: `S${sessionId}/T1`, ...(coverage ? { coverage } : {}) };
+    }
+    /** A retraction entry: the pair's address, and nothing else (T2432 P1). */
+    function retracted(): string {
+      return `S${sessionId}/T1`;
     }
 
     test("a `correct` write stores the class AND its bit, readable from the row", () => {
@@ -1694,20 +1730,39 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       expect(edge?.relation).toBe("narrows");
     });
 
-    test("`full` and `partial` land as two DIFFERENT rows, so the bit is never lost to a de-dup", () => {
+    // ADAPTED (main-agent-edges D5, ONE PAIR ONE ROW). This test used to
+    // demand that `full` and `partial` land as two DIFFERENT rows, "so the bit
+    // is never lost to a de-dup". A logical edge is now the PAIR, and a pair
+    // has exactly one row: a coverage change on a stored `correct` PROMOTES
+    // that row in place rather than minting a second one. The bit is still not
+    // lost — it is the promoted row's own value — and what the old shape
+    // actually produced was a pair asserting two incompatible claims at once.
+    // The row id is asserted stable because that is the contract: a promotion
+    // revises relation/class/coverage and leaves the row's identity,
+    // provenance, creation time and both side tags alone.
+    test("`full` then `partial` PROMOTES the one row in place — the pair keeps a single claim", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
 
       note({ turn: `S${sessionId}/T2`, correct: [placed("full")] });
+      const [first] = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
+      expect([first?.relation, first?.relationClass, first?.relationCoverage]).toEqual([
+        "override",
+        "correct",
+        "full",
+      ]);
+
       note({ turn: `S${sessionId}/T2`, correct: [placed("partial")] });
 
-      const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId }).map(
-        (edge) => [edge.relation, edge.relationClass, edge.relationCoverage] as const,
-      );
-      expect(stored).toEqual([
-        ["narrows", "correct", "partial"],
-        ["override", "correct", "full"],
-      ]);
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
+      expect(stored).toHaveLength(1);
+      expect([
+        stored[0]?.relation,
+        stored[0]?.relationClass,
+        stored[0]?.relationCoverage,
+      ]).toEqual(["narrows", "correct", "partial"]);
+      expect(stored[0]?.id).toBe(first!.id);
+      expect(stored[0]?.createdAtEpoch).toBe(first!.createdAtEpoch);
     });
 
     test("a `correct` with no coverage is refused, NAMING the missing bit and both its values", () => {
@@ -1747,17 +1802,35 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       }
     });
 
+    // ADAPTED (main-agent-edges D5): the two classes used to be sent at the
+    // SAME address in one call and asserted as two rows. One pair now carries
+    // one row, so the two go to two different pairs — which is what the test
+    // was ever about: neither class defaults a coverage bit onto its row.
     test("`verify` and `use` land with an EMPTY coverage, never a defaulted one", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
+      const secondCitedTurnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+           VALUES (?, 3, 'active', 'third', 650) RETURNING id`,
+        )
+        .get(sessionId)!.id;
+      updateTurnById(db, secondCitedTurnId, {
+        tags: [segmentTag, "lane-a"],
+        updatedAtEpoch: 100,
+      });
 
-      note({ turn: `S${sessionId}/T2`, verify: [placed()], use: [placed()] });
+      note({
+        turn: `S${sessionId}/T2`,
+        verify: [`S${sessionId}/T1`],
+        use: [`S${sessionId}/T3`],
+      });
       const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId }).map(
         (edge) => [edge.relation, edge.relationClass, edge.relationCoverage] as const,
       );
       expect(stored).toEqual([
-        ["extends", "use", ""],
         ["verifies", "verify", ""],
+        ["extends", "use", ""],
       ]);
     });
 
@@ -1800,16 +1873,37 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // The mirrors address a CLASS, so they reach a row written under the
     // retired vocabulary too — the E2 deadlock (a stored word with no deletion
     // path) is exactly what that resolution exists to prevent.
+    // ADAPTED (main-agent-edges D5): the two legacy rows used to be seeded on
+    // the SAME pair. A second write onto a pair that already has a row now
+    // promotes it instead of minting a second, so the two words go to two
+    // pairs. The property is untouched: a mirror addresses a CLASS, and
+    // `edgeRelationClass` reads a pre-v13 word as its class, so `retractUse`
+    // reaches a stored `grounds` and `retractCorrect` a stored `override`.
     test("retractUse deletes a legacy `grounds` row, and retractCorrect an `override` one", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
+      const secondCitedTurnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+           VALUES (?, 3, 'active', 'third', 650) RETURNING id`,
+        )
+        .get(sessionId)!.id;
+      updateTurnById(db, secondCitedTurnId, {
+        tags: [segmentTag, "lane-a"],
+        updatedAtEpoch: 100,
+      });
       // Seeded through the STORAGE primitive under the old words, exactly as a
       // pre-v13 release wrote them: no class, no coverage.
       writeMemoryEdges(
         db,
-        (["grounds", "override"] as const).map((relation) => ({
+        (
+          [
+            ["grounds", citedTurnId],
+            ["override", secondCitedTurnId],
+          ] as const
+        ).map(([relation, cited]) => ({
           citing: { kind: "turn" as const, id: citingTurnId },
-          cited: { kind: "turn" as const, id: citedTurnId },
+          cited: { kind: "turn" as const, id: cited },
           relation,
           provenance: "judged" as const,
           tailTag: "lane-a",
@@ -1820,10 +1914,12 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(2);
 
       expect(
-        resultText(note({ turn: `S${sessionId}/T2`, retractUse: [placed()] })),
+        resultText(note({ turn: `S${sessionId}/T2`, retractUse: [retracted()] })),
       ).toContain("Retracted 1 relation(s)");
       expect(
-        resultText(note({ turn: `S${sessionId}/T2`, retractCorrect: [placed()] })),
+        resultText(
+          note({ turn: `S${sessionId}/T2`, retractCorrect: [`S${sessionId}/T3`] }),
+        ),
       ).toContain("Retracted 1 relation(s)");
       expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
     });
@@ -1831,14 +1927,31 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // `correct` is ONE class stored under TWO words, so a class-level
     // retraction has to take both — a mirror that reached only one could not
     // withdraw an assertion made under the other.
-    test("retractCorrect takes both coverages of a pair in one call", () => {
+    //
+    // ADAPTED (main-agent-edges D5/D4): two `correct` WRITES no longer make
+    // two rows (the second promotes the first in place), so the two-word pair
+    // this test needs is now a LEGACY one, seeded past `writeMemoryEdges` the
+    // way a pre-cutover release left it. The surviving property is stronger
+    // than the old one: a retraction is addressed by the PAIR, so EVERY row of
+    // it goes in one call, and a legacy multi-row pair leaves no fragment
+    // behind.
+    test("retractCorrect takes a legacy pair's both coverage rows in one call", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
-      note({ turn: `S${sessionId}/T2`, correct: [placed("full")] });
-      note({ turn: `S${sessionId}/T2`, correct: [placed("partial")] });
+      const insertLegacyRow = db.query<null, [string]>(
+        `INSERT INTO memory_edges (
+           citing_kind, citing_id, cited_kind, cited_id,
+           relation, provenance, tail_tag, head_tag,
+           relation_class, relation_coverage, created_at_epoch
+         ) VALUES ('turn', ${citingTurnId}, 'turn', ${citedTurnId},
+                   ?, 'judged', 'lane-a', 'lane-a', '', '', 900)`,
+      );
+      insertLegacyRow.run("override");
+      insertLegacyRow.run("narrows");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(2);
 
       expect(
-        resultText(note({ turn: `S${sessionId}/T2`, retractCorrect: [placed()] })),
+        resultText(note({ turn: `S${sessionId}/T2`, retractCorrect: [retracted()] })),
       ).toContain("Retracted 2 relation(s)");
       expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
     });
@@ -1854,40 +1967,18 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
   // whether a PROSE `T<n>` gets bracketed (`bracketBareTurnReferences`), which
   // this ticket does not touch.
   describe("every pre-existing relation-legality refusal still refuses", () => {
-    test("undeclared lane — a tag never declared in the endpoint's own task", () => {
-      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
-      placeBothEndpoints(segmentTag, ["lane-a"]);
-
-      const text = resultText(
-        note({
-          turn: `S${sessionId}/T2`,
-          title: "t",
-          content: "c",
-          use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-z", headTag: "lane-z" }],
-        }),
-      );
-      expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("has not declared lane");
-      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
-    });
-
-    test("out-of-vocabulary (non-canonical) lane tag", () => {
-      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
-      placeBothEndpoints(segmentTag, ["lane-a"]);
-
-      const text = resultText(
-        note({
-          turn: `S${sessionId}/T2`,
-          title: "t",
-          content: "c",
-          use: [{ turn: `S${sessionId}/T1`, tailTag: "Lane-A", headTag: "Lane-A" }],
-        }),
-      );
-      expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("not in canonical form");
-      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
-    });
-
+    // THREE LANE-SIDE REFUSALS ARE DELETED HERE (main-agent-edges D3):
+    // "undeclared lane — a tag never declared in the endpoint's own task",
+    // "out-of-vocabulary (non-canonical) lane tag", and "tag missing from an
+    // endpoint's own tags". Each sent `{turn, tailTag, headTag}` through the
+    // public surface and pinned one of `checkSideTagLegality`'s three checks.
+    //
+    // The public surface has no side to get wrong any more: a two-sided entry
+    // is refused at the shape, not at the lane gate, so these three states are
+    // UNREACHABLE from `note`. The refusal that replaced them is pinned by
+    // "the two-sided entry form is REFUSED" below; the three checks themselves
+    // are untouched and still guard settlement's own surface, which is where
+    // sides are written now (`declareEdgeSides`, D4).
     test("self-edge — a turn may not relate to itself, whatever its lanes", () => {
       const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
       placeBothEndpoints(segmentTag, ["lane-a"]);
@@ -1897,63 +1988,82 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
           turn: `S${sessionId}/T2`,
           title: "t",
           content: "c",
-          use: [{ turn: `S${sessionId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [`S${sessionId}/T2`],
         }),
       );
       expect(text).toStartWith("Parameter error:");
       expect(text).toContain("is this turn's own address");
       expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
     });
-
-    test("tag missing from an endpoint's own tags — declared in the task, but not carried by that turn", () => {
-      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
-      // The cited turn (T1) never gets "lane-a" on its own tags — only the
-      // segment tag, so the lane IS declared where it lives but is missing
-      // from the turn's own tags (check 3, the subset invariant).
-      updateTurnById(db, citedTurnId, { tags: [segmentTag], updatedAtEpoch: 100 });
-      updateTurnById(db, citingTurnId, { tags: [segmentTag, "lane-a"], updatedAtEpoch: 100 });
-
-      const text = resultText(
-        note({
-          turn: `S${sessionId}/T2`,
-          title: "t",
-          content: "c",
-          use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
-        }),
-      );
-      expect(text).toStartWith("Parameter error:");
-      expect(text).toContain("is missing from the tags of");
-      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
-    });
   });
 
-  test("the two-sided entry form is accepted — the same shape settlement's own relation fields carry", () => {
+  // INVERTED (main-agent-edges D3 / R10-5). This test used to assert that the
+  // two-sided entry form is ACCEPTED — "the same shape settlement's own
+  // relation fields carry". The two surfaces are split now: settlement keeps
+  // the two-sided entry, the public one refuses it, and the refusal is a NAMED
+  // parse error at both layers rather than a silently dropped placement. That
+  // silent drop is the failure this codebase keeps paying for, which is why
+  // the refusal is pinned at the zod layer AND at the tool boundary a direct
+  // caller reaches without it.
+  test("the two-sided entry form is REFUSED — a placement is settlement's to declare, not the main agent's", () => {
     const parsed = noteInputSchema.safeParse({
       turn: `S${sessionId}/T2`,
       use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
-    expect(parsed.success).toBe(true);
-  });
+    expect(parsed.success).toBe(false);
 
-  // The prose half is unchanged by this restoration: a `[S/T]` reference still
-  // records that this turn refers to that one, with no relation word and no
-  // lane — the bare-existence mechanism `recomputeTurnCitedPairs` maintains,
-  // independent of the structured relation surface restored above.
-  test("a prose citation still records the bare pair, independent of the relation surface", () => {
+    const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+    placeBothEndpoints(segmentTag, ["lane-a"]);
     const text = resultText(
       note({
         turn: `S${sessionId}/T2`,
         title: "t",
-        content: `builds on [S${sessionId}/T1]`,
+        content: "c",
+        use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      }),
+    );
+    expect(text).toStartWith("Parameter error:");
+    expect(text).toContain("must be an array of bare addresses");
+    expect(text).toContain("{turn, coverage} objects for `correct`");
+    expect(text).toContain("Lane sides are not written here");
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+
+    // The two-sided form is still legal where it belongs.
+    expect(
+      z
+        .object(settlementNoteInputShape)
+        .strict()
+        .safeParse({
+          turn: `S${sessionId}/T2`,
+          use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        }).success,
+    ).toBe(true);
+  });
+
+  // ADAPTED (main-agent-edges D1). The prose half used to record the bare pair
+  // as a `relation IS NULL` row, maintained by `recomputeTurnCitedPairs`. That
+  // rescan and that write path are retired: prose writes NOTHING into
+  // `memory_edges` now. What is still independent of the relation surface is
+  // the READING — `getEffectiveCitations`' own prose union, which resolves the
+  // bare `[T<db id>]` form with no row behind it (the C6 block above holds the
+  // qualified form's own, larger delta).
+  test("a prose citation writes no row, and still reads as a citation beside the relation surface", () => {
+    const text = resultText(
+      note({
+        turn: `S${sessionId}/T2`,
+        title: "t",
+        content: `builds on [T${citedTurnId}]`,
       }),
     );
     expect(text).toStartWith("Noted ");
-    const edges = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
-    expect(edges).toHaveLength(1);
-    expect(edges[0]?.relation).toBeNull();
-    expect(edges[0]?.tailTag).toBe("");
-    expect(edges[0]?.headTag).toBe("");
-    expect(citedTurnId).toBe(edges[0]!.cited.id);
+    expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+
+    const effective = getEffectiveCitations(db, {
+      id: citingTurnId,
+      content: `builds on [T${citedTurnId}]`,
+    });
+    expect(effective.edges).toEqual([]);
+    expect(effective.citedTurnIds).toEqual([citedTurnId]);
   });
 
   test("a call carrying no field at all names the five prose/type/tags fields AND the relation surface", () => {

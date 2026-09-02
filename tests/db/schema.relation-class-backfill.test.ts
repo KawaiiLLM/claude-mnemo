@@ -51,7 +51,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
   }
 
   /** A row in the pre-v13 shape: a stored word, both class columns `''`. */
-  function seedLegacyEdge(relation: TurnEdgeRelation | null): number {
+  function seedLegacyEdge(relation: TurnEdgeRelation): number {
     const citing = addTurn();
     const cited = addTurn();
     const { written } = writeMemoryEdges(
@@ -68,6 +68,30 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     );
     expect(written).toHaveLength(1);
     return written[0]!.id;
+  }
+
+  /**
+   * A WORDLESS row of the same era, seeded PAST the write path.
+   *
+   * main-agent-edges D1 retired the wordless write — `writeMemoryEdges`
+   * refuses a `relation: null` input by name — but the stored population is
+   * untouched by that: 696 `judged` bare rows and 1,187 `text-ref` ones stand
+   * until ticket 01's cutover deletes them, and this sweep runs over exactly
+   * that stock and has to keep leaving it alone. So the fixture states the row
+   * in SQL rather than pretending a writer will still produce one.
+   */
+  function seedWordlessEdge(provenance: "judged" | "text-ref" = "judged"): number {
+    const citing = addTurn();
+    const cited = addTurn();
+    return db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, NULL, ?, '', '', '', '', ?)
+         RETURNING id`,
+      )
+      .get(citing, cited, provenance, EPOCH)!.id;
   }
 
   /** The "never swept" state: rows present, no receipt. */
@@ -208,8 +232,8 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
         seeded.set(seedLegacyEdge(word), word);
       }
       // Both wordless populations: settlement's own output and the prose index.
-      seeded.set(seedLegacyEdge(null), null);
-      seeded.set(seedLegacyEdge(null), null);
+      seeded.set(seedWordlessEdge(), null);
+      seeded.set(seedWordlessEdge(), null);
       clearReceipt();
     });
 
@@ -307,26 +331,8 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
      * what makes `''` readable rather than ambiguous.
      */
     test("both bare populations survive the sweep with `''` in both columns", () => {
-      const judged = seedLegacyEdge(null);
-      const citing = addTurn();
-      const cited = addTurn();
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: null,
-            provenance: "text-ref",
-          },
-        ],
-        EPOCH,
-      );
-      const textRef = db
-        .query<{ id: number }, []>(
-          "SELECT id FROM memory_edges WHERE provenance = 'text-ref' ORDER BY id DESC LIMIT 1",
-        )
-        .get()!.id;
+      const judged = seedWordlessEdge("judged");
+      const textRef = seedWordlessEdge("text-ref");
       clearReceipt();
 
       initializeSchema(db);
@@ -342,7 +348,7 @@ describe("relation-vocabulary-v13 ticket 03 — legacy relation classification",
     });
 
     test("the receipt is what tells `never swept` from `classified as nothing`", () => {
-      seedLegacyEdge(null);
+      seedWordlessEdge();
       seedLegacyEdge("override");
       clearReceipt();
 

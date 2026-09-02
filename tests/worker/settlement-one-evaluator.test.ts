@@ -507,10 +507,18 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
       seedTagContainers(db);
       const fixture = seedEvaluatorFixture(db);
       const writable = [...fixture.outsideTurnIds, ...fixture.windowTurnIds];
-      const [w1, w2] = fixture.windowTurnIds as [number, number];
+      const [, w2] = fixture.windowTurnIds as [number, number];
+      // MAIN-AGENT-EDGES D1 ("one pair, one row"): this draft has to land on a
+      // pair the fixture has NOT already written. It used to be `w2 -> w1`,
+      // which the fixture seeds with both sides on `window-lane`; a second
+      // write onto that pair no longer mints a row — it promotes the stored one
+      // in place and leaves both stored sides exactly as they are, so no draft
+      // ever appeared and E6 had nothing to name. `w2 -> o6` is free, and the
+      // anchor this test asserts on is the CITING turn either way.
+      const o6 = fixture.outsideTurnIds[5]!;
       const draft = {
         citing: { kind: "turn" as const, id: w2 },
-        cited: { kind: "turn" as const, id: w1 },
+        cited: { kind: "turn" as const, id: o6 },
         relation: "verifies" as const,
         provenance: "asserted" as const,
         // Both sides unsettled — a DRAFT edge, which is E6.
@@ -544,9 +552,11 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
         verdicts.push(draftErrorAnchors(refusal));
 
         // ---- THE SECOND WRITE, in the opposite direction ------------------
-        retractMemoryEdges(db!, [
-          { citing: draft.citing, cited: draft.cited, relation: draft.relation, tailTag: "", headTag: "" },
-        ]);
+        // MAIN-AGENT-EDGES D4 (ruling T2432 P1): a retraction is PAIR-addressed
+        // and deletes every row of the pair. The relation word and the two side
+        // tags left the address entirely — they were never a discriminator a
+        // caller could be trusted to have read correctly.
+        retractMemoryEdges(db!, [{ citing: draft.citing, cited: draft.cited }]);
 
         // ---- INSTANT B: clean ---------------------------------------------
         previews.push(draftErrorAnchors(await laneCheck()));

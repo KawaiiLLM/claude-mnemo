@@ -4612,6 +4612,15 @@ export function migrateTurnCitationsToEdges(db: Database): number {
         createdAtEpoch: row.createdAtEpoch,
       })),
     );
+    // main-agent-edges D1: a WORDLESS winner has nothing to carry across.
+    // `turn_citations` could hold a pair with no relation at all, which used
+    // to fold into a bare `memory_edges` row; the wordless population is
+    // retired as a write path, and a historical import is not the place to
+    // re-open it. Such a pair is simply not migrated — the same subtraction
+    // ticket 01's cutover applies to every wordless row still standing.
+    if (winner.relation === null) {
+      continue;
+    }
     inputs.push({
       citing: { kind: "turn", id: sample.citingTurnId },
       cited: { kind: "turn", id: sample.citedTurnId },

@@ -9,10 +9,12 @@ import { runWriteTransaction } from "./database";
 import { liveTurnSql } from "./turn-liveness";
 import { EDGE_RELATIONS } from "../shared/turn-phase";
 import {
+  edgeRelationClass,
   isRelationClass,
   LEGACY_RELATION_CLASS,
   NO_RELATION_CLASS,
   NO_RELATION_COVERAGE,
+  type RelationClass,
   type RelationClassValue,
   type RelationCoverageValue,
 } from "../shared/relation-class";
@@ -24,31 +26,33 @@ import {
  *
  * Three things are deliberately separate here:
  *
- *   - the PAIR, identified by (citing node, cited node) — the fact that one
- *     thing cites another, whether or not anyone has classified WHY yet;
- *   - its RELATION. Edge-mechanism-revision D2 widens identity to
- *     (pair, relation): ONE ROW PER RELATION, so a landing turn can say it
- *     both `depends-on` a plan and `encodes` a ruling about the same target.
- *     A pair may additionally hold ONE BARE row (`relation IS NULL`, a partial
- *     unique index enforces the "at most one"), which records nothing except
- *     that the pair exists. The bare row is therefore the pair's existence
- *     record OF LAST RESORT: a bare write onto a pair that already has any row
- *     is a no-op, and a relation write onto a pair that still carries a bare
- *     row REPLACES it, because the relation row already records the same
- *     existence fact and a second copy of it is noise every reader would have
- *     to de-duplicate. That replacement is why RETRACTING the relation has to
- *     hand the existence question back to prose rather than just deleting a
- *     row (ticket 10, `restoreBareRowsForEmptiedPairs` in db/citations.ts):
- *     the bare row it displaced was the body's own record, and the retraction
- *     said nothing about the body.
+ *   - the PAIR, identified by (citing node, cited node) — and, since
+ *     main-agent-edges D5, THE WHOLE OF A ROW'S IDENTITY. **One pair, one
+ *     row.** The (pair, relation, tail, head) identity D2 and lane-model-v12
+ *     built up is retired here: a second class on a pair PROMOTES the row it
+ *     already has (`writeMemoryEdges` below), a second side placement changes
+ *     nothing, and no write path can mint a second physical row for one
+ *     logical edge. The physical UNIQUE key still names the wider tuple until
+ *     ticket 01's rebuild narrows it; that is a schema fact this layer no
+ *     longer depends on.
+ *   - its CLASS and COVERAGE — `correct`/`verify`/`use`, plus `full`/`partial`
+ *     on a `correct`. This is what a writer asserts, and what a promotion
+ *     rewrites in place. (`relation`, the seven-word column, is the interim
+ *     storage spelling of the same judgment and is dropped at cutover.)
  *   - its PROVENANCE, how the system learned it (spec C12: it must tell apart
- *     the main agent's own assertion from a bare textual reference from a
- *     settlement attribution — three of `EDGE_PROVENANCES`' five values).
+ *     the main agent's own assertion from a settlement attribution). Preserved
+ *     across a promotion: the row records who FIRST filed the claim.
  *
- * What is GONE (D2): the old "a non-null relation overwrites whatever the pair
- * stored" upsert. A relation write can only ADD a row now; a wrong relation is
- * corrected by RETRACTING it (`retractMemoryEdges`, D3) and writing the right
- * one, so a correction is two auditable acts rather than a silent overwrite.
+ * WORDLESS (BARE) ROWS ARE RETIRED AS A WRITE PATH (main-agent-edges D1,
+ * T2419/T2421). A `relation: null` input is REFUSED by name here — the
+ * "existence record of last resort" the pair used to keep for prose that names
+ * a target without classifying it is a fact nothing acts on, and the readers
+ * that used to consume it (`getEffectiveCitations`' union, the `↳`
+ * pull-through) still see the prose through `parseInlineCitations`. Stored
+ * wordless rows remain readable until ticket 01's cutover deletes them; a
+ * relation write onto such a pair still drops the stale row it displaces, so
+ * bare and relation rows never coexist on the way out.
+ *
  * BARE self-loops are refused twice over: at the write path (below, with a
  * reported reason) and by a table-level CHECK, so no SQL path can mint one.
  * A RELATION-carrying self row is a different fact (relation-matrix spec,
@@ -146,7 +150,13 @@ export interface MemoryEdge {
 export interface WriteEdgeInput {
   citing: CitingNode;
   cited: EdgeNode;
-  relation: CitationRelation | null;
+  /**
+   * main-agent-edges D1: NON-NULL. The bare/wordless write path is retired
+   * (see this module's header) — a caller with a word-less pair to record has
+   * nothing to record. The column itself stays nullable because STORED
+   * pre-cutover rows still carry `NULL`.
+   */
+  relation: CitationRelation;
   provenance: EdgeProvenance;
   /**
    * lane-model-v12 D1/D2 (ticket 08): the two sides this write places the edge
@@ -162,11 +172,14 @@ export interface WriteEdgeInput {
    * projection that kept them in step), so there is no second representation
    * left to disagree with them.
    *
-   * Ignored on a BARE write (`relation: null`): the bare row is the pair's
-   * "existence record of last resort" (see the docstring above
-   * `EDGE_PROVENANCES`'s home in this file), capped at one per pair by
-   * `idx_memory_edges_bare_pair` regardless of lanes, and a lane is a
-   * RELATION-level fact.
+   * main-agent-edges D4/D5: THEY APPLY ONLY WHEN THIS WRITE CREATES THE ROW.
+   * A write onto a pair that already holds a row PROMOTES that row's class and
+   * coverage and leaves its sides exactly as stored — "a second side placement
+   * → never a new row", and never a silent re-placement either. Changing a
+   * stored side is `declareEdgeSides`' job (db/citations.ts): declaration is
+   * an in-place patch with its own validation (the tag must be one of that
+   * endpoint's current lane tags, and an endpoint in fewer than two lanes is
+   * refused as derivable), none of which this storage primitive can run.
    */
   tailTag?: string;
   headTag?: string;
@@ -410,7 +423,64 @@ function isValidCitedNode(node: EdgeNode | undefined): node is EdgeNode {
 
 export interface WriteEdgesResult {
   written: MemoryEdge[];
+  /**
+   * main-agent-edges D5: rows this call PROMOTED in place — a stronger class,
+   * or a coverage change on a `correct`. Reported apart from `written` (which
+   * carries every accepted input's resulting row, promoted rows included)
+   * because a promotion is a real mutation the citing turn owes a relations
+   * stamp for, while a weaker or identical restatement is not.
+   */
+  promoted: MemoryEdge[];
   rejected: Array<{ input: WriteEdgeInput; reason: string }>;
+}
+
+/**
+ * main-agent-edges D5's precedence, as one number: `use` < `verify` <
+ * `correct`. "Most specific" is the maximum of this rank, and a class strictly
+ * below the stored one is the no-op case.
+ *
+ * COVERAGE IS NOT PART OF THE RANK, on purpose. `correct/full` and
+ * `correct/partial` are the SAME specificity — one says the cited result is
+ * wholly unusable as a premise, the other that a definite part still stands,
+ * and neither is a stronger claim than the other. That is exactly why the two
+ * of them on one pair in ONE call refuse the call by name (`db/citations.ts`)
+ * instead of silently picking a winner, and why a LATER coverage change is a
+ * promotion rather than a weaker no-op: it is a correction of the bit, not a
+ * demotion of the class.
+ */
+export const RELATION_CLASS_SPECIFICITY: Record<RelationClass, number> = {
+  use: 0,
+  verify: 1,
+  correct: 2,
+};
+
+/**
+ * The pair's ONE row, most specific first (main-agent-edges D5). After ticket
+ * 01's cutover a pair holds exactly one row and this is a lookup; before it, a
+ * legacy pair may still hold several, and the tie-break is the SAME rule the
+ * cutover's own fold applies — most specific class, then the lowest row id
+ * (whose provenance and creation time survive) — so the write path and the
+ * migration cannot disagree about which row IS the edge.
+ *
+ * Wordless rows are excluded: they are not edges (this module's header), and a
+ * relation write drops the one it displaces rather than promoting it.
+ */
+export function selectLogicalEdgeRow(rows: readonly MemoryEdge[]): MemoryEdge | null {
+  let best: MemoryEdge | null = null;
+  let bestRank = -1;
+  for (const row of rows) {
+    if (row.relation === null) {
+      continue;
+    }
+    const materialized = edgeRelationClass(row);
+    const rank =
+      materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    if (best === null || rank > bestRank || (rank === bestRank && row.id < best.id)) {
+      best = row;
+      bestRank = rank;
+    }
+  }
+  return best;
 }
 
 /**
@@ -447,54 +517,56 @@ export function pairKey(edge: Pick<WriteEdgeInput, "citing" | "cited">): string 
  */
 
 /**
- * Additive, idempotent edge write (D2).
+ * ONE PAIR, ONE ROW (main-agent-edges D5). A relation write either CREATES the
+ * pair's row or PROMOTES the row it already has, in place:
  *
- *   - A RELATION-bearing write inserts one row per (pair, relation). Two
- *     different relations on the same pair are two rows that coexist; a
- *     repeat of the same (pair, relation) changes nothing — neither the
- *     stored provenance nor `created_at_epoch`, both of which record the
- *     FIRST sighting of that particular claim. A relation is never
- *     overwritten by another relation: correcting one means retracting it
- *     (`retractMemoryEdges`) and writing the replacement.
- *   - A BARE write (`relation: null`) records only "this pair exists", so it
- *     is skipped entirely when the pair already holds ANY row. Conversely a
- *     relation write drops the pair's bare row, since the relation row now
- *     carries that same existence fact; the alternative (both rows) would
- *     hand every reader a duplicate to filter out, and would double the row
- *     count of the ordinary main-agent write, which cites a target in prose
- *     and classifies it in the same call.
+ *   - no row for the pair -> INSERT, with this call's class, coverage, sides
+ *     and provenance;
+ *   - a stored row of a STRICTLY LOWER class -> in-place UPDATE of
+ *     `relation_class`/`relation_coverage` (and the interim `relation` word
+ *     alongside them, until ticket 01 drops that column). The row id,
+ *     provenance, creation time and both stored sides SURVIVE: the row records
+ *     who first filed the claim and where the edge was placed, and a promotion
+ *     revises WHAT is claimed, not who claimed it;
+ *   - a stored row of the SAME class whose coverage this write changes (only
+ *     `correct` has one) -> the same in-place UPDATE. A coverage change is a
+ *     correction of the bit, not a demotion — see
+ *     `RELATION_CLASS_SPECIFICITY`;
+ *   - a stored row of the same or a HIGHER class, coverage unchanged -> NO-OP.
+ *     Nothing is written, nothing is stamped; the caller sees the stored row
+ *     in `written` and can tell the two apart through `promoted`.
+ *
+ * There is NO second row, ever — not for a second class, not for a second lane
+ * placement. The (pair, relation, tail, head) identity that produced 109
+ * multi-row pairs in production is what this replaces, and the physical UNIQUE
+ * key is narrowed to the pair by ticket 01's rebuild; this function no longer
+ * relies on either shape.
+ *
+ * A BARE (`relation: null`) input is REFUSED, reason `bare-row-retired`
+ * (main-agent-edges D1): the wordless population is a fact nothing acts on and
+ * is deleted at cutover, so no path may mint another one. A relation write
+ * still DROPS the stale wordless row it displaces — pre-cutover stock, not a
+ * write this function performs.
  *
  * `written` holds exactly one row per ACCEPTED input, in input order: the row
- * that now satisfies it. For a relation input that is the row carrying that
- * relation; for a bare input it is whichever row records the pair (its own
- * bare row when it was inserted, otherwise the pair's first stored row). That
- * one-to-one shape is what callers depend on — `reconcileCitedPairs` returns
- * it as "the pairs this node cites", db/citations.ts turns it into the
- * eligibility set for the relations attached in the same call, and the tool
- * layer counts it into a receipt.
+ * that now satisfies it, whether this call inserted it, promoted it or found
+ * it already sufficient. `promoted` is the subset this call actually mutated.
  *
  * Eligibility — whether a relation may attach to a pair at all — is NOT this
- * function's business any more (ticket 04, see the note above the options type
- * this used to take): every caller answers for it through its own address
+ * function's business (ticket 04, see the note above the options type this
+ * used to take): every caller answers for it through its own address
  * resolution, phase legality and write gate, and this function writes what it
- * is handed.
+ * is handed. So is DECLARATION: changing a stored side is `declareEdgeSides`
+ * (db/citations.ts), which owns the validation this layer cannot run.
  *
- * A BARE self-loop is rejected here with a reported reason, and again by the
- * table's own CHECK — an unclassified node confirming itself would inflate
- * its own in-degree with no claim behind it, so no write path (this one, a
- * migration, a hand-written statement) may mint one. A RELATION-carrying self
- * row is a narrower, DELIBERATE exception (ticket 05): the table CHECK admits
- * it unconditionally, and so does this function — the phase-scoped question
- * of WHICH relations may self-cite is answered one layer up, by callers that
- * actually know the citing turn's `type`.
+ * A self-loop is rejected here with a reported reason, and again by the
+ * table's own CHECK, so no write path (this one, a migration, a hand-written
+ * statement) may mint one.
  *
  * A RELATION-carrying edge whose two ends are not both `turn` is rejected the
  * same way, for the same reason (container-unification D10): the relation
- * graph is turn->turn, and no write path may mint an exception. Unlike the
- * self-loop rule this one has NO relation-carrying carve-out — every relation
- * word, not just some, requires a turn on both ends. A BARE edge is
- * unaffected either way: `citing`/`cited` may be a segment or a (citing-only)
- * session, because a bare row is the text-ref prose-citation index.
+ * graph is turn->turn, and no write path may mint an exception. With the bare
+ * path retired that is now EVERY input this function accepts.
  *
  * Existence of the endpoints is NOT checked here: callers that take
  * model-supplied ids validate through db/references.ts first, while
@@ -510,6 +582,7 @@ export function writeMemoryEdges(
   nowEpoch: number,
 ): WriteEdgesResult {
   const written: MemoryEdge[] = [];
+  const promoted: MemoryEdge[] = [];
   const rejected: WriteEdgesResult["rejected"] = [];
 
   const insertRelationRow = db.query<
@@ -526,8 +599,6 @@ export function writeMemoryEdges(
       string,
       string,
       number,
-      string,
-      string,
     ]
   >(
     `
@@ -536,103 +607,38 @@ export function writeMemoryEdges(
         relation, provenance, tail_tag, head_tag,
         relation_class, relation_coverage, created_at_epoch
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
-      -- target's last two components — identity is (pair, relation, tail,
-      -- head), so a DIFFERENT side combination on the same (pair, relation)
-      -- is a fresh INSERT (a second, independent row), never a conflict
-      -- against a row that names other lanes. The merged tag-set component
-      -- ticket 01 put here left with the column. (No backticks in this
-      -- template literal: a stray one closes the JS string, not the comment.)
-      -- The clause has to name the WHOLE key — SQLite matches an ON CONFLICT
-      -- target against a unique constraint by its exact column set, so a
-      -- clause that named fewer would not prepare at all (the 2026-08-21
-      -- incident, idx_memory_edges_legacy_pair in db/schema.ts).
-      ON CONFLICT (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, tail_tag, head_tag
-      )
-        -- D2: a repeat of the same claim is a NO-OP, not a correction. The
-        -- assignment is deliberately the stored value itself: SQLite only
-        -- runs RETURNING on a row the statement touched, and this write's
-        -- contract is that every accepted input yields the row that now
-        -- satisfies it, restatements included.
-        --
-        -- relation-vocabulary-v13 ticket 03 closes the gap ticket 02 left
-        -- here. The class columns ARE assigned now, but ONLY onto a row that
-        -- carries no class yet, and only the value that row already READS AS:
-        -- the last two parameters are the write's own class when it carries
-        -- one, and otherwise LEGACY_RELATION_CLASS of this very word (the
-        -- conflict target pins the relation column, so the stored word and incoming
-        -- word are the same word). So this is the migration's materialization
-        -- reaching one more row, not a correction: edgeRelationClass answered
-        -- the same before and after. A row that is ALREADY classified is left
-        -- exactly as stored -- D2 still holds, a restatement never overwrites a
-        -- claim, and correcting a class is still retract-then-write.
-        DO UPDATE SET
-          relation = memory_edges.relation,
-          relation_class = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_class
-          END,
-          relation_coverage = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_coverage
-          END
       RETURNING ${EDGE_COLUMNS}
     `,
+  );
+
+  // main-agent-edges D5: the promotion. Addressed BY ROW ID, so nothing about
+  // the physical UNIQUE key — which still names (pair, relation, tail, head)
+  // until ticket 01's rebuild narrows it to the pair — participates. The three
+  // assigned columns are exactly what a promotion revises; `provenance`,
+  // `created_at_epoch` and both side tags are absent from the SET list on
+  // purpose, and that absence is the contract.
+  const promoteRow = db.query<EdgeRow, [string, string, string, number]>(
+    `UPDATE memory_edges
+        SET relation = ?, relation_class = ?, relation_coverage = ?
+      WHERE id = ?
+      RETURNING ${EDGE_COLUMNS}`,
   );
 
   // lane-model-v12 ticket 05: the query-index maintenance half of a
   // relation-carrying write, one row per SETTLED side, keyed on the edge's
   // own surrogate id. `OR IGNORE` makes this self-healing on a restatement
-  // (the row's id is stable across a no-op conflict above, so its side rows
-  // are already there) without a redundant existence check, and an unsettled
-  // side inserts nothing at all — `''` is the absence of a lane, not a lane
-  // (see MEMORY_EDGE_SIDE_TAGS_DDL, db/schema.ts). Ticket 09 removed the
-  // second, merged index this used to maintain alongside it.
+  // (the row's id is stable across a promotion above, so its side rows are
+  // already there) without a redundant existence check, and an unsettled side
+  // inserts nothing at all — `''` is the absence of a lane, not a lane (see
+  // MEMORY_EDGE_SIDE_TAGS_DDL, db/schema.ts).
   const insertSideTagIndexRow = db.query<unknown, [number, EdgeSide, string]>(
     `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
   );
 
-  // The bare row is the pair's existence record of last resort, so it is
-  // inserted only when nothing else already records the pair. The guard is a
-  // WHERE NOT EXISTS rather than a conflict clause because "any row for this
-  // pair" is wider than the partial unique index, which can only stop a
-  // SECOND bare row.
-  //
-  // Neither lane column is named: a bare row is not a lane fact (see
-  // `WriteEdgeInput.tailTag`), so both sides take the schema default — the
-  // unsettled sentinel — and it contributes no side-index row.
-  const insertBarePairRow = db.query<
-    EdgeRow,
-    [
-      CitingNodeKind,
-      number,
-      EdgeNodeKind,
-      number,
-      string,
-      number,
-      CitingNodeKind,
-      number,
-      EdgeNodeKind,
-      number,
-    ]
-  >(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      )
-      SELECT ?, ?, ?, ?, NULL, ?, ?
-      WHERE NOT EXISTS (
-        SELECT 1 FROM memory_edges
-        WHERE citing_kind = ? AND citing_id = ?
-          AND cited_kind = ? AND cited_id = ?
-      )
-      RETURNING ${EDGE_COLUMNS}
-    `,
-  );
-
+  // Pre-cutover stock only (main-agent-edges D1): no path writes a wordless
+  // row any more, but stored ones stand until ticket 01 deletes them, and a
+  // relation row on the same pair displaces the one it finds — bare and
+  // relation rows must never coexist on the pair the way out is through.
   const dropBarePairRow = db.query<
     unknown,
     [CitingNodeKind, number, EdgeNodeKind, number]
@@ -642,17 +648,13 @@ export function writeMemoryEdges(
        AND relation IS NULL`,
   );
 
-  // NULLs sort first in SQLite's ASC, so a pair that still holds its bare row
-  // reports that row, and one that does not reports its lowest-named
-  // relation — deterministic either way.
-  const readPairRow = db.query<
+  const readPairRows = db.query<
     EdgeRow,
     [CitingNodeKind, number, EdgeNodeKind, number]
   >(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY ${EDGE_IDENTITY_ORDER}
-     LIMIT 1`,
+     ORDER BY id ASC`,
   );
 
   for (const edge of edges) {
@@ -660,37 +662,39 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-node" });
       continue;
     }
-    // EVERY self row, bare or relation-carrying. Ticket 05 had narrowed this
-    // to the bare case, deferring "may THIS word self-cite" to the caller as
-    // a phase question; lane-model-v12 D2 (ticket 04) removes the question —
-    // an edge's two ends must be different nodes, full stop, so there is
-    // nothing left for a caller to know that this function does not. It
-    // refuses IN STEP with the contracted table's own CHECK
-    // (`memoryEdgesTableDdl`, db/schema.ts) rather than instead of it: the
-    // CHECK is what holds against SQL that never comes through here, and this
-    // is what turns that into a named rejection instead of a thrown
-    // SQLITE_CONSTRAINT mid-batch.
+    // EVERY self row. Ticket 05 had narrowed this to the bare case, deferring
+    // "may THIS word self-cite" to the caller as a phase question;
+    // lane-model-v12 D2 (ticket 04) removes the question — an edge's two ends
+    // must be different nodes, full stop, so there is nothing left for a
+    // caller to know that this function does not. It refuses IN STEP with the
+    // contracted table's own CHECK (`memoryEdgesTableDdl`, db/schema.ts)
+    // rather than instead of it: the CHECK is what holds against SQL that
+    // never comes through here, and this is what turns that into a named
+    // rejection instead of a thrown SQLITE_CONSTRAINT mid-batch.
     if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
       rejected.push({ input: edge, reason: "self-loop" });
       continue;
     }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+    // main-agent-edges D1: the wordless write path is retired, and refused by
+    // NAME rather than silently dropped — a caller still handing this function
+    // a `relation: null` input has a stale model of what an edge is, and a
+    // silent drop is how that survives a release.
+    if (edge.relation === null) {
+      rejected.push({ input: edge, reason: "bare-row-retired" });
+      continue;
+    }
+    if (!isCitationRelation(edge.relation)) {
       rejected.push({ input: edge, reason: "invalid-relation" });
       continue;
     }
-    // container-unification D10: a RELATION-carrying row's two ends must both
-    // be `turn` — the relation graph is turn→turn, full stop. Same pairing as
-    // the self-loop guard above: the table's own CHECK
-    // (`memoryEdgesTableDdl`'s `relationScopedToTurns` arm, db/schema.ts) is
-    // what holds against SQL that never comes through here, and this is what
-    // turns that into a named rejection instead of a thrown SQLITE_CONSTRAINT
-    // mid-batch. A BARE row is UNAFFECTED — `cited`/`citing` may still be a
-    // segment or session (spec C10 above), because a bare row is the text-ref
-    // prose-citation index, a different population D10 leaves alone.
-    if (
-      edge.relation !== null &&
-      (edge.citing.kind !== "turn" || edge.cited.kind !== "turn")
-    ) {
+    // container-unification D10: an edge's two ends must both be `turn` — the
+    // relation graph is turn→turn, full stop. Same pairing as the self-loop
+    // guard above: the table's own CHECK (`memoryEdgesTableDdl`'s
+    // `relationScopedToTurns` arm, db/schema.ts) is what holds against SQL
+    // that never comes through here, and this is what turns that into a named
+    // rejection instead of a thrown SQLITE_CONSTRAINT mid-batch. With the bare
+    // path retired this now governs EVERY input.
+    if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
       rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
       continue;
     }
@@ -698,30 +702,45 @@ export function writeMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-provenance" });
       continue;
     }
+
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
-    if (edge.relation !== null) {
-      // Ticket 08/09: the SIDES are the input and the whole of the stored lane
-      // fact — there is no second representation left to keep in step.
-      const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
-      const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
-      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
-      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
-      // relation-vocabulary-v13 ticket 03: what an UNCLASSIFIED pre-existing
-      // row gains when this write conflicts with it. The write's own class when
-      // it carries one; otherwise the class that row ALREADY READS AS through
-      // `edgeRelationClass`'s legacy fallback, so the conflict path can only
-      // ever materialize an answer, never invent one. A word outside
-      // `EDGE_RELATIONS` maps to nothing and leaves the row `''` — the same
-      // "unknown word stays unclassified" the migration records.
-      const conflictLegacyClass = LEGACY_RELATION_CLASS[
-        edge.relation as keyof typeof LEGACY_RELATION_CLASS
-      ];
-      const fillClass = isRelationClass(relationClass)
-        ? relationClass
-        : conflictLegacyClass?.relationClass ?? NO_RELATION_CLASS;
-      const fillCoverage = isRelationClass(relationClass)
-        ? relationCoverage
-        : conflictLegacyClass?.relationCoverage ?? NO_RELATION_COVERAGE;
+    const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
+    const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+    const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+    const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
+    // relation-vocabulary-v13 ticket 03: the class a write that carries none
+    // ALREADY MEANS, through `edgeRelationClass`'s legacy fallback — the
+    // write's own class when it carries one, otherwise this word's own legacy
+    // equivalent. Used for the PRECEDENCE comparison below and for the
+    // promotion it may drive; never to enrich an INSERT, which stores exactly
+    // what the caller handed over (a row that carries no class reads as its
+    // word's class anyway, and materializing it on the way in would change
+    // what every raw-word reader prints for a legacy-shaped write). A word
+    // outside `EDGE_RELATIONS` maps to nothing and stays unclassified — the
+    // same "unknown word stays unclassified" the migration records.
+    const legacyOfWrite = LEGACY_RELATION_CLASS[
+      edge.relation as keyof typeof LEGACY_RELATION_CLASS
+    ];
+    const meansClass: RelationClassValue = isRelationClass(relationClass)
+      ? relationClass
+      : legacyOfWrite?.relationClass ?? NO_RELATION_CLASS;
+    const meansCoverage: RelationCoverageValue = isRelationClass(relationClass)
+      ? relationCoverage
+      : legacyOfWrite?.relationCoverage ?? NO_RELATION_COVERAGE;
+
+    const stored = selectLogicalEdgeRow(
+      readPairRows
+        .all(edge.citing.kind, edge.citing.id, edge.cited.kind, edge.cited.id)
+        .map(mapEdgeRow),
+    );
+
+    if (stored === null) {
+      dropBarePairRow.run(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id,
+      );
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -734,14 +753,6 @@ export function writeMemoryEdges(
         relationClass,
         relationCoverage,
         createdAtEpoch,
-        fillClass,
-        fillCoverage,
-      );
-      dropBarePairRow.run(
-        edge.citing.kind,
-        edge.citing.id,
-        edge.cited.kind,
-        edge.cited.id,
       );
       if (row) {
         written.push(mapEdgeRow(row));
@@ -755,62 +766,58 @@ export function writeMemoryEdges(
       continue;
     }
 
-    const inserted = insertBarePairRow.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.provenance,
-      createdAtEpoch,
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-    );
-    const row =
-      inserted ??
-      readPairRow.get(
-        edge.citing.kind,
-        edge.citing.id,
-        edge.cited.kind,
-        edge.cited.id,
-      );
-    if (row) {
-      written.push(mapEdgeRow(row));
+    // The pair already has its row. D5's three outcomes, decided on the
+    // MATERIALIZED class of what is stored (so a legacy word answers the same
+    // question a v13 row does) against the class this write asserts.
+    const storedClass = edgeRelationClass(stored);
+    const wantsClass = isRelationClass(meansClass) ? meansClass : null;
+    const storedRank =
+      storedClass === null ? -1 : RELATION_CLASS_SPECIFICITY[storedClass.relationClass];
+    const wantsRank = wantsClass === null ? -1 : RELATION_CLASS_SPECIFICITY[wantsClass];
+    const coverageChanges =
+      storedClass !== null &&
+      wantsClass !== null &&
+      storedClass.relationClass === wantsClass &&
+      storedClass.relationCoverage !== meansCoverage;
+
+    if (wantsRank > storedRank || coverageChanges) {
+      const row = promoteRow.get(edge.relation, meansClass, meansCoverage, stored.id);
+      if (row) {
+        const mapped = mapEdgeRow(row);
+        written.push(mapped);
+        promoted.push(mapped);
+      }
+      continue;
     }
+
+    // Weaker, or identical: a NO-OP on the claim, and no stamp is owed for
+    // something the row already carries at least as strongly (D5).
+    //
+    // ONE exception, and it is not a correction: a stored row carrying NO
+    // class yet is filled with the class it ALREADY READS AS (its own word's
+    // legacy equivalent — `storedClass`, never this write's). That is
+    // relation-vocabulary-v13 ticket 03's materialization, which used to ride
+    // on the retired `ON CONFLICT DO UPDATE` clause; `edgeRelationClass`
+    // answered the same before and after, so nothing a reader sees moves.
+    if (stored.relationClass === NO_RELATION_CLASS && storedClass !== null) {
+      const filled = promoteRow.get(
+        stored.relation as string,
+        storedClass.relationClass,
+        storedClass.relationCoverage,
+        stored.id,
+      );
+      written.push(filled ? mapEdgeRow(filled) : stored);
+      continue;
+    }
+    written.push(stored);
   }
 
-  return { written, rejected };
+  return { written, promoted, rejected };
 }
 
 export interface RetractEdgeInput {
   citing: CitingNode;
   cited: EdgeNode;
-  /**
-   * The row to remove. `null` addresses the pair's BARE row specifically — it
-   * is not a wildcard over the pair's relations, because "this citation was
-   * never classified" and "this classification is wrong" are different
-   * retractions and a caller that means one must not silently get the other.
-   */
-  relation: CitationRelation | null;
-  /**
-   * lane-model-v12 ticket 08: the two SIDES completing the row address —
-   * identity is (pair, relation, tail, head), so a retraction addresses
-   * exactly ONE row by naming both. Omitted means unsettled on that side,
-   * which addresses the draft row — what every retraction addressed before
-   * lanes existed at all.
-   *
-   * Ticket 09 took the merged `tags` component out of the address with the
-   * column. That makes the address STRICTLY WIDER for exactly one legacy
-   * shape: a pre-M-A multi-tag row (both sides unsettled, `tags` holding two
-   * or more words) used to be unaddressable from here and now answers to the
-   * both-sides-unsettled address like any draft row. Not a live concern —
-   * M-A splits every such row into one edge per tag before this code can meet
-   * one, and no write path can mint a new one — but it is a real difference
-   * rather than a rename.
-   */
-  tailTag?: string;
-  headTag?: string;
 }
 
 export interface RetractEdgesResult {
@@ -819,27 +826,36 @@ export interface RetractEdgesResult {
 }
 
 /**
- * D3: hard-delete an edge, addressed by (pair, relation). Both writers (main
- * agent, settlement) have the same power here — a false assertion must not
- * outlive its refutation, and no tombstone is kept: the audit trail for edge
- * history is the existing database dump/backup, not a graveyard row that every
- * reader would then have to exclude.
+ * D3, re-addressed by main-agent-edges D4/D5 and the T2432 P1 pin:
+ * hard-delete THE LOGICAL EDGE, addressed by the PAIR alone. Both writers have
+ * the same power here — a false assertion must not outlive its refutation, and
+ * no tombstone is kept: the audit trail for edge history is the existing
+ * database dump/backup, not a graveyard row every reader would then have to
+ * exclude.
  *
- * Retracting a pair's last relation leaves the pair with NO row at all, HERE.
- * This primitive never downgrades it to a bare row: resurrecting the pair as
- * "cited but unclassified" is a claim about the citing body, and this function
- * cannot read one — it is handed nodes, which may be turns, segments or
- * sessions. The caller that CAN read the body decides (ticket 10):
- * `retractTurnRelations` re-scans the citing turn's title/content/insight for
- * exactly the pairs this call emptied and restores the bare row for the ones
- * the prose still names. A caller with no body to scan gets the plain
- * hard-delete, which is the whole truth in that case.
+ * WHY THE ADDRESS NARROWED TO THE PAIR. It used to be
+ * (pair, relation, tail, head) — the physical row key — which made a
+ * retraction's success depend on the caller knowing which of seven storage
+ * words a class had landed under and which lanes somebody else had since
+ * declared on it. Under one-pair-one-row there is exactly one edge to remove,
+ * so the address that names it is the pair; the CLASS precondition a caller
+ * may still want ("delete this only if it is still `correct`") is checked one
+ * layer up, in `db/citations.ts`'s `retractTurnRelations`, where the class
+ * vocabulary lives and where a stale precondition can be refused BY NAME
+ * instead of silently matching nothing.
  *
- * Rejected reasons mirror the write path's currency (`invalid-node`,
- * `invalid-relation`), plus `no-such-edge` for an address that resolved but
- * matched nothing — a caller reporting a retraction to a model needs to tell
- * "I removed it" apart from "there was nothing there", which a bare count
- * cannot express.
+ * Every row of the pair goes, including a pre-cutover wordless row: the pair
+ * is the edge, and leaving a fragment of it behind is exactly the "the
+ * classification is gone but something still records the pair" state D1
+ * retires. Nothing is downgraded to a bare row on the way out — the bare layer
+ * has no writer left.
+ *
+ * `memory_edge_side_tags`' ON DELETE CASCADE (schema.ts) keeps the side index
+ * consistent with no code here having to clean it up.
+ *
+ * `no-such-edge` is reported for an address that resolved but matched nothing
+ * — a caller reporting a retraction to a model needs to tell "I removed it"
+ * apart from "there was nothing there", which a bare count cannot express.
  */
 export function retractMemoryEdges(
   db: Database,
@@ -848,22 +864,9 @@ export function retractMemoryEdges(
   const deleted: MemoryEdge[] = [];
   const rejected: RetractEdgesResult["rejected"] = [];
 
-  // `relation IS ?` rather than `=`: null-safe equality, so one statement
-  // addresses both a named relation and the bare row. The two SIDE columns
-  // complete the row address (lane-model-v12 ticket 08/09): identity is
-  // (pair, relation, tail, head), so this deletes exactly ONE row rather than
-  // every row a wider (pair, relation) address used to match.
-  // `memory_edge_side_tags`' ON DELETE CASCADE (schema.ts) keeps the side
-  // index consistent with no code here having to clean it up.
-  const del = db.query<
-    EdgeRow,
-    [CitingNodeKind, number, EdgeNodeKind, number, string | null, string, string]
-  >(
+  const del = db.query<EdgeRow, [CitingNodeKind, number, EdgeNodeKind, number]>(
     `DELETE FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-       AND relation IS ?
-       AND tail_tag = ?
-       AND head_tag = ?
      RETURNING ${EDGE_COLUMNS}`,
   );
 
@@ -872,21 +875,12 @@ export function retractMemoryEdges(
       rejected.push({ input: edge, reason: "invalid-node" });
       continue;
     }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
 
-    const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
-    const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
     const rows = del.all(
       edge.citing.kind,
       edge.citing.id,
       edge.cited.kind,
       edge.cited.id,
-      edge.relation,
-      tailTag,
-      headTag,
     );
     if (rows.length === 0) {
       rejected.push({ input: edge, reason: "no-such-edge" });
@@ -1203,6 +1197,56 @@ export function getEdgesBySideTag(db: Database, tag: string): MemoryEdge[] {
 }
 
 /**
+ * main-agent-edges D4: the storage half of a DECLARATION — set one row's two
+ * side tags in place and rewrite its side-index rows to match.
+ *
+ * What it does NOT assign is the contract: `relation`, `relation_class`,
+ * `relation_coverage`, `provenance` and `created_at_epoch` are absent from the
+ * `SET` list, so a declaration cannot change what the edge claims, who claimed
+ * it, or when. The row ID is the address, so nothing about the physical UNIQUE
+ * key participates either.
+ *
+ * The JUDGMENT above it — is this tag one of the endpoint's own lane tags, is
+ * the endpoint even ambiguous enough to need a declaration, is the class the
+ * caller believed still the class — is `db/citations.ts`'s `declareEdgeSides`,
+ * the same "storage writes what it is handed, the layer above decides" split
+ * `writeMemoryEdges` already has.
+ */
+export function updateEdgeSides(
+  db: Database,
+  edgeRowId: number,
+  sides: { tailTag: string; headTag: string },
+): MemoryEdge | null {
+  const row = db
+    .query<EdgeRow, [string, string, number]>(
+      `UPDATE memory_edges SET tail_tag = ?, head_tag = ? WHERE id = ?
+       RETURNING ${EDGE_COLUMNS}`,
+    )
+    .get(sides.tailTag, sides.headTag, edgeRowId);
+  if (!row) {
+    return null;
+  }
+
+  // Rewritten rather than diffed: `memory_edge_side_tags` indexes EXPLICIT
+  // declarations only (D1), so "delete both sides, re-insert the settled ones"
+  // is the whole of it, and an unsettled side correctly leaves no row.
+  db.query<unknown, [number]>(
+    `DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?`,
+  ).run(edgeRowId);
+  const insertSideTagIndexRow = db.query<unknown, [number, EdgeSide, string]>(
+    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+  );
+  for (const side of EDGE_SIDES) {
+    const tag = side === "tail" ? sides.tailTag : sides.headTag;
+    if (tag !== UNSETTLED_SIDE_TAG) {
+      insertSideTagIndexRow.run(edgeRowId, side, tag);
+    }
+  }
+
+  return mapEdgeRow(row);
+}
+
+/**
  * rubric-v10 ticket 01 ("A query index table... maintained on insert/delete
  * ... It must be rebuildable from the edge table"), inherited by the SIDE
  * index at ticket 05 and the only such rebuild left since ticket 09 deleted
@@ -1240,90 +1284,31 @@ export function rebuildMemoryEdgeSideTagsIndex(db: Database): void {
   });
 }
 
-export interface ReconcileCitedPairsResult {
-  /** The citing node's full outgoing set after reconciliation — new pairs and pairs that already existed alike. */
-  written: MemoryEdge[];
-  /** BARE rows this call removed because no field names them any more; relation rows never appear here (they outlive prose). */
-  deleted: MemoryEdge[];
-}
-
-/**
- * Spec C6, narrowed by edge-mechanism-revision D1 to the BARE layer: a bare
- * pair row exists if and only if the citing node's body's post-state cites
- * it. `citedNodes` is that post-state, already parsed and resolved by the
- * caller (references.ts) — this function's only job is to make the bare rows
- * of `memory_edges` agree with it, for ONE citing node's outgoing set.
- *
- * Two halves:
- *
- *   - every pair in `citedNodes` is written bare (`relation: null`). For a
- *     pair that already holds any row this is a no-op (D2), so relations
- *     attached by another writer survive a rewrite that still cites the same
- *     target, and the pair is never recorded twice.
- *   - every pair this node currently cites that is NOT in `citedNodes` loses
- *     its BARE row only (edge-mechanism-revision D1, decoupling): the bare row
- *     is prose's own record, so prose withdrawing the mention withdraws it.
- *     RELATION rows are standalone claims declared through the relation
- *     parameters and survive any prose rewrite — deleting them here would let
- *     an ordinary note correction silently destroy edges nobody retracted.
- *     A wrong relation dies by retraction (`retractMemoryEdges`), never by
- *     prose drift.
- *
- * Whole-node rescan, not a per-field diff (spec C6's own text: turn, segment
- * and session field counts are all bounded, so re-deriving the full set on
- * every write and diffing it against what is already stored is simplest).
- */
-export function reconcileCitedPairs(
-  db: Database,
-  citing: CitingNode,
-  citedNodes: readonly EdgeNode[],
-  nowEpoch: number,
-  provenance: EdgeProvenance,
-): ReconcileCitedPairsResult {
-  const desired = new Map<string, EdgeNode>();
-  for (const node of citedNodes) {
-    if (isValidCitedNode(node)) {
-      desired.set(`${node.kind}:${node.id}`, node);
-    }
-  }
-
-  const existing = getOutgoingEdges(db, citing);
-  const stale = existing.filter(
-    (edge) =>
-      edge.relation === null &&
-      !desired.has(`${edge.cited.kind}:${edge.cited.id}`),
-  );
-
-  const del = db.query<unknown, [CitingNodeKind, number, EdgeNodeKind, number]>(
-    `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-       AND relation IS NULL`,
-  );
-  for (const edge of stale) {
-    del.run(citing.kind, citing.id, edge.cited.kind, edge.cited.id);
-  }
-
-  const { written } = writeMemoryEdges(
-    db,
-    [...desired.values()].map((cited) => ({
-      citing,
-      cited,
-      relation: null,
-      provenance,
-    })),
-    nowEpoch,
-  );
-
-  return { written, deleted: stale };
-}
+// `reconcileCitedPairs` (spec C6's bare layer) is DELETED by main-agent-edges
+// D1 / R10-2. It was the wordless population's production line: one bare row
+// per `[S<n>/T<m>]` / `[E<n>]` a turn, segment or session body happened to
+// name, reconciled on every prose write, for a fact nothing acts on. Its three
+// call sites went with it — `recomputeTurnCitedPairs` (db/citations.ts) and
+// the segment and session field rescans (db/segments.ts, db/sessions.ts).
+//
+// WHAT REPLACES IT: nothing, and nothing needs to. The two readers that
+// consumed the bare row already union it with the PROSE they were derived
+// from — `getEffectiveCitations` / `getSessionEffectiveCitations` parse
+// `content` through `parseInlineCitations` and append what the edges did not
+// already cover — so the `↳` pull-through and session in-degree read the same
+// prose the bare row was a copy of. The one measurable narrowing is that
+// prose in `title`/`insight` (which the bare recompute scanned and the inline
+// grammar does not) stops contributing; that is the EXPECTED delta, recorded
+// here rather than discovered later.
 
 /**
  * De-duplicated in-degree (spec D8): how many DISTINCT nodes cite this one.
- * The DISTINCT is load-bearing under D2's multi-relation storage — one citer
- * that declares two relations about this node is two rows and still one
+ * The DISTINCT is load-bearing on pre-cutover stock — a legacy pair may still
+ * hold several physical rows (109 in production) and one citer is still one
  * citer — because in-degree answers "how many pieces of work consumed this",
  * not "how many claims were filed".
  */
+
 export function getEdgeInDegree(db: Database, cited: EdgeNode): number {
   return (
     db

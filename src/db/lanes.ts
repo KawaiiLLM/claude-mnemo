@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { readTurnBodyFields, restoreBareRowsForEmptiedPairs } from "./citations";
 import { foldLaneImpressionIntoSurvivor } from "./impressions";
 import {
   isEdgeProvenance,
@@ -964,8 +963,6 @@ export interface LaneClearReceipt {
   turnsCleared: number;
   /** Edge ROWS deleted — never reverted to the unsettled sentinel (spec D5: a reverted side is residue dumped back into settlement's queue for work that just voided itself, not a clean removal). */
   edgesDeleted: number;
-  /** Bare `text-ref` rows put back for a pair the deletion emptied whose citing turn's prose still names the target (spec D5b). */
-  bareRowsRestored: number;
 }
 
 export type LaneClearOutcome =
@@ -1015,15 +1012,13 @@ interface LaneClearClassifiedEdge {
  * shows in the unforced call refusing, naming the other lane, and leaving
  * the row untouched.
  *
- * BARE-ROW RESTORATION REUSES `restoreBareRowsForEmptiedPairs`
- * (db/citations.ts, ticket 10) rather than re-deriving it: `clear` is a new
- * bulk retraction path, and hard-deleting relation rows without it would
- * reintroduce the exact defect that function exists to close — a citing
- * turn's prose still naming a target whose last relation row just vanished.
- * Deleted edges are grouped by CITING turn (the shape that function takes
- * one node at a time) and every group's body is re-read AFTER all of this
- * call's deletes have landed, the same ordering `retractTurnRelations`
- * itself uses.
+ * BARE-ROW RESTORATION IS GONE (main-agent-edges D1). This verb used to put a
+ * wordless `text-ref` row back for every pair its bulk delete emptied whose
+ * citing turn's prose still named the target, so the `↳` pull-through survived
+ * the clear. The wordless population is retired as a write path and deleted at
+ * cutover; the prose that named the target still names it, and
+ * `getEffectiveCitations` reads the prose. The relations revision stamp above
+ * stays — a run holding a pre-clear grant must still be sent back to re-read.
  */
 export function clearLane(
   db: Database,
@@ -1155,26 +1150,14 @@ export function clearLane(
     }
   }
 
-  // --- 3. D5b: restore a bare row for a pair the deletion emptied whose ---
-  //        citing turn's prose still names the target
-  let bareRowsRestored = 0;
-  for (const bucket of emptiedByCiting.values()) {
-    if (bucket.citing.kind !== "turn") {
-      // D9/D10: a lane tag never rides a non-turn citing side under v12's
-      // turn-scoped relation CHECK — unreachable given the schema, and
-      // `restoreBareRowsForEmptiedPairs` is turn-body-shaped only.
-      continue;
-    }
-    const fields = readTurnBodyFields(db, bucket.citing.id);
-    const restored = restoreBareRowsForEmptiedPairs(
-      db,
-      bucket.citing,
-      bucket.targets,
-      fields,
-      nowEpoch,
-    );
-    bareRowsRestored += restored.length;
-  }
+  // --- 3. D5b's bare-row restoration is DELETED (main-agent-edges D1) ------
+  // It put a wordless `text-ref` row back for every pair this clear emptied
+  // whose citing turn's prose still named the target, so that the `↳`
+  // pull-through survived. The wordless population is retired: the prose that
+  // named the target still names it, and `getEffectiveCitations` reads the
+  // prose directly. D2 additionally retires the DELETION half of this verb —
+  // a lane clear stops touching relation rows at all — which is ticket 02's
+  // rewrite of the lane lifecycle, not this ticket's.
 
   return {
     kind: "cleared",
@@ -1183,7 +1166,6 @@ export function clearLane(
       tag,
       turnsCleared: memberTurns.length,
       edgesDeleted: relevant.length,
-      bareRowsRestored,
     },
   };
 }

@@ -173,6 +173,33 @@ describe("handleCompactHook — compact guidance sentence", () => {
 // tests/hooks/session-end.test.ts for the SessionEnd side of the change).
 // ---------------------------------------------------------------------------
 
+/**
+ * MAIN-AGENT-EDGES D3 (read-once 00 addendum): the FRESH-TURN EXCEPTION.
+ *
+ * `checkRelationsGate` now admits UNCONDITIONALLY when the citing turn has no
+ * outgoing relation-carrying row — writer-agnostic, checked before the
+ * completeness lookup. A turn with an empty edge set holds nothing a read
+ * could have delivered, so demanding one taught the model to run a read that
+ * would return nothing and grant nothing.
+ *
+ * That makes an EDGELESS turn the wrong fixture for anything about grants: it
+ * admits for a reason that has nothing to do with the epoch. The relations
+ * tests below therefore seed one stored edge out of the turn first, which is
+ * the state where the gate's rule has content and where the wipe is
+ * observable. The row is inserted directly rather than through
+ * `writeMemoryEdges`, which would itself run the gate this fixture is setting
+ * up.
+ */
+function seedOutgoingRelation(db: Database, turnId: number, citedId: number): void {
+  db.query<unknown, [number, number]>(
+    `INSERT INTO memory_edges (
+       citing_kind, citing_id, cited_kind, cited_id,
+       relation, provenance, tail_tag, head_tag,
+       relation_class, relation_coverage, created_at_epoch
+     ) VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', '', '', 'use', '', 100)`,
+  ).run(turnId, citedId);
+}
+
 describe("handleCompactHook — write gate grant wipe", () => {
   let db: Database;
   let sessionId: number;
@@ -227,6 +254,9 @@ describe("handleCompactHook — write gate grant wipe", () => {
   test("relations gate consistency: post-compact, an edge write without a fresh relations read refuses — pre-compact-earned relations completeness does not survive the wipe", async () => {
     const writer = sessionWriterId(sessionId);
     const turnId = 42;
+    // The turn already carries an edge, so the fresh-turn exception (D3) does
+    // not answer for it and the gate's own rule is what decides.
+    seedOutgoingRelation(db, turnId, 43);
     // Another writer's edge mutation is the turn's current relations
     // revision; this writer read the set whole before compact.
     stampTurnRelationsRevision(db, turnId, "session:9999", 100);
@@ -340,6 +370,8 @@ describe("handleCompactHook — write gate grant wipe", () => {
   test("the PreCompact-failure fixture (relations gate): the same failed-then-backstopped bump also invalidates a pre-compact relations read", async () => {
     const writer = sessionWriterId(sessionId);
     const turnId = 42;
+    // Same fresh-turn-exception reason as the test above (main-agent-edges D3).
+    seedOutgoingRelation(db, turnId, 43);
     stampTurnRelationsRevision(db, turnId, "session:9999", 100);
     recordReadGrant(db, writer, "turn", turnId, 150, snapshotWriteGateSequence(db));
     recordFieldCompleteness(

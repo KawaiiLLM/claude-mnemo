@@ -4,13 +4,16 @@ import {
   getIncomingEdges,
   getOutgoingEdges,
   pairKey,
-  reconcileCitedPairs,
   retractMemoryEdges,
+  selectLogicalEdgeRow,
+  updateEdgeSides,
   writeMemoryEdges,
+  RELATION_CLASS_SPECIFICITY,
   UNSETTLED_SIDE_TAG,
   type CitingNode,
   type EdgeNode,
   type EdgeProvenance,
+  type EdgeSide,
   type MemoryEdge,
   type RetractEdgeInput,
   type WriteEdgeInput,
@@ -18,6 +21,7 @@ import {
 import { EDGE_RELATIONS, type TurnEdgeRelation } from "../shared/turn-phase";
 import {
   checkRelationCoverage,
+  edgeRelationClass,
   interimLegacyRelation,
   isRelationCoverage,
   LEGACY_RELATIONS_BY_CLASS,
@@ -30,8 +34,9 @@ import {
   parseBareAddressReference,
   parseQualifiedReferences,
   validateReferences,
-  type RejectedReference,
 } from "./references";
+import { loadDeclaredLaneTags, loadSegmentTagIndex } from "./turn-tag-gate";
+import { stampTurnRelationsRevision } from "./write-gate";
 import type { TurnRecord } from "./turns";
 import { liveTurnSql } from "./turn-liveness";
 
@@ -255,6 +260,20 @@ const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   // citing turn's own outgoing degree, and neither is fixed by re-sending.
   "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap — retract one before adding another; nothing in this call was written`,
   "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap — nothing in this call was written`,
+  // main-agent-edges D5. One pair, one row, one claim: `correct(full)` says no
+  // substantial part of the cited result may still serve as a premise and
+  // `correct(partial)` says a definite part still may, so a call asserting
+  // both about the same pair has not stated a stronger and a weaker claim —
+  // it has stated two incompatible ones, and there is no most-specific to
+  // collapse onto.
+  "coverage-conflict":
+    "is named `correct` twice in this call under BOTH coverage bits — `full` and `partial` are the same specificity and contradict each other, so nothing in this call was written; send the one you mean",
+  // main-agent-edges D4/D5, T2432 P1. `formatRelationRejections` fills the
+  // CURRENT class in instead of this fallback whenever the rejection carries
+  // one, which is the only reason this refusal is worth more than "no such
+  // edge": the edge is there, and it is not what you read.
+  "stale-class":
+    "is not the class this pair carries any more — read the edge again before acting on it",
 };
 
 /**
@@ -266,40 +285,39 @@ export function formatRelationRejections(
   rejections: readonly TurnRelationRejection[],
   surface: "relation" | "retraction",
 ): string {
-  const lines = rejections.map(
-    (entry) => `${entry.relation} "${entry.raw}" ${RELATION_REJECTION_TEXT[entry.reason]}`,
-  );
+  const lines = rejections.map((entry) => {
+    const text =
+      entry.reason === "stale-class" && entry.currentClass !== undefined
+        ? `is now ${
+            entry.currentClass === null ? "unclassified" : `\`${entry.currentClass}\``
+          }, not \`${entry.relation}\` — read the edge again before acting on it`
+        : RELATION_REJECTION_TEXT[entry.reason];
+    return `${entry.relation} "${entry.raw}" ${text}`;
+  });
   return `${surface} field rejected: ${lines.join("; ")}.`;
 }
 
 /**
  * The retraction receipt's one register (edge-mechanism-revision ticket 11).
  *
- * `restored` is ticket 10's own outcome and the reason this line needed a
- * second number: retracting a pair's last relation puts the BARE row back when
- * the citing prose still names the target, so "the classification is gone but
- * the citation stands" is a third outcome distinct from both "removed" and
- * "nothing happened". Without it a writer has to query the graph to learn
- * whether its own retraction cost the `↳` pull-through — and one that does not
- * query assumes the worse of the two.
+ * ONE NUMBER since main-agent-edges D1. It used to carry a second, `restored`
+ * — bare rows put back for a pair the citing prose still named, so that "the
+ * classification is gone but the citation stands" was a third outcome distinct
+ * from both "removed" and "nothing happened". The wordless population is
+ * retired, so that outcome no longer exists: a retraction removes the edge,
+ * and the prose that names the target is still the prose that names it.
  *
- * Returns null when nothing was deleted: a retraction that deleted nothing
- * cannot have restored anything either (the whole call is refused by name
- * before any delete — `no-such-edge`), so there is no line to print.
+ * Returns null when nothing was deleted: the whole call is refused by name
+ * before any delete (`no-such-edge`, `stale-class`), so there is no line to
+ * print.
  */
 export function formatRetractionReceipt(counts: {
   retracted: number;
-  restored: number;
 }): string | null {
   if (counts.retracted === 0) {
     return null;
   }
-  return (
-    `Retracted ${counts.retracted} relation(s)` +
-    (counts.restored > 0
-      ? `, ${counts.restored} bare citation(s) restored (the prose still names them).`
-      : ".")
-  );
+  return `Retracted ${counts.retracted} relation(s).`;
 }
 
 export interface TurnCitationEdge {
@@ -499,79 +517,22 @@ export function parseInlineCitations(
   return ids;
 }
 
-export interface RecomputeTurnCitedPairsFields {
-  title: string | null;
-  content: string | null;
-  insight: string | null;
-}
+// `recomputeTurnCitedPairs` (spec C6) is DELETED by main-agent-edges D1 /
+// R10-2, together with the primitive under it (`reconcileCitedPairs`,
+// db/memory-edges.ts) and the "Cites N pair(s)" receipt line it fed
+// (mcp/note.ts). It rescanned a turn's title/content/insight on every prose
+// write and kept ONE wordless `text-ref` row per address the body named —
+// 1,187 of production's 1,883 wordless rows — recording that a citation
+// exists without saying what it claims. Nothing acts on that fact: an edge is
+// a class, and a pair with no class is not an edge.
+//
+// The `↳` pull-through and session in-degree, its only real consumers, read
+// the PROSE directly through `getEffectiveCitations` /
+// `getSessionEffectiveCitations` below, which already union
+// `parseInlineCitations(content)` onto the edge set. `parseInlineCitations`
+// itself STAYS — it is that union's own parser and the milestone view's, and
+// it never wrote a row.
 
-export interface RecomputeTurnCitedPairsResult {
-  /** The turn's full outgoing pair set after reconciliation. */
-  written: MemoryEdge[];
-  /** BARE rows dropped because no field names them any more; relation rows survive prose drift (edge-revision D1). */
-  deleted: MemoryEdge[];
-  /** References the body named that did not resolve, or that this session was never shown. */
-  rejected: RejectedReference[];
-}
-
-/**
- * Spec C6, narrowed to the BARE layer by edge-mechanism-revision D1: a bare
- * `[S<session>/T<n>]`/`[E<n>]` in ANY of a turn's citation-bearing fields is
- * a real, storable citation, and a rewrite that drops the reference drops the
- * BARE row. Relation rows are standalone claims (attachTurnRelations below)
- * and survive any prose rewrite — an ordinary note correction must never
- * silently destroy edges nobody retracted; a wrong relation dies by
- * retraction, not prose drift.
- *
- * `fields` is the turn's title/content/insight AS THEY STAND after the
- * caller's own write — `note`/`remember` pass the row a prior write in the
- * same transaction just returned, so this always rescans the true post-state
- * rather than the caller's possibly-partial input (a `remember` call that
- * only touches `content` must still see title/insight's stored text).
- *
- * References are resolved through the SAME two gates every writer-attributed
- * citation goes through (references.ts: existence, then this turn's own
- * session's exposure ledger) — a hallucinated or unshown id is dropped and
- * logged, never written. Provenance is always `text-ref` (spec C12): nothing
- * in this call carries a relation, so there is no main-agent ASSERTION to
- * record, only a bare textual reference.
- *
- * Edge-mechanism-revision D4 (ticket 02) DEMOTED what that bare row means: it
- * is a display signal (the ↳ pull-through, cited counts) and nothing else. It
- * is no longer the substrate a relation has to be "upgraded" from — a relation
- * write (`attachTurnRelations` below) neither needs a bare row to exist nor
- * consults one, so prose citation and edge declaration are two independent
- * acts on the same turn.
- */
-export function recomputeTurnCitedPairs(
-  db: Database,
-  turnId: number,
-  fields: RecomputeTurnCitedPairsFields,
-  nowEpoch: number,
-  writerSessionId: number,
-  logger?: Pick<Console, "warn">,
-): RecomputeTurnCitedPairsResult {
-  const references = [
-    ...parseQualifiedReferences(fields.title),
-    ...parseQualifiedReferences(fields.content),
-    ...parseQualifiedReferences(fields.insight),
-  ];
-
-  const { accepted, rejected } = validateReferences(db, references, {
-    writerSessionId,
-    logger,
-  });
-
-  const { written, deleted } = reconcileCitedPairs(
-    db,
-    { kind: "turn", id: turnId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref",
-  );
-
-  return { written, deleted, rejected };
-}
 
 // ---------------------------------------------------------------------------
 // Relation attach and retraction (edge-mechanism-revision D1/D3, ticket 02;
@@ -620,7 +581,21 @@ export type TurnRelationRejectionReason =
   /** Settlement-read-once ticket 00: the CITING turn would end this call over the outgoing cap. */
   | "outgoing-degree-cap"
   /** Settlement-read-once ticket 00: a CITED turn would end this call over the incoming cap. */
-  | "incoming-degree-cap";
+  | "incoming-degree-cap"
+  /**
+   * main-agent-edges D5: one pair named `correct` under BOTH coverage bits in
+   * one call. Not a precedence question — the two bits are the same
+   * specificity and contradict each other — so the call is refused rather than
+   * resolved.
+   */
+  | "coverage-conflict"
+  /**
+   * main-agent-edges D4/D5 with the T2432 P1 pin: the class supplied as a
+   * compare-and-swap precondition is not the class the pair now carries. The
+   * message names the CURRENT one, because the repair is to re-read the edge,
+   * not to re-send.
+   */
+  | "stale-class";
 
 export interface TurnRelationRejection {
   /** The CLASS the caller asked for (`correct`/`verify`/`use`), which is what its own message names back at it. */
@@ -628,6 +603,12 @@ export interface TurnRelationRejection {
   /** The token as the caller supplied it, for the message the tool layer builds. */
   raw: string;
   reason: TurnRelationRejectionReason;
+  /**
+   * `stale-class` only: what the pair actually carries now (`null` when it
+   * carries a word outside the vocabulary). The refusal's whole value is that
+   * it names this — "not `use`" tells a caller nothing it can act on.
+   */
+  currentClass?: RelationClass | null;
 }
 
 /**
@@ -730,25 +711,28 @@ export function normalizeRelationTargetEntry(
 }
 
 export interface AttachTurnRelationsResult {
-  /** The (pair, relation) rows this call actually ADDED — one per accepted, not-already-stored input. */
+  /**
+   * The logical edges this call CHANGED — one per pair it created or promoted
+   * (main-agent-edges D5). A promotion belongs here rather than beside a
+   * restatement because it is a real mutation: the citing turn owes it a
+   * relations stamp, and a reader's view of the set moved.
+   */
   written: MemoryEdge[];
   /**
-   * Accepted inputs whose (pair, relation) row was ALREADY stored, so nothing
-   * changed. Reported rather than folded into `written` because D2 makes a
-   * relation write additive and idempotent: the caller's receipt has to be
-   * able to say "added" and "already there" apart, or a model re-asserting a
-   * relation it wrote yesterday reads its own no-op as new work.
+   * Accepted inputs whose pair already carried a class at least as specific,
+   * with the same coverage — so nothing changed. Reported rather than folded
+   * into `written` because a caller's receipt has to be able to say "added"
+   * and "already there" apart, or a model re-asserting a relation it wrote
+   * yesterday reads its own no-op as new work.
    */
   restated: MemoryEdge[];
   /**
    * Non-empty means the WHOLE call is invalid, and `written`/`restated` are
-   * always empty alongside it. Unlike a bare `[S/T]` reference in prose —
-   * dropped and logged, never a reason to fail the note it arrived with — a
-   * relation field is structured caller input, not text a model might
-   * hallucinate a bracket into. A caller that gets back a malformed address
-   * or an unresolvable one gets ALL of them, to fix in one pass, rather than
-   * a write that silently applied the three relations that happened to be
-   * valid.
+   * always empty alongside it. A relation field is structured caller input,
+   * not text a model might hallucinate a bracket into. A caller that gets back
+   * a malformed address or an unresolvable one gets ALL of them, to fix in one
+   * pass, rather than a write that silently applied the three relations that
+   * happened to be valid.
    */
   rejected: TurnRelationRejection[];
 }
@@ -767,38 +751,45 @@ function resolveRelationTargetNode(
 }
 
 /**
- * `(pair, relation, tag set)` as one string — the identity D2 gave a stored
- * row, widened by rubric-v10 ticket 01/02: tags joins the row's identity, so
- * an {A} row and a {B} row on the same (pair, relation) are two DIFFERENT
- * keys, not one. `tags` defaults to `[]` (untagged) so every pre-ticket-02
- * call site (which never had a tag set to pass) keeps addressing exactly the
- * row it always did.
+ * main-agent-edges D5: THE ROW'S IDENTITY IS THE PAIR, and `pairKey` already
+ * spells a pair. The `relationRowKey` this replaced folded the relation word
+ * and both lane sides into the key — which is precisely what let one logical
+ * edge become several physical rows (109 such pairs in production), and what
+ * made a retraction's address depend on facts the retracting writer had no
+ * reason to know.
  */
-function relationRowKey(
-  citing: CitingNode,
-  cited: EdgeNode,
-  relation: CitationRelation | null,
-  sides: RelationTargetSides = { tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG },
-): string {
-  // JSON, not a joined separator: it delimits itself, and it keeps this key
-  // free of the raw control bytes a hand-rolled separator invites.
-  return `${pairKey({ citing, cited })}|${relation ?? ""}|${JSON.stringify([
-    sides.tailTag,
-    sides.headTag,
-  ])}`;
+function citedPairKey(citing: CitingNode, cited: EdgeNode): string {
+  return pairKey({ citing, cited });
 }
 
-function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
+/** The pairs this citing node already carries a CLASS on — the caps' and the dedupe's stored set. */
+function storedRelationPairs(db: Database, citing: CitingNode): Set<string> {
   return new Set(
-    getOutgoingEdges(db, citing).map((edge) =>
-      relationRowKey(citing, edge.cited, edge.relation, edge),
-    ),
+    getOutgoingEdges(db, citing)
+      .filter((edge) => edge.relation !== null)
+      .map((edge) => citedPairKey(citing, edge.cited)),
   );
 }
 
-/** Bare existence rows carry no relation word and are not atoms — D0 counts atoms. */
-function countRelationAtoms(edges: readonly MemoryEdge[]): number {
-  return edges.filter((edge) => edge.relation !== null).length;
+/**
+ * main-agent-edges D5: THE CAPS COUNT LOGICAL EDGES. A node's degree is how
+ * many distinct pairs it carries a class on, not how many rows the table
+ * happens to hold for them — a pre-cutover pair stored as three rows is one
+ * edge and must count as one, or a turn with legacy stock would find itself
+ * refused a write it is nowhere near the cap for.
+ *
+ * Wordless rows are not counted at all: they are not edges (D1).
+ */
+function countLogicalOutgoingEdges(db: Database, citing: CitingNode): number {
+  return storedRelationPairs(db, citing).size;
+}
+
+function countLogicalIncomingEdges(db: Database, cited: EdgeNode): number {
+  return new Set(
+    getIncomingEdges(db, cited)
+      .filter((edge) => edge.relation !== null)
+      .map((edge) => pairKey({ citing: edge.citing, cited })),
+  ).size;
 }
 
 /** `db/lanes.ts`'s `resolveTurnAddress`, re-stated rather than imported: that module already imports THIS one. */
@@ -825,8 +816,11 @@ function turnAddress(db: Database, turnId: number): string {
  *   - AFTER this call's retractions, which is free — both faces retract before
  *     they attach, so the rows this reads are already the post-retraction set,
  *     and "retract one, attach one" at the cap succeeds;
- *   - EXCLUDING restatements (`alreadyStored`), because re-asserting a stored
- *     atom adds nothing to any degree.
+ *   - EXCLUDING pairs the node ALREADY carries an edge on (`alreadyStored`),
+ *     because promoting a stored edge's class adds no degree to anything.
+ *     main-agent-edges D5 widened this from "excluding restatements" for
+ *     exactly that reason: a PROMOTION used to mint a second row and now does
+ *     not, so it must not be counted as one.
  *
  * The whole call is refused with zero writes — this returns before
  * `writeMemoryEdges` is reached — and every offending endpoint is named at
@@ -840,17 +834,7 @@ function checkRelationDegreeCaps(
   alreadyStored: ReadonlySet<string>,
 ): TurnRelationRejection[] {
   const additions = inputs.filter(
-    (input) =>
-      !alreadyStored.has(
-        relationRowKey(citing, input.cited, input.relation, {
-          // The same defaulting `writeMemoryEdges` applies on the way in, so
-          // an input with no side named keys identically to the row it would
-          // become — otherwise a restatement would read as an addition and
-          // the cap would refuse a call that adds nothing.
-          tailTag: input.tailTag ?? UNSETTLED_SIDE_TAG,
-          headTag: input.headTag ?? UNSETTLED_SIDE_TAG,
-        }),
-      ),
+    (input) => !alreadyStored.has(citedPairKey(citing, input.cited)),
   );
   if (additions.length === 0) {
     return [];
@@ -861,7 +845,7 @@ function checkRelationDegreeCaps(
     (input.relationClass || "use") as RelationClass;
 
   if (citing.kind === "turn") {
-    const stored = countRelationAtoms(getOutgoingEdges(db, citing));
+    const stored = countLogicalOutgoingEdges(db, citing);
     if (stored + additions.length > MAX_TURN_RELATION_DEGREE) {
       rejections.push({
         relation: classOf(additions[0]!),
@@ -884,9 +868,7 @@ function checkRelationDegreeCaps(
     }
   }
   for (const [citedId, added] of addedPerCited) {
-    const stored = countRelationAtoms(
-      getIncomingEdges(db, { kind: "turn", id: citedId }),
-    );
+    const stored = countLogicalIncomingEdges(db, { kind: "turn", id: citedId });
     if (stored + added.length > MAX_TURN_RELATION_DEGREE) {
       rejections.push({
         relation: classOf(added[0]!),
@@ -897,6 +879,17 @@ function checkRelationDegreeCaps(
   }
 
   return rejections;
+}
+
+/** One pair's resolved claim for THIS call, before anything is written. */
+interface ResolvedPairClaim {
+  cited: EdgeNode;
+  relationClass: RelationClass;
+  coverage: RelationCoverageValue;
+  tailTag: string;
+  headTag: string;
+  /** The address the caller used for this pair — what a refusal names back at it. */
+  raw: string;
 }
 
 /**
@@ -910,19 +903,29 @@ function checkRelationDegreeCaps(
  * layer up, at the tool surface — the phase pair is legal and the citing
  * turn's write gate admits the writer.
  *
+ * MAIN-AGENT-EDGES D5 — PRECEDENCE, WITHIN THE CALL AND ACROSS CALLS:
+ *
+ *   - SEVERAL CLASSES ON ONE PAIR IN ONE CALL collapse to the MOST SPECIFIC
+ *     (`correct` > `verify` > `use`). One pair carries one claim, and a call
+ *     that names the same target under two classes has stated the weaker one
+ *     redundantly, not asked for two edges.
+ *   - `correct(full)` AND `correct(partial)` ON ONE PAIR IN ONE CALL REFUSE
+ *     THE WHOLE CALL, naming the pair. The two bits are the same specificity
+ *     and contradict each other outright — one says no substantial part of the
+ *     cited result may still serve as a premise, the other that a definite
+ *     part still may — so there is no "most specific" to pick and picking one
+ *     silently would store a judgment nobody made.
+ *   - ACROSS CALLS the storage primitive decides (`writeMemoryEdges`): a
+ *     stronger class or a coverage change promotes the stored row IN PLACE, a
+ *     weaker one is a no-op, and neither can produce a second row.
+ *
  * Provenance (spec C12) says WHICH writer filed the claim, and is the only
  * thing that differs between the two callers: `asserted` — the default — is
  * the main agent's own classification, `judged` is settlement's hindsight
- * attribution (ticket 04 routes the settlement facade through this same
- * function rather than a second copy of it), and both are distinct from a bare
- * textual reference (`text-ref`, what `recomputeTurnCitedPairs` writes for the
- * pairs a body happens to name). Nothing downstream RANKS the two — a
- * settlement relation is not weaker than an agent one ([S15069/T1124]: both
- * writers hold the same power) — it is an audit fact about origin.
- *
- * Eligibility is this function's own checks and nothing else: after D1 there IS
- * no pre-existing-pair premise left to state, and ticket 04 deleted the
- * parameter that used to carry one into `writeMemoryEdges`.
+ * attribution, and it is PRESERVED across a promotion: the row records who
+ * first filed the claim, not who last sharpened it. Nothing downstream RANKS
+ * the two ([S15069/T1124]: both writers hold the same power) — it is an audit
+ * fact about origin.
  */
 export function attachTurnRelations(
   db: Database,
@@ -934,8 +937,7 @@ export function attachTurnRelations(
   const citing: CitingNode = { kind: "turn", id: citingTurnId };
 
   const rejected: TurnRelationRejection[] = [];
-  const inputs: WriteEdgeInput[] = [];
-  const claimed = new Set<string>();
+  const claims = new Map<string, ResolvedPairClaim>();
 
   for (const field of fields) {
     for (const entry of field.targets) {
@@ -957,10 +959,7 @@ export function attachTurnRelations(
       }
       // lane-model-v12 D2 (ticket 04): word-blind and phase-blind — NO
       // relation may cite the citing turn itself (see
-      // `TurnRelationRejectionReason`'s doc comment above). `grounds` used to
-      // be carved out here and admitted unconditionally, on the trust that a
-      // post-write gate would judge its terminus condition; that gate and the
-      // condition are both deleted, so the carve-out goes with them.
+      // `TurnRelationRejectionReason`'s doc comment above).
       if (node.kind === "turn" && node.id === citingTurnId) {
         rejected.push({ relation: field.relationClass, raw, reason: "self-edge" });
         continue;
@@ -977,43 +976,76 @@ export function attachTurnRelations(
         });
         continue;
       }
-      // relation-vocabulary-v13 ticket 02, THE INTERIM EQUIVALENCE'S ONE CALL
-      // SITE (ticket 05a deletes it): the class plus its bit resolves to the
-      // seven-word value the `relation` column carries, so the table's CHECK,
-      // the row identity key and every reader still keyed on those words see a
-      // new edge exactly as they saw its old-vocabulary counterpart. The class
-      // and the bit are ALSO stored, in their own columns, and they are what
-      // any reader asking "which class is this" reads.
-      const relation = interimLegacyRelation(field.relationClass, coverage);
-      // lane-model-v12 ticket 08: the two SIDES join the de-dup key — the same
-      // (pair, relation) under two DIFFERENT side pairs is two independent
-      // claims (D2's own multi-row identity), not a repeat of one.
-      const key = relationRowKey(citing, node, relation, { tailTag, headTag });
-      // The same claim twice in one call is one claim. Two DIFFERENT relations
-      // (or two different lane placements of the same relation) on the same
-      // pair are two claims and both land (D2).
-      if (claimed.has(key)) {
+
+      const key = citedPairKey(citing, node);
+      const held = claims.get(key);
+      if (held === undefined) {
+        claims.set(key, {
+          cited: node,
+          relationClass: field.relationClass,
+          coverage,
+          tailTag,
+          headTag,
+          raw,
+        });
         continue;
       }
-      claimed.add(key);
-      inputs.push({
-        citing,
-        cited: node,
-        relation,
-        provenance,
-        tailTag,
-        headTag,
-        relationClass: field.relationClass,
-        relationCoverage: coverage,
-      });
+      // D5's contradiction: the same pair asserted both fully and partially
+      // corrected in one call. Refused by NAME on the pair, and refused for
+      // the WHOLE call — a caller that meant one of them can say which.
+      if (
+        held.relationClass === "correct" &&
+        field.relationClass === "correct" &&
+        held.coverage !== coverage
+      ) {
+        rejected.push({
+          relation: field.relationClass,
+          raw,
+          reason: "coverage-conflict",
+        });
+        continue;
+      }
+      // D5's within-call collapse: the most specific wins, and the weaker
+      // statement of the same pair is simply absorbed. Side placements follow
+      // the class that won, so a caller cannot smuggle a second placement in
+      // under a weaker word.
+      if (
+        RELATION_CLASS_SPECIFICITY[field.relationClass] >
+        RELATION_CLASS_SPECIFICITY[held.relationClass]
+      ) {
+        claims.set(key, {
+          cited: node,
+          relationClass: field.relationClass,
+          coverage,
+          tailTag,
+          headTag,
+          raw,
+        });
+      }
     }
   }
 
-  if (rejected.length > 0 || inputs.length === 0) {
+  if (rejected.length > 0 || claims.size === 0) {
     return { written: [], restated: [], rejected };
   }
 
-  const alreadyStored = storedRelationRowKeys(db, citing);
+  const inputs: WriteEdgeInput[] = [...claims.values()].map((claim) => ({
+    citing,
+    cited: claim.cited,
+    // relation-vocabulary-v13 ticket 02, THE INTERIM EQUIVALENCE'S ONE CALL
+    // SITE (main-agent-edges ticket 02 deletes it with the column): the class
+    // plus its bit resolves to the seven-word value the `relation` column
+    // carries, so the table's CHECK and every reader still keyed on those
+    // words see a new edge exactly as they saw its old-vocabulary counterpart.
+    relation: interimLegacyRelation(claim.relationClass, claim.coverage),
+    provenance,
+    tailTag: claim.tailTag,
+    headTag: claim.headTag,
+    relationClass: claim.relationClass,
+    relationCoverage: claim.coverage,
+  }));
+
+  const alreadyStored = storedRelationPairs(db, citing);
 
   // Settlement-read-once ticket 00 (spec D0): the degree caps, checked HERE —
   // after the dedupe above and before the first row is written, so a refusal
@@ -1023,274 +1055,444 @@ export function attachTurnRelations(
     return { written: [], restated: [], rejected: overCap };
   }
 
-  // [S15069/T1728]: `rejected`, not just `written`. This destructure used to
-  // take the written rows alone and return `rejected: []` unconditionally,
-  // which was harmless only because every rejection the storage layer can
-  // raise was already caught above — until D10 added one that was not. A write
-  // that lands nothing and reports nothing is the exact silent-drop shape this
-  // codebase keeps paying for; anything reaching here is a bypassed pre-check,
-  // and it is surfaced rather than swallowed.
-  const { written, rejected: storageRejected } = writeMemoryEdges(db, inputs, nowEpoch);
+  // [S15069/T1728]: `rejected`, not just `written`. A write that lands nothing
+  // and reports nothing is the exact silent-drop shape this codebase keeps
+  // paying for; anything reaching here is a bypassed pre-check, and it is
+  // surfaced rather than swallowed.
+  const {
+    written,
+    promoted,
+    rejected: storageRejected,
+  } = writeMemoryEdges(db, inputs, nowEpoch);
   if (storageRejected.length > 0) {
     return {
       written: [],
       restated: [],
-      // Every `inputs` entry carries a relation by construction — this
-      // function only ever builds relation rows — so the narrowing is a fact
-      // about the caller, not a guess.
-      rejected: storageRejected
-        .filter((entry) => entry.input.relation !== null)
-        .map((entry) => ({
-          // The CLASS the caller asked for, not the interim storage word it
-          // resolved to: the message goes back to a writer that has never been
-          // taught the seven words.
-          relation: (entry.input.relationClass || "use") as RelationClass,
-          raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
-          reason: "segment-not-a-relation-node" as const,
-        })),
+      rejected: storageRejected.map((entry) => ({
+        // The CLASS the caller asked for, not the interim storage word it
+        // resolved to: the message goes back to a writer that has never been
+        // taught the seven words.
+        relation: (entry.input.relationClass || "use") as RelationClass,
+        raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
+        reason: "segment-not-a-relation-node" as const,
+      })),
     };
   }
 
+  // main-agent-edges D5: CHANGED versus UNCHANGED, decided on what the storage
+  // primitive actually did. A pair the call created is new; one it promoted is
+  // changed; one it found already at least as specific is a restatement, and
+  // owes no stamp.
+  const promotedIds = new Set(promoted.map((edge) => edge.id));
   const added: MemoryEdge[] = [];
   const restated: MemoryEdge[] = [];
   for (const edge of written) {
-    const key = relationRowKey(citing, edge.cited, edge.relation, edge);
-    (alreadyStored.has(key) ? restated : added).push(edge);
+    const isNew = !alreadyStored.has(citedPairKey(citing, edge.cited));
+    (isNew || promotedIds.has(edge.id) ? added : restated).push(edge);
   }
   return { written: added, restated, rejected: [] };
 }
 
 export interface RetractTurnRelationsResult {
   deleted: MemoryEdge[];
-  /**
-   * Ticket 10: BARE rows put back because the retraction emptied a pair the
-   * citing node's prose still names. Reported separately from `deleted` — a
-   * receipt has to be able to say "the classification is gone but the citation
-   * stands", which is a different fact from either "removed" or "nothing
-   * happened".
-   */
-  restored: MemoryEdge[];
   /** Same all-or-nothing contract as the attach path: non-empty means nothing was deleted. */
   rejected: TurnRelationRejection[];
 }
 
-/** The citing node's citation-bearing text, as it stands at retraction time. */
-type CitingBodyFields = RecomputeTurnCitedPairsFields;
-
 /**
- * Ticket 10 (peer 终审必改 3): a retraction must not make a citation the prose
- * still asserts DISAPPEAR.
- *
- * Three separately-correct rules compose into one wrong outcome: a relation
- * write REPLACES the pair's bare row (D2 — one fact, one row); a retraction
- * HARD-DELETES the addressed row and refuses to downgrade it to a bare one
- * (D3 — a retraction claims nothing); and the bare layer is only re-derived
- * when prose is REWRITTEN (`recomputeTurnCitedPairs`, which in `mcp/note.ts`
- * runs under `touchedProse` and, in both live callers, BEFORE the retraction
- * anyway). So classifying a citation and then retracting the classification
- * left the pair with no row at all, and the `↳` pull-through and the cited
- * counts silently lost a target the body still names.
- *
- * The repair is at the retraction path rather than in the primitive: only here
- * is it known that a pair was emptied BY a retraction, and only here is the
- * citing node's body in reach. Rules unchanged: the bare row stays the pair's
- * existence record OF LAST RESORT — it is put back only for a pair that now
- * holds NO row, so a pair keeping another relation gains nothing, and bare and
- * relation rows still never coexist (ticket 01's one-fact-one-row de-dup, which
- * "keep both permanently" would have reversed at the cost of doubling every
- * reader's row count).
- *
- * `fields` is the citing node's body, so this is kind-agnostic on purpose: a
- * future segment- or session-citing retraction facade passes ITS OWN
- * title/content/insight here and gets the same treatment, and a bodyless
- * citing construct (a mechanical anchor) passes nulls and restores nothing —
- * there is no prose to re-assert the citation.
- *
- * Provenance is `text-ref` (spec C12): what is being recorded is that the body
- * names the target, which is exactly what a bare textual reference means. It
- * is NOT the retracted row's provenance — the writer's assertion is what was
- * just withdrawn.
- *
- * EXPORTED for a SECOND caller (container-unification ticket 07, spec D5b):
- * `clearLane` (db/lanes.ts) is a new bulk retraction path — it deletes every
- * edge row a lane's own tag resolves to on either side — and would
- * reintroduce this exact defect if it hard-deleted without this repair. It
- * calls this same function once per citing node among the pairs its own
- * bulk delete just emptied, `readTurnBodyFields` (below) supplying the same
- * `fields` shape this module's own caller reads.
+ * One retraction field's raw targets. Separate from `TurnRelationFieldInput`
+ * because of the T2432 P1 pin: on the ASSERT side a class is what is being
+ * asserted and is mandatory; on the RETRACT side it is an optional
+ * COMPARE-AND-SWAP PRECONDITION on the pair's current class, and `null` means
+ * "remove the edge, whatever it now says".
  */
-export function restoreBareRowsForEmptiedPairs(
-  db: Database,
-  citing: CitingNode,
-  emptiedCandidates: readonly EdgeNode[],
-  fields: CitingBodyFields,
-  nowEpoch: number,
-): MemoryEdge[] {
-  if (emptiedCandidates.length === 0) {
-    return [];
-  }
-
-  const surviving = new Set(
-    getOutgoingEdges(db, citing).map((edge) => `${edge.cited.kind}:${edge.cited.id}`),
-  );
-  const emptied = new Map<string, EdgeNode>();
-  for (const node of emptiedCandidates) {
-    const key = `${node.kind}:${node.id}`;
-    if (!surviving.has(key)) {
-      emptied.set(key, node);
-    }
-  }
-  if (emptied.size === 0) {
-    return [];
-  }
-
-  // The body is RE-read, not diffed: the same whole-node rescan
-  // `reconcileCitedPairs` does, over the same three fields.
-  //
-  // Rejections are swallowed rather than logged. This rescan re-derives a body
-  // that was already validated (and its illegal references already reported)
-  // by the write that stored it; re-announcing them on an unrelated retraction
-  // would be noise attributed to the wrong act. No exposure-ledger gate exists
-  // any more (references.ts), so resolution here is exactly "does the address
-  // name a row".
-  const { accepted } = validateReferences(
-    db,
-    [
-      ...parseQualifiedReferences(fields.title),
-      ...parseQualifiedReferences(fields.content),
-      ...parseQualifiedReferences(fields.insight),
-    ],
-    { logger: { warn: () => {} } },
-  );
-
-  const inputs: WriteEdgeInput[] = [];
-  const claimed = new Set<string>();
-  for (const entry of accepted) {
-    const key = `${entry.node.kind}:${entry.node.id}`;
-    const node = emptied.get(key);
-    if (node === undefined || claimed.has(key)) {
-      continue;
-    }
-    claimed.add(key);
-    inputs.push({ citing, cited: node, relation: null, provenance: "text-ref" });
-  }
-  if (inputs.length === 0) {
-    return [];
-  }
-
-  return writeMemoryEdges(db, inputs, nowEpoch).written;
-}
-
-/** The turn's citation-bearing fields as stored — the text a restore rescans. */
-export function readTurnBodyFields(db: Database, turnId: number): CitingBodyFields {
-  return (
-    db
-      .query<CitingBodyFields, [number]>(
-        "SELECT title, content, insight FROM turns WHERE id = ?",
-      )
-      .get(turnId) ?? { title: null, content: null, insight: null }
-  );
+export interface TurnRetractionFieldInput {
+  /**
+   * The class the caller believes the pair carries, or `null` for no check.
+   * The three `retract…` parameters supply their own class; a caller that
+   * holds the pair and not the class (ticket 04's closure paths) passes
+   * `null`.
+   */
+  relationClass: RelationClass | null;
+  targets: readonly RelationTargetEntry[];
 }
 
 /**
- * Edge-mechanism-revision D3 (ticket 02): remove one turn's relation,
- * addressed by (pair, relation) — the corrective half of D2's additive write.
- * A relation is never overwritten, so a wrong one is retracted and the right
- * one written: two auditable acts instead of a silent replacement. Both
- * writers have the same power here ([S15069/T1124]) — the main agent may
+ * Edge-mechanism-revision D3, re-addressed by main-agent-edges D4/D5 and the
+ * T2432 P1 pin: remove one turn's logical edge, addressed by the PAIR, with
+ * the class as an OPTIONAL compare-and-swap precondition.
+ *
+ * WHAT THE PIN CHANGES, and why it is not a loosening. The address used to be
+ * (pair, class, tail, head): the class resolved through
+ * `LEGACY_RELATIONS_BY_CLASS` to every storage word that means it, and the two
+ * sides had to match the row's stored placement exactly. Under one-pair-one-
+ * row there is one edge to remove and the pair names it, so the sides drop out
+ * of the address entirely — a retraction no longer fails because somebody else
+ * declared a lane on the edge since. The class stays, as a PRECONDITION rather
+ * than a selector:
+ *
+ *   - supplied and MATCHING the pair's materialized class -> the edge goes;
+ *   - supplied and NOT matching -> the whole call is refused, `stale-class`,
+ *     naming what the pair now carries. This is the case that matters: an edge
+ *     the caller last saw as `use` and another writer has since PROMOTED to
+ *     `correct` is a different claim, and deleting it on the strength of a
+ *     stale read is exactly the silent loss the write gate exists to stop;
+ *   - omitted (`null`) -> no check, the pair's edge goes whatever it says.
+ *
+ * COVERAGE IS NOT PART OF THE PRECONDITION. `retractCorrect` removes the
+ * pair's correct edge whichever bit it carries: the bit says what KIND of
+ * correction was asserted, and withdrawing an assertion does not need to
+ * restate it.
+ *
+ * Existence and the precondition are both checked BEFORE anything is deleted,
+ * so a call naming one live edge and one that was never there deletes neither
+ * and reports the second by name (`no-such-edge`). A caller told only
+ * "0 deleted" cannot tell "already gone" from "wrong address", and a model
+ * given that answer guesses.
+ *
+ * Both writers have the same power here ([S15069/T1124]) — the main agent may
  * retract what settlement judged and vice versa, because a false assertion
  * must not outlive its refutation on account of who filed it.
  *
- * Existence is checked BEFORE anything is deleted, so a call naming one live
- * relation and one that was never there deletes neither and reports the
- * second by name (`no-such-edge`). A caller told only "0 deleted" cannot tell
- * "already gone" from "wrong address", and a model given that answer guesses.
- *
- * Retracting a pair's last relation leaves the pair with NO row from the
- * primitive's point of view — it is never DOWNGRADED to a bare row, because a
- * retraction claims nothing about whether the citation still exists. What
- * decides that is the citing turn's own prose, which this function re-reads
- * for exactly the emptied pairs (ticket 10, `restoreBareRowsForEmptiedPairs`):
- * a body that still names the target gets its bare row back under provenance
- * `text-ref`, and a body that does not leaves the pair gone. The old
- * behaviour — wait for the next prose rewrite — meant a retraction-only call
- * (which never recomputes) silently dropped a citation the body asserts.
- *
- * `nowEpoch` stamps any such restored row and is optional only because both
- * live callers predate it; it is the ordinary injected clock everywhere else.
+ * NOTHING IS RESTORED BEHIND A RETRACTION any more. The bare row a retraction
+ * used to put back for a pair the prose still names is retired with the whole
+ * wordless population (main-agent-edges D1): the prose still names the target,
+ * and `getEffectiveCitations` still reads the prose.
  */
 export function retractTurnRelations(
   db: Database,
   citingTurnId: number,
-  fields: readonly TurnRelationFieldInput[],
+  fields: readonly TurnRetractionFieldInput[],
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): RetractTurnRelationsResult {
+  void nowEpoch;
   const citing: CitingNode = { kind: "turn", id: citingTurnId };
 
   const rejected: TurnRelationRejection[] = [];
   const targets: RetractEdgeInput[] = [];
   const addressed = new Set<string>();
-  const stored = storedRelationRowKeys(db, citing);
 
-  for (const field of fields) {
-    for (const entry of field.targets) {
-      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
-      const node = resolveRelationTargetNode(db, raw);
-      if (typeof node === "string") {
-        rejected.push({ relation: field.relationClass, raw, reason: node });
-        continue;
-      }
-      // RELATION-VOCABULARY-V13 TICKET 02: A RETRACTION ADDRESSES A CLASS, AND
-      // A CLASS RESOLVES TO EVERY STORED WORD THAT MEANS IT.
-      //
-      // Two things depend on this and neither is optional. (1) `correct` is one
-      // class stored under two words (`override` for FULL, `narrows` for
-      // PARTIAL), so a mirror that resolved to one of them could not withdraw
-      // an assertion made under the other. (2) `use` absorbs four words, three
-      // of which no write surface offers any more — and a stored row with no
-      // deletion path is the E2 DEADLOCK (`RETRACTION_ONLY_RELATIONS` above
-      // carries the full history: a window owning such a row can never commit).
-      // Resolving through the class is what keeps every legacy row deletable
-      // through three mirrors.
-      //
-      // lane-model-v12 ticket 08: a bare address retracts the UNSETTLED row, a
-      // two-sided one retracts exactly that placement — the same
-      // (pair, relation, tail, head) key `attachTurnRelations` writes under, so
-      // a retraction removes exactly the rows a matching write would have
-      // restated.
-      const matching = LEGACY_RELATIONS_BY_CLASS[field.relationClass]
-        .map(
-          (relation) =>
-            [relation, relationRowKey(citing, node, relation, { tailTag, headTag })] as const,
-        )
-        .filter(([, key]) => stored.has(key));
-      if (matching.length === 0) {
-        rejected.push({ relation: field.relationClass, raw, reason: "no-such-edge" });
-        continue;
-      }
-      for (const [relation, key] of matching) {
-        if (addressed.has(key)) {
-          continue;
-        }
-        addressed.add(key);
-        targets.push({ citing, cited: node, relation, tailTag, headTag });
+  const stored = new Map<string, MemoryEdge>();
+  for (const edge of getOutgoingEdges(db, citing)) {
+    if (edge.relation === null) {
+      continue;
+    }
+    const key = citedPairKey(citing, edge.cited);
+    const held = stored.get(key);
+    // The same "which row IS the edge" rule the write path uses, so a legacy
+    // multi-row pair answers one question here rather than several.
+    if (held === undefined) {
+      stored.set(key, edge);
+    } else {
+      const winner = selectLogicalEdgeRow([held, edge]);
+      if (winner) {
+        stored.set(key, winner);
       }
     }
   }
 
+  for (const field of fields) {
+    for (const entry of field.targets) {
+      const { raw } = normalizeRelationTargetEntry(entry);
+      const node = resolveRelationTargetNode(db, raw);
+      if (typeof node === "string") {
+        rejected.push({
+          relation: field.relationClass ?? "use",
+          raw,
+          reason: node,
+        });
+        continue;
+      }
+      const key = citedPairKey(citing, node);
+      const edge = stored.get(key);
+      if (edge === undefined) {
+        rejected.push({
+          relation: field.relationClass ?? "use",
+          raw,
+          reason: "no-such-edge",
+        });
+        continue;
+      }
+      if (field.relationClass !== null) {
+        // The CAS. Read through `edgeRelationClass` so a row stored under one
+        // of the seven words answers the same question a v13 row does.
+        const current = edgeRelationClass(edge);
+        if (current === null || current.relationClass !== field.relationClass) {
+          rejected.push({
+            relation: field.relationClass,
+            raw,
+            reason: "stale-class",
+            currentClass: current?.relationClass ?? null,
+          });
+          continue;
+        }
+      }
+      if (addressed.has(key)) {
+        continue;
+      }
+      addressed.add(key);
+      targets.push({ citing, cited: node });
+    }
+  }
+
   if (rejected.length > 0 || targets.length === 0) {
-    return { deleted: [], restored: [], rejected };
+    return { deleted: [], rejected };
   }
 
   const { deleted } = retractMemoryEdges(db, targets);
-  const restored = restoreBareRowsForEmptiedPairs(
-    db,
-    citing,
-    deleted.map((edge) => edge.cited),
-    readTurnBodyFields(db, citingTurnId),
-    nowEpoch,
+  return { deleted, rejected: [] };
+}
+
+/**
+ * main-agent-edges D4: DECLARE A LANE SIDE ON THE EDGE THAT IS ALREADY THERE.
+ *
+ * A stored side tag means exactly one thing — "this endpoint is in several
+ * lanes and THIS is the one" — so declaring is not a write of a new fact
+ * beside the edge, it is a patch of the edge itself: same row id, same class
+ * and coverage, same provenance, same creation time. Everything a reader has
+ * already cited about this edge stays true; only the attribution moves.
+ *
+ * ADDRESS (T2432 P1): the PAIR, with `relationClass` as an OPTIONAL
+ * compare-and-swap precondition — supplied and not matching refuses by name
+ * with what the pair now carries, omitted checks nothing. Same contract as
+ * `retractTurnRelations` above, for the same reason: a declaration made on a
+ * stale reading of the class is a declaration about an edge that no longer
+ * exists as read.
+ *
+ * PATCH, THREE STATES PER SIDE:
+ *
+ *   - OMITTED (`undefined`) -> that side is not touched. This is what makes
+ *     the call a patch and not a replacement: settlement declaring the head
+ *     must not silently clear a tail somebody else declared.
+ *   - A STRING -> set, after two checks against the endpoint's OWN current
+ *     lane facts: the tag must be among that endpoint's lane tags in its task
+ *     (else `invalid-declaration`), and the endpoint must be in AT LEAST TWO
+ *     lanes (else `derivable`, named as such — a declaration on a uniquely
+ *     laned endpoint is exactly the redundant stock the cutover clears, and
+ *     re-admitting it here would refill what D9 just emptied).
+ *   - EXPLICIT `null` -> cleared to `''`. The endpoint's lane set decides the
+ *     side from then on.
+ *
+ * SIDE EFFECTS, ALL IN THE CALLER'S TRANSACTION: the side index
+ * (`memory_edge_side_tags`) is rewritten for the sides that changed; the
+ * citing turn's relations revision is stamped ONCE for the whole call, and
+ * only when something actually changed; and the OLD and NEW qualified lanes of
+ * every changed side come back as `touches` for the caller's own ledger — both
+ * of them, because moving a declaration from `#alpha` to `#beta` leaves
+ * `#alpha` owed exactly as much as it commits `#beta`.
+ *
+ * A call that changes nothing (both sides omitted, or every patch already the
+ * stored value) succeeds, reports `changed: false`, and stamps nothing.
+ */
+export type EdgeSidePatch = string | null | undefined;
+
+export interface DeclareEdgeSidesInput {
+  citingTurnId: number;
+  citedTurnId: number;
+  /** The T2432 P1 CAS precondition; omitted or `null` checks nothing. */
+  relationClass?: RelationClass | null;
+  tailTag?: EdgeSidePatch;
+  headTag?: EdgeSidePatch;
+}
+
+export type DeclareEdgeSidesRefusal =
+  | { reason: "no-such-edge" }
+  | { reason: "stale-class"; currentClass: RelationClass | null }
+  | { reason: "invalid-declaration"; side: EdgeSide; tag: string; endpoint: string }
+  | { reason: "derivable"; side: EdgeSide; tag: string; endpoint: string };
+
+export interface DeclareEdgeSidesResult {
+  ok: boolean;
+  /** The row as it now stands — absent only when the call was refused. */
+  edge?: MemoryEdge;
+  /** Did this call actually mutate the row? A no-op patch is a success that stamped nothing. */
+  changed: boolean;
+  /** Old and new qualified lanes of every side this call moved, for the caller's touch ledger. */
+  touches: Array<{ turnId: number; tag: string }>;
+  refusal?: DeclareEdgeSidesRefusal;
+  /** The refusal in one sentence, ready for a tool receipt. */
+  message?: string;
+}
+
+/** One endpoint's lane facts: the lane tags it carries in its own task. */
+function endpointLaneTags(db: Database, turnId: number): Set<string> {
+  const row = db
+    .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
+    .get(turnId);
+  let tags: unknown;
+  try {
+    tags = row?.tags == null ? [] : JSON.parse(row.tags);
+  } catch {
+    tags = [];
+  }
+  const own = Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+  const segmentTags = loadSegmentTagIndex(db);
+  let segmentId: number | null = null;
+  for (const tag of own) {
+    const owner = segmentTags.get(tag);
+    if (owner !== undefined) {
+      segmentId = owner;
+      break;
+    }
+  }
+  if (segmentId === null) {
+    return new Set<string>();
+  }
+  const declared = loadDeclaredLaneTags(db, segmentId);
+  return new Set(own.filter((tag) => declared.has(tag)));
+}
+
+export function declareEdgeSides(
+  db: Database,
+  input: DeclareEdgeSidesInput,
+  writer: string | null,
+  nowEpoch: number,
+): DeclareEdgeSidesResult {
+  const citing: CitingNode = { kind: "turn", id: input.citingTurnId };
+  const cited: EdgeNode = { kind: "turn", id: input.citedTurnId };
+  const key = citedPairKey(citing, cited);
+
+  const edge = selectLogicalEdgeRow(
+    getOutgoingEdges(db, citing).filter(
+      (row) => citedPairKey(citing, row.cited) === key,
+    ),
   );
-  return { deleted, restored, rejected: [] };
+  if (edge === null) {
+    return {
+      ok: false,
+      changed: false,
+      touches: [],
+      refusal: { reason: "no-such-edge" },
+      message:
+        `${turnAddress(db, input.citingTurnId)} carries no edge to ` +
+        `${turnAddress(db, input.citedTurnId)} — there is nothing to declare a side on.`,
+    };
+  }
+
+  const current = edgeRelationClass(edge);
+  if (
+    input.relationClass !== undefined &&
+    input.relationClass !== null &&
+    (current === null || current.relationClass !== input.relationClass)
+  ) {
+    return {
+      ok: false,
+      changed: false,
+      touches: [],
+      refusal: { reason: "stale-class", currentClass: current?.relationClass ?? null },
+      message:
+        `stale: the pair is now ` +
+        `${current === null ? "unclassified" : `\`${current.relationClass}\``}, ` +
+        `not \`${input.relationClass}\` — read the edge again before declaring a side on it.`,
+    };
+  }
+
+  const patches: Array<{
+    side: EdgeSide;
+    patch: EdgeSidePatch;
+    endpointTurnId: number;
+    storedTag: string;
+  }> = [
+    {
+      side: "tail",
+      patch: input.tailTag,
+      endpointTurnId: input.citingTurnId,
+      storedTag: edge.tailTag,
+    },
+    {
+      side: "head",
+      patch: input.headTag,
+      endpointTurnId: input.citedTurnId,
+      storedTag: edge.headTag,
+    },
+  ];
+
+  const applied: Array<{ side: EdgeSide; endpointTurnId: number; from: string; to: string }> = [];
+  for (const entry of patches) {
+    if (entry.patch === undefined) {
+      continue;
+    }
+    const next = entry.patch ?? UNSETTLED_SIDE_TAG;
+    if (next !== UNSETTLED_SIDE_TAG) {
+      const lanes = endpointLaneTags(db, entry.endpointTurnId);
+      if (!lanes.has(next)) {
+        return {
+          ok: false,
+          changed: false,
+          touches: [],
+          refusal: {
+            reason: "invalid-declaration",
+            side: entry.side,
+            tag: next,
+            endpoint: turnAddress(db, entry.endpointTurnId),
+          },
+          message:
+            `${entry.side} "${next}" is not one of ` +
+            `${turnAddress(db, entry.endpointTurnId)}'s own lane tags in its task — a declaration ` +
+            `names a lane that endpoint is actually in.`,
+        };
+      }
+      if (lanes.size < 2) {
+        return {
+          ok: false,
+          changed: false,
+          touches: [],
+          refusal: {
+            reason: "derivable",
+            side: entry.side,
+            tag: next,
+            endpoint: turnAddress(db, entry.endpointTurnId),
+          },
+          message:
+            `${turnAddress(db, entry.endpointTurnId)} is in exactly one lane, so its ${entry.side} ` +
+            `side is derivable; no declaration needed. A stored side means "this endpoint is in ` +
+            `several lanes and this is the one".`,
+        };
+      }
+    }
+    if (next !== entry.storedTag) {
+      applied.push({
+        side: entry.side,
+        endpointTurnId: entry.endpointTurnId,
+        from: entry.storedTag,
+        to: next,
+      });
+    }
+  }
+
+  if (applied.length === 0) {
+    return { ok: true, edge, changed: false, touches: [] };
+  }
+
+  const nextTail =
+    applied.find((entry) => entry.side === "tail")?.to ?? edge.tailTag;
+  const nextHead =
+    applied.find((entry) => entry.side === "head")?.to ?? edge.headTag;
+
+  // IN PLACE (D4), through the storage layer's own primitive: `relation`,
+  // `relation_class`, `relation_coverage`, `provenance` and
+  // `created_at_epoch` are not among the columns it assigns, and that absence
+  // is the contract. It rewrites the side index for the sides that moved.
+  const updated = updateEdgeSides(db, edge.id, { tailTag: nextTail, headTag: nextHead });
+
+  const touches: Array<{ turnId: number; tag: string }> = [];
+  for (const entry of applied) {
+    // BOTH lanes: the one the side is leaving is owed a look exactly as much
+    // as the one it is joining.
+    for (const tag of [entry.from, entry.to]) {
+      touches.push({ turnId: entry.endpointTurnId, tag });
+    }
+  }
+
+  // ONE stamp for the whole call (D4), and only because something changed.
+  stampTurnRelationsRevision(db, input.citingTurnId, writer, nowEpoch);
+
+  return {
+    ok: true,
+    edge: updated ?? edge,
+    changed: true,
+    touches,
+  };
 }
 
 /**

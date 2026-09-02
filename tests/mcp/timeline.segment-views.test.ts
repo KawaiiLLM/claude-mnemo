@@ -172,21 +172,18 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       writeMemoryEdges(
         db,
         [
-          // `grounds` is what the election reads for the `↳` address
-          // (milestone-election spec, ticket 03). The second row used to be
-          // `supersedes`, the word the ⚑ corrector flag read; lane-model-v12
-          // ticket 03 retired both the word and the flag, so `override` — the
-          // word it merged into — stands in its place and marks nothing.
+          // ONE row, because main-agent-edges D5 admits no more than one per
+          // pair: this fixture used to write `override` and `grounds` onto
+          // (T2, T1) so the `↳` would name two words, and the second write is
+          // now a no-op on the `correct` the first one stores. The word that
+          // survives is the one that matters here — `override` used to be
+          // `supersedes`, which is what the ⚑ corrector flag read; lane-model-v12
+          // ticket 03 retired both the word and the flag, so what stands in the
+          // stored row marks nothing.
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
             relation: "override",
-            provenance: "judged",
-          },
-          {
-            citing: { kind: "turn", id: t2 },
-            cited: { kind: "turn", id: t1 },
-            relation: "grounds",
             provenance: "judged",
           },
         ],
@@ -203,7 +200,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).not.toContain("user prompt text");
       // `↳` carries antecedent ADDRESSES now (spec 金样例 `↳ T811, T812`) —
       // never a `+N 前件` count, and never a titled sub-row.
-      expect(output).toContain("            ↳ -grounds,override-> T1");
+      expect(output).toContain("            ↳ -override-> T1");
       expect(output).not.toContain("前件");
 
       // No flag either: `⚑` marked an outgoing `supersedes`, a word that no
