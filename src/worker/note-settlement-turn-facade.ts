@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  retiredRelationFieldRefusal,
+  type RelationClass,
+} from "../shared/relation-class";
 import type { Database } from "bun:sqlite";
 
 import {
@@ -10,7 +14,6 @@ import {
   retractTurnRelations,
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
-  type CitationRelation,
   type RelationTargetEntry,
   type TurnRelationFieldInput,
 } from "../db/citations";
@@ -425,16 +428,16 @@ type ProseField = (typeof PROSE_FIELDS)[number];
  * write surface left, and the schema is always in front of it.
  */
 function collectRelationFields(
-  entries: ReadonlyArray<readonly [key: string, relation: CitationRelation]>,
+  entries: ReadonlyArray<readonly [key: string, relationClass: RelationClass]>,
   rawInput: SettlementTurnWriteInput,
 ): TurnRelationFieldInput[] {
   const fields: TurnRelationFieldInput[] = [];
-  for (const [key, relation] of entries) {
+  for (const [key, relationClass] of entries) {
     const provided = (rawInput as Record<string, unknown>)[key] as
       | RelationTargetEntry[]
       | undefined;
     if (provided !== undefined && provided.length > 0) {
-      fields.push({ relation: relation as TurnRelationFieldInput["relation"], targets: provided });
+      fields.push({ relationClass, targets: provided });
     }
   }
   return fields;
@@ -913,6 +916,17 @@ export function evaluateSettlementTurnWrite(
     (field) => rawInput[field] !== undefined || isFieldEditMode(modeMap[field]),
   );
 
+  // relation-vocabulary-v13 ticket 02: a settlement run still holding the old
+  // seven-word teaching (a worker mid-flight, a cached prompt) is told the WORD
+  // and its replacement rather than "unrecognized key" — the same refusal
+  // `mcp/note.ts` returns, out of the same table.
+  const retiredRelations = retiredRelationFieldRefusal(
+    rawInput as unknown as Record<string, unknown>,
+  );
+  if (retiredRelations) {
+    return { ok: false, message: retiredRelations };
+  }
+
   const touchesReview =
     rawInput.type !== undefined ||
     rawInput.tags !== undefined;
@@ -929,7 +943,7 @@ export function evaluateSettlementTurnWrite(
       ok: false,
       message:
         "at least one of title, content, insight, type, tags, a relation field" +
-        " (override/narrows/extends/indexes/consume/grounds/verifies)" +
+        " (correct/verify/use)" +
         " or one of their retract… mirrors is required.",
     };
   }
@@ -1411,7 +1425,9 @@ export function evaluateSettlementTurnWrite(
 
     const rejections: string[] = [];
     for (const field of relationFields) {
-      const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)![0];
+      const key = RELATION_FIELD_ENTRIES.find(
+        ([, relationClass]) => relationClass === field.relationClass,
+      )![0];
       for (const entry of field.targets) {
         const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
         const reference = parseBareAddressReference(raw);
@@ -1437,7 +1453,7 @@ export function evaluateSettlementTurnWrite(
         const isSelf = node.kind === "turn" && node.id === turn.id;
         const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
         const legality = validateRelationTarget({
-          relation: field.relation as TurnEdgeRelation,
+          relation: field.relationClass,
           citingPhases: phases,
           targetKind: node.kind,
           isSelfReference: isSelf,

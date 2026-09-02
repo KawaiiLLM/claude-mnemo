@@ -379,7 +379,7 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     const receipt = engine.writeNote({
       turn: "S" + sessionDbId + "/T2",
       type: ["implement"],
-      extends: ["S" + sessionDbId + "/T1"],
+      use: ["S" + sessionDbId + "/T1"],
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");
@@ -433,7 +433,7 @@ describe("a rejected direct write leaves no partial state (one transaction per c
 
     const receipt = engine.writeNote({
       turn: `S${sessionDbId}/T1`,
-      grounds: [`S${sessionDbId}/T1`],
+      use: [`S${sessionDbId}/T1`],
     });
 
     expect(receipt.content[0]!.text).toContain("Parameter error");

@@ -665,7 +665,7 @@ describe("the stage-2 note description teaches the allowlist it is judged by (ti
   test("a turn address offers the fourteen edge fields and names the six refusals", () => {
     const text = SETTLEMENT_NOTE_TOOL_DESCRIPTION;
     expect(text).toContain("WRITE a turn's EDGES");
-    expect(text).toContain("THE FOURTEEN EDGE FIELDS");
+    expect(text).toContain("THE SIX EDGE FIELDS");
     expect(text).toContain(
       "`title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address",
     );
@@ -758,7 +758,7 @@ describe("commit's description names the four friction categories and the exclus
   test("names all four categories that motivated the field", () => {
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("where this window forced a guess");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
-      "a relation you wanted and the seven words could not express",
+      "a relation you wanted and the three classes could not express",
     );
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("commit-gate refusal");
     // Ticket 17: E3 left the blocking set, so it can no longer BE a gate
@@ -909,7 +909,7 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
   // language the lane model retired. Pinned at the ACTUAL registration seam
   // (not a hand-copied excerpt) so a future edit to the constant cannot
   // silently reintroduce it.
-  test("the registered note tool's description teaches indexes, not collects, with no flow/branch language", async () => {
+  test("the registered note tool's description teaches the three classes, with no flow/branch language", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -949,7 +949,11 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       });
 
       const description = descriptions.get("note")!;
-      expect(description).toContain("indexes");
+      // relation-vocabulary-v13 ticket 02: `indexes` is DELETED from the write
+      // vocabulary, so the description that used to name it now names the three
+      // classes and must not name any of the seven it replaced.
+      expect(description).toContain("correct/verify/use");
+      expect(description).not.toContain("indexes");
       expect(description).not.toContain("collects");
       expect(description).not.toContain("out-of-branch");
       expect(description).not.toContain("flow");
@@ -1011,7 +1015,7 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       // keep teaching a report field the tool no longer returns.
       expect(description).toContain("A lane has NO state");
       expect(description).not.toContain("closed/open state");
-      expect(description).toContain("consume-class use");
+      expect(description).toContain("depends, used, or testimony");
       expect(description).toContain("still ADOPTED, not unused");
       // tag-mandate ticket 03 (superseding semantic-conformance ticket 02's
       // "vocabulary-conformance" clause): the facts are error classes now, so
@@ -1498,7 +1502,7 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           });
           await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            extends: [
+            use: [
               { turn: `S${sessionDbId}/T1`, tailTag: "severed-fixture", headTag: "severed-fixture" },
             ],
           });
@@ -1595,7 +1599,7 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           });
           await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            extends: [
+            use: [
               { turn: `S${sessionDbId}/T1`, tailTag: "severed-fixture", headTag: "severed-fixture" },
             ],
           });
@@ -1615,7 +1619,7 @@ describe("settlement-gate-taxonomy ticket 04 — a touched SEVERED lane is a WAR
           });
           await handlers.get("note")!({
             turn: `S${sessionDbId}/T3`,
-            extends: [
+            use: [
               { turn: `S${sessionDbId}/T2`, tailTag: "severed-fixture", headTag: "severed-fixture" },
             ],
           });
@@ -1981,7 +1985,7 @@ describe("phase-connectivity ticket 04 — a destructive write touches the lane 
     });
     const retracted = (await handlers.get("note")!({
       turn: `S${sessionDbId}/T3`,
-      retractExtends: [
+      retractUse: [
         { turn: `S${sessionDbId}/T2`, tailTag: "bridged-fixture", headTag: "bridged-fixture" },
       ],
     })) as { content: Array<{ text: string }> };
@@ -2949,7 +2953,7 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           });
           const repair = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractExtends: [
+            retractUse: [
               { turn: `S${sessionDbId}/T3`, tailTag: "lane", headTag: "lane" },
             ],
           })) as { content: Array<{ text: string }> };
@@ -3669,7 +3673,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
           // NEGATIVE FIRST: no read of T1 yet, so the gate names the remedy.
           const refused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            extends: [{ turn: `S${sessionDbId}/T2` }],
+            use: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
           expect(refused.content[0]!.text).toContain("were not delivered to this run");
           expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t1 })).toHaveLength(0);
@@ -3683,14 +3687,14 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
 
           const landed = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            extends: [{ turn: `S${sessionDbId}/T2` }],
+            use: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
           expect(landed.content[0]!.text).toContain("Landed");
 
           // T2 was never recalled, and the grant on T1 does not spread to it.
           const stillRefused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            extends: [{ turn: `S${sessionDbId}/T1` }],
+            use: [{ turn: `S${sessionDbId}/T1` }],
           })) as { content: Array<{ text: string }> };
           expect(stillRefused.content[0]!.text).toContain("were not delivered to this run");
           expect(getOutgoingEdges(capturedDb, { kind: "turn", id: t2 })).toHaveLength(0);
@@ -3754,7 +3758,7 @@ describe("ticket 06 — a recall through the registered tool is what licenses a 
           // see the sibling test above for why. `timeline` grants neither.
           const refused = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T1`,
-            extends: [{ turn: `S${sessionDbId}/T2` }],
+            use: [{ turn: `S${sessionDbId}/T2` }],
           })) as { content: Array<{ text: string }> };
           expect(refused.content[0]!.text).toContain("were not delivered to this run");
 
@@ -3907,7 +3911,7 @@ describe("ticket 06 — a full pull run: range-recall the window, tag the lane, 
 
           const edge = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            extends: [
+            use: [
               { turn: `S${sessionDbId}/T1`, tailTag: "writable-set", headTag: "writable-set" },
             ],
           })) as { content: Array<{ text: string }> };
@@ -4071,7 +4075,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractExtends: [
+            retractUse: [
               { turn: `S${sessionDbId}/T1`, tailTag: "lookback-lane", headTag: "lookback-lane" },
             ],
           })) as { content: Array<{ text: string }> };
@@ -4171,7 +4175,7 @@ describe("T1466 — the commit projection is seeded from the frozen writable set
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T8`,
-            retractExtends: [
+            retractUse: [
               { turn: `S${sessionDbId}/T1`, tailTag: "outside-lane", headTag: "outside-lane" },
             ],
           })) as { content: Array<{ text: string }> };
@@ -4511,7 +4515,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
           });
           const retracted = (await handlers.get("note")!({
             turn: `S${sessionDbId}/T2`,
-            retractExtends: [`S${sessionDbId}/T1`],
+            retractUse: [`S${sessionDbId}/T1`],
           })) as { content: Array<{ text: string }> };
           expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
 
@@ -5260,7 +5264,7 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
           });
           await callText(handlers, "note", {
             turn: `S${fixture.sessionDbId}/T2`,
-            retractExtends: [`S${fixture.sessionDbId}/T1`],
+            retractUse: [`S${fixture.sessionDbId}/T1`],
           });
           await handlers.get("recall")!({
             id: `S${fixture.sessionDbId}/T5`,
@@ -5269,8 +5273,9 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
           });
           await callText(handlers, "note", {
             turn: `S${fixture.sessionDbId}/T5`,
-            retractGrounds: [`S${fixture.sessionDbId}/T1`],
-            retractConsume: [`S${fixture.sessionDbId}/T3`],
+            // Both drafts in ONE field: the two words this used to need are
+            // one class now (relation-vocabulary-v13 ticket 02).
+            retractUse: [`S${fixture.sessionDbId}/T1`, `S${fixture.sessionDbId}/T3`],
           });
           await handlers.get("recall")!({
             id: `S${fixture.sessionDbId}/T7`,
@@ -5279,7 +5284,7 @@ describe("the shape numbers are captured inside the terminal transaction", () =>
           });
           await callText(handlers, "note", {
             turn: `S${fixture.sessionDbId}/T7`,
-            retractConsume: [
+            retractUse: [
               { turn: `S${fixture.sessionDbId}/T2`, tailTag: "", headTag: "gamma" },
             ],
           });
@@ -5387,8 +5392,8 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
         const reconciled = await callText(handlers, "note", {
           turn: `S${sessionDbId}/T2`,
-          retractExtends: [`S${sessionDbId}/T1`],
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "alpha", headTag: "alpha" }],
+          retractUse: [`S${sessionDbId}/T1`],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "alpha", headTag: "alpha" }],
         });
         expect(reconciled).toContain("Retracted 1 relation(s)");
 
@@ -5400,7 +5405,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
         await callText(handlers, "note", {
           turn: `S${sessionDbId}/T3`,
-          extends: [{ turn: `S${sessionDbId}/T2`, tailTag: "alpha", headTag: "alpha" }],
+          use: [{ turn: `S${sessionDbId}/T2`, tailTag: "alpha", headTag: "alpha" }],
         });
 
         // ---- The crossing pass --------------------------------------------
@@ -5411,7 +5416,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
         await callText(handlers, "note", {
           turn: `S${sessionDbId}/T4`,
-          consume: [{ turn: `S${sessionDbId}/T3`, tailTag: "beta", headTag: "alpha" }],
+          use: [{ turn: `S${sessionDbId}/T3`, tailTag: "beta", headTag: "alpha" }],
         });
 
         // ---- The homeless retractions -------------------------------------
@@ -5423,8 +5428,9 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(
           await callText(handlers, "note", {
             turn: `S${sessionDbId}/T5`,
-            retractGrounds: [`S${sessionDbId}/T1`],
-            retractConsume: [`S${sessionDbId}/T3`],
+            // Both homeless drafts in ONE field: the two words this used to
+            // need (`consume` and `grounds`) are one class now.
+            retractUse: [`S${sessionDbId}/T1`, `S${sessionDbId}/T3`],
           }),
         ).toContain("Retracted 2 relation(s)");
 
@@ -5437,7 +5443,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(
           await callText(handlers, "note", {
             turn: `S${sessionDbId}/T7`,
-            retractConsume: [{ turn: `S${sessionDbId}/T2`, tailTag: "", headTag: "gamma" }],
+            retractUse: [{ turn: `S${sessionDbId}/T2`, tailTag: "", headTag: "gamma" }],
           }),
         ).toContain("Retracted 1 relation(s)");
 
@@ -5458,7 +5464,10 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         expect(committed).toContain("SHAPE NUMBERS");
         expect(committed).toContain(`E${taskId}/#alpha — 3 member(s), 1 weak component(s)`);
         expect(committed).toContain(`E${taskId}/#beta — 1 member(s), 1 weak component(s)`);
-        expect(committed).toContain(`E${taskId}/#alpha <-> E${taskId}/#beta: consume 1`);
+        // INTERIM storage word (relation-vocabulary-v13 ticket 02, replaced by
+        // ticket 05a): the crossing was written as `use` and the shape numbers
+        // group by the STORED relation word, which is `extends`.
+        expect(committed).toContain(`E${taskId}/#alpha <-> E${taskId}/#beta: extends 1`);
         // The homeless retractions, each with its cause.
         expect(committed).toContain("HOMELESS-MOTIVATED RETRACTIONS (2)");
         expect(committed).toContain('"an orphan line"');
@@ -5540,8 +5549,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
         await callText(handlers, "note", {
           turn: `S${sessionDbId}/T5`,
-          retractGrounds: [`S${sessionDbId}/T1`],
-          retractConsume: [`S${sessionDbId}/T3`],
+          retractUse: [`S${sessionDbId}/T1`, `S${sessionDbId}/T3`],
         });
       });
 
@@ -5591,7 +5599,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         });
         await callText(handlers, "note", {
           turn: `S${sessionDbId}/T2`,
-          retractExtends: [`S${sessionDbId}/T1`],
+          retractUse: [`S${sessionDbId}/T1`],
         });
       });
 

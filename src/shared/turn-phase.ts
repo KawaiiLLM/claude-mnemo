@@ -21,24 +21,42 @@ import { MEMORY_TYPES, type MemoryType } from "./type-vocabulary";
  * (later) turn to its CITED predecessor — `memory_edges.citing_id` is always
  * the turn being written now, `cited_id` the turn it points at.
  *
- * ## The seven-word vocabulary (lane-model v12, rubric-v12's 七种关系)
+ * ## The seven-word STORAGE vocabulary (lane-model v12, rubric-v12's 七种关系)
+ *
+ * SINCE relation-vocabulary-v13 ticket 02 THESE SEVEN ARE NOT THE WRITE
+ * VOCABULARY. A new write carries one of three CLASSES (`shared/relation-
+ * class.ts`: `correct` with a full/partial bit, `verify`, `use`) and lands in
+ * the `relation` column under this list's INTERIM equivalent, so the column's
+ * CHECK, its identity key and every reader still keyed on these words keep
+ * working unchanged. `EDGE_RELATIONS` below is therefore "what a stored row's
+ * `relation` may say", which is exactly what all of its consumers use it for —
+ * the SQL `IN`-lists in `db/memory-edges.ts`, `db/lane-checker-load.ts` and
+ * `db/basis-reachability-load.ts`, and the lane checker's conformance gate.
  *
  * Each word says what the CITED node's main result becomes in light of this
- * node; none of them constrains either end's phase:
+ * node; none of them constrains either end's phase. The class each one maps to
+ * (`shared/relation-class.ts`'s `LEGACY_RELATION_CLASS`) is named beside it:
  *
  *   verifies   the cited main result is verified/supported by this node
+ *              -> verify
  *   override   the cited main result is overturned, WITHDRAWN or REPLACED by
  *              this node — one word for disproof, retraction, abandonment and
  *              replacement alike, because the reader's question ("must I still
  *              read the cited result?") gets the same answer from all four
+ *              -> correct, coverage full
  *   narrows    the cited main result still applies; this node corrects or
  *              limits a detail
+ *              -> correct, coverage partial
  *   extends    the cited main result still applies; this node adds to it
+ *              -> use
  *   grounds    this node's work depends on the cited standing — if the cited
  *              falls, this node falls with it
+ *              -> use
  *   consume    uses another node's output, taking no liability for it
+ *              -> use
  *   indexes    this node converges a stage, pointing at several nodes to
  *              express aggregation/index of what survives of the work before
+ *              -> use
  *
  * v11 -> v12, and why (measured, spec's 问题 section): `refutes` MERGES into
  * `override` — its meaning was already a subset of "the cited result is
@@ -216,10 +234,16 @@ export function phasesForTypes(types: readonly string[]): Set<TurnPhase> {
 }
 
 /**
- * The SEVEN-word closed set a NEW write may legally carry (lane-model v12,
- * rubric-v12's 七种关系). Membership is the WHOLE write-time word test — no
- * phase pairing, no per-word evidence requirement, nothing derived from either
- * endpoint's `type`.
+ * The SEVEN-word closed set a stored row's `relation` column may carry
+ * (lane-model v12, rubric-v12's 七种关系). Membership is the WHOLE storage-time
+ * word test — no phase pairing, no per-word evidence requirement, nothing
+ * derived from either endpoint's `type`.
+ *
+ * NOT THE WRITE VOCABULARY any more (relation-vocabulary-v13 ticket 02): a
+ * caller asks for one of `shared/relation-class.ts`'s three CLASSES and the
+ * write path resolves it to a member of this list through that module's INTERIM
+ * equivalence. This constant stays the STORAGE set because every one of its
+ * consumers is a storage-side filter or gate over rows that already exist.
  *
  * `supersedes` and `refutes` are deliberately not members — frozen legacy,
  * `db/citations.ts`'s `CITATION_RELATIONS` is where they survive as
@@ -436,7 +460,14 @@ export interface EdgeSideRegistryFacts {
 }
 
 export interface RelationTargetValidationInput {
-  relation: TurnEdgeRelation;
+  /**
+   * The relation being asserted, as a plain string: THE WORD ITSELF IS NEVER
+   * REFUSED HERE (lane-model v12, ticket 02) and relation-vocabulary-v13 moved
+   * the write vocabulary onto three CLASSES, so typing this to the storage
+   * vocabulary would only assert a coupling this module does not have. It is
+   * carried so a refusal detail can name what the caller asked for.
+   */
+  relation: string;
   /**
    * The citing turn's own phase set. NOT a legality input any more: lane-model
    * v12 retired phase pairing (ticket 02) and deleted the self-`grounds`
@@ -610,24 +641,14 @@ export function validateRelationTarget(
   return checkSideTagLegality(input);
 }
 
-/**
- * The relation vocabulary's camelCase PARAMETER name, one per `EDGE_RELATIONS`
- * word. Every new word is already a single lowercase token, so this map is
- * the identity function in practice — it stays a `Record` (rather than
- * reusing the string directly) so a schema (`mcp/definitions.ts`'s
- * `noteInputShape`) and a field-loop (`mcp/note.ts`'s `RELATION_FIELD_ENTRIES`)
- * both derive from the SAME exhaustive table, and an eighth relation added to
- * `EDGE_RELATIONS` tomorrow without an entry here is a compile-time error.
- */
-export const RELATION_FIELD_NAME: Record<TurnEdgeRelation, string> = {
-  override: "override",
-  narrows: "narrows",
-  extends: "extends",
-  indexes: "indexes",
-  consume: "consume",
-  grounds: "grounds",
-  verifies: "verifies",
-};
+// `RELATION_FIELD_NAME` STOOD HERE and is DELETED (relation-vocabulary-v13
+// ticket 02). It mapped each storage word to its own `note` parameter name,
+// and it had exactly one consumer — `db/citations.ts`'s
+// `RELATION_FIELD_ENTRIES`. The write surface no longer offers a parameter per
+// storage WORD; it offers one per CLASS, so that derivation now runs off
+// `shared/relation-class.ts`'s `RELATION_CLASSES` instead. Leaving an identity
+// map behind for a surface that no longer exists is the stale-teacher shape
+// this codebase keeps paying for.
 
 // Re-exported so a consumer that only wants the vocabulary/type table need
 // not also import type-vocabulary.ts directly.

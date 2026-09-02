@@ -48,6 +48,13 @@ import { CJK_CHARACTER, estimateTokens } from "../utils/token-estimate";
 // settlement-child — the release-artifacts sentinel asserts the rank data
 // arrived).
 import { countTokens } from "../shared/token-count";
+import {
+  displayEdgeRelation,
+  NO_RELATION_CLASS,
+  NO_RELATION_COVERAGE,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import { formatRelationArrow } from "./relation-tree";
 import { buildTurnRelationView } from "./relations-view";
 
@@ -1413,7 +1420,14 @@ function buildElectedCitations(
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? new Map<number, { words: Set<string>; crossLane: boolean }>();
     const entry = bucket.get(edge.citedId) ?? { words: new Set<string>(), crossLane: false };
-    entry.words.add(edge.relation);
+    // relation-vocabulary-v13 ticket 02: the milestone `↳` row names the class.
+    entry.words.add(
+      displayEdgeRelation({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
+      }),
+    );
     // Ticket 11 decision 4: a PAIR crosses if ANY of its placed rows does —
     // one row placed both sides differently is enough, even if the pair also
     // carries other, unplaced or same-lane, rows.
@@ -3583,7 +3597,15 @@ function resolveTurnRowLinks(
   const placeholders = citingIds.map(() => "?").join(",");
   const edges = db
     .query<
-      { citingId: number; citedId: number; relation: string | null; tailTag: string; headTag: string },
+      {
+        citingId: number;
+        citedId: number;
+        relation: string | null;
+        tailTag: string;
+        headTag: string;
+        relationClass: RelationClassValue | null;
+        relationCoverage: RelationCoverageValue | null;
+      },
       number[]
     >(
       // Law 8 (indexes-rescope spec): a deleted or dormant turn is not a node,
@@ -3591,6 +3613,7 @@ function resolveTurnRowLinks(
       // graph's most visible face. Filtered at BOTH ends here, at the source:
       // the cited lookup below then reads only ids this filter already passed.
       `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
@@ -3656,7 +3679,16 @@ function resolveTurnRowLinks(
       byCiter.set(edge.citingId, bucket);
     }
     if (edge.relation !== null) {
-      entry.words.add(edge.relation);
+      // relation-vocabulary-v13 ticket 02: the `↳` line names the CLASS a row
+      // was written under, and the stored seven-word value only for rows older
+      // than that vocabulary.
+      entry.words.add(
+        displayEdgeRelation({
+          relation: edge.relation,
+          relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+          relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
+        }),
+      );
     }
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
@@ -4670,7 +4702,10 @@ const COMPACT_TAG_NAMESPACE_PREFIX = "compact:";
  * lanes, so no comparison below ever reads a bare tag string alone.
  */
 interface FrontierEdge {
+  /** The STORED seven-word value — the SCORING key (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer). Never rendered; see `relationLabel`. */
   relation: string;
+  /** relation-vocabulary-v13 ticket 02: what a reader is SHOWN — the three-class spelling for a row written under it, the stored word for anything older. Split from `relation` so the vocabulary change cannot move a frozen weight (ticket 05a owns that remap). */
+  relationLabel: string;
   tailTurnId: number;
   headTurnId: number;
   tailTag: string;
@@ -4780,6 +4815,8 @@ function loadFrontierEdges(
   const placeholders = laneTags.map(() => "?").join(",");
   interface Row {
     relation: string;
+    relationClass: RelationClassValue | null;
+    relationCoverage: RelationCoverageValue | null;
     tailTurnId: number;
     headTurnId: number;
     tailTag: string;
@@ -4796,6 +4833,7 @@ function loadFrontierEdges(
   const rows = db
     .query<Row, string[]>(
       `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -4822,7 +4860,17 @@ function loadFrontierEdges(
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId])),
   ]);
   return canonicalRows.map((row) => ({
+    // `relation` stays the STORED word: it is the SCORING key here
+    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
+    // owns re-keying those onto the class. What renders is `relationLabel`
+    // below — the two are kept apart on purpose, because conflating them would
+    // have made a vocabulary change silently move the frontier weights.
     relation: row.relation,
+    relationLabel: displayEdgeRelation({
+      relation: row.relation,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
+    }),
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -6191,7 +6239,7 @@ function renderLaneAdjacencyPage(
       renderedEdges.add(edge);
       if (!inLane(edge)) {
         parts.push(
-          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^` +
+          `${edge.relationLabel} => S${edge.headSessionId}/T${edge.headPromptNumber}^` +
             `(E${edge.headSegmentId}/#${edge.headTag})`,
         );
         break;
@@ -6203,7 +6251,7 @@ function renderLaneAdjacencyPage(
         // `^` because the node expands on its own page, `(p/N)` the target's
         // page under the pass-2 assignment.
         parts.push(
-          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^` +
+          `${edge.relationLabel} -> S${edge.headSessionId}/T${edge.headPromptNumber}^` +
             ` (${targetPage}/${pageCount})`,
         );
         break;
@@ -6222,7 +6270,7 @@ function renderLaneAdjacencyPage(
         outs.length === 1 &&
         mirrors.length === 0;
       if (continuable) {
-        parts.push(`${edge.relation} -> ${address}`);
+        parts.push(`${edge.relationLabel} -> ${address}`);
         appeared.add(edge.headTurnId);
         edge = outs[0]!;
         continue;
@@ -6238,7 +6286,7 @@ function renderLaneAdjacencyPage(
       if (!rendersElsewhere && member !== undefined) {
         appeared.add(edge.headTurnId);
       }
-      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
+      parts.push(`${edge.relationLabel} -> ${address}${rendersElsewhere ? "^" : ""}`);
       break;
     }
     return parts.join(" ");
@@ -6282,8 +6330,8 @@ function renderLaneAdjacencyPage(
           ` (${pageOf.get(mirror.tailTurnId)}/${pageCount})`
         : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^` +
           `(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
-      const key = `${arrow}|${mirror.relation}`;
-      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      const key = `${arrow}|${mirror.relationLabel}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relationLabel, sources: [] };
       group.sources.push(source);
       foldGroups.set(key, group);
       mirrorCount += 1;

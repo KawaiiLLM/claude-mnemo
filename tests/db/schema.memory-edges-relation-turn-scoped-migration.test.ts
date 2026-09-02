@@ -91,6 +91,17 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
           ),
           tail_tag TEXT NOT NULL DEFAULT '',
           head_tag TEXT NOT NULL DEFAULT '',
+          -- relation-vocabulary-v13 ticket 02's two ADDITIVE columns are carried
+          -- through rather than dropped: this fixture exists to un-narrow ONE
+          -- thing (the turn-scoped relation CHECK), and a rebuild that also
+          -- reverted an unrelated later migration would make every reader in
+          -- this file fail on "no such column" instead of on the property under
+          -- test.
+          relation_class TEXT NOT NULL DEFAULT ''
+            CHECK (relation_class IN ('', 'correct', 'verify', 'use')),
+          relation_coverage TEXT NOT NULL DEFAULT ''
+            CHECK (relation_coverage IN ('', 'full', 'partial')
+                   AND (relation_coverage = '') = (relation_class <> 'correct')),
           created_at_epoch INTEGER NOT NULL,
           CHECK (citing_kind <> cited_kind OR citing_id <> cited_id),
           UNIQUE (citing_kind, citing_id, cited_kind, cited_id, relation, tail_tag, head_tag)
@@ -99,10 +110,12 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
       db.query(
         `INSERT INTO memory_edges_widen_back (
            id, citing_kind, citing_id, cited_kind, cited_id,
-           relation, provenance, tail_tag, head_tag, created_at_epoch
+           relation, provenance, tail_tag, head_tag,
+           relation_class, relation_coverage, created_at_epoch
          )
          SELECT id, citing_kind, citing_id, cited_kind, cited_id,
-                relation, provenance, tail_tag, head_tag, created_at_epoch
+                relation, provenance, tail_tag, head_tag,
+                relation_class, relation_coverage, created_at_epoch
          FROM memory_edges`,
       ).run();
       db.exec("DROP TABLE memory_edges");

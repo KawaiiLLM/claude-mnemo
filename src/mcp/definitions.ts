@@ -192,7 +192,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address — never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written — never just to write one turn's note early; (3) a batch opens a turn, never ends one — only text after the last tool call renders, so a trailing note call eats the reply before it.\n" +
     "skip: true with `turn` alone, when a future retriever would find nothing unique — check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\n" +
     "Cite turns only as S15069/T332, ids seen in injected context; never include <private> content.\n" +
-    "This tool ordinarily writes five fields — title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract… mirrors) are settlement's whole business normally — a hindsight judgment over the finished window — so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\n" +
+    "This tool ordinarily writes five fields — title, content, insight, type, tags. Edges (correct/verify/use and their retract… mirrors) are settlement's whole business normally — a hindsight judgment over the finished window — so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\n" +
     "What a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, …) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
@@ -434,6 +434,15 @@ const relationTargetEntryShape = z.union([
       turn: z.string().min(1),
       tailTag: z.string(),
       headTag: z.string(),
+      // relation-vocabulary-v13 ticket 02: CORRECT's FULL-or-PARTIAL bit, on
+      // the ENTRY because it is a fact about this one edge — one `correct` call
+      // may fully overturn one predecessor and partially limit another.
+      // OPTIONAL here and required by the WRITE PATH (`db/citations.ts` ->
+      // `shared/relation-class.ts`'s `checkRelationCoverage`): the schema cannot
+      // express "required on `correct`, refused on `verify`/`use`" while all
+      // three fields share one entry shape, and a per-field entry shape would
+      // have put the pairing rule in three places instead of one.
+      coverage: z.enum(["full", "partial"]).optional(),
     })
     .strict(),
 ]);
@@ -578,110 +587,81 @@ export const noteInputShape = {
   // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
   // two-sided admission test; no describe states a phase requirement, since v12
   // retired phase pairing outright, and none says which word to choose.
-  override: z
+  // relation-vocabulary-v13 ticket 02: THREE CLASSES REPLACE SEVEN WORDS.
+  // Each describe carries the one-line READING of its class plus
+  // `RELATION_TAG_FORM_LINE`'s two-sided admission test; the PRECEDENCE that
+  // decides between them (CORRECT > VERIFY > USE, and both are subsets of USE)
+  // is judgment and lives in the Memory Rubric alone, per ADR-0009's three-way
+  // split. Property order is the precedence's own order, most specific first.
+  correct: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES — one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  narrows: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a result this turn still holds but cuts a piece OUT of — a correction or limit on a detail. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  extends: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a result this turn still holds and adds a piece TO. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  indexes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses the nodes this turn converges on and stands for — they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes — lane structure and convergence declaration are separate facts. " +
-        RELATION_TAG_FORM_LINE +
-        " A same-lane entry declares that lane's convergence at this point. A lane has no state, so this closes nothing and a later member is not a contradiction. Judgment lives in the Memory Rubric.",
-    ),
-  consume: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses work this turn used, with no liability if it turns out wrong — never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal — the declaration does not carry the lane-structure fact. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
-    ),
-  grounds: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " +
+      "Addresses whose PRINCIPAL result this turn negates, limits or re-scopes. " +
+        'REQUIRES the coverage bit on every entry: `"coverage": "full"` when no substantial part ' +
+        "of the cited result may still serve as a PREMISE (it survives only as history — permanent " +
+        "historical facts like having dispatched something or written a file never rescue it), " +
+        '`"coverage": "partial"` when a definite non-empty part still stands as one. An entry with ' +
+        "no coverage is refused, naming the missing bit. " +
         RELATION_TAG_FORM_LINE +
         " Judgment lives in the Memory Rubric.",
     ),
-  verifies: z
+  verify: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end — a check that came out AGAINST the cited claim is an override, not this word. " +
-        RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric.",
+      "Addresses whose PRINCIPAL result this turn's own work confirms or supports — narrow: this " +
+        "turn's work must bear on whether that result holds, and prose saying \"confirms\" about a " +
+        "DETAIL of the cited turn is not this class. A check that came out AGAINST the cited result " +
+        "is `correct`. No `coverage` — refused if sent. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
     ),
-  // The seven retraction mirrors. A relation is never overwritten (a relation
+  use: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose PRINCIPAL result or output was a DIRECT input to this turn's own new " +
+        "conclusion or output — actually consulted, adopted, tested or incorporated. Ancestors are " +
+        "excluded: cite the layer you used, not what it rested on. The fallback class, used where " +
+        "this turn makes no claim about whether the cited result still holds. No `coverage` — " +
+        "refused if sent. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
+    ),
+  // The three retraction mirrors. A relation is never overwritten (a relation
   // write is purely additive), so correcting a wrong one is two auditable acts
   // — retract, then write the right relation. The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
+  // (`retract` + the class parameter's own name), pinned against
   // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
   // the two halves of the vocabulary cannot drift apart.
-  retractOverride: z
+  //
+  // A mirror addresses a CLASS, so it deletes whichever stored row means that
+  // class at the addressed placement — including a row written under the
+  // retired seven-word vocabulary. That is what keeps every stored edge
+  // deletable through three parameters (`db/citations.ts`'s
+  // `retractTurnRelations` states why an undeletable row is a deadlock).
+  retractCorrect: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+      "Addresses whose correct edge FROM this turn is deleted, whichever coverage bit it carries; " +
+        "an address carrying no such edge rejects the call, naming it. No `coverage` here — " +
+        "withdrawing an assertion does not restate it. " +
         RETRACTION_TAG_FORM_LINE,
     ),
-  retractNarrows: z
+  retractVerify: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+      "Addresses whose verify edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
         RETRACTION_TAG_FORM_LINE,
     ),
-  retractExtends: z
+  retractUse: z
     .array(relationTargetEntryShape)
     .optional()
     .describe(
-      "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractIndexes: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractConsume: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractGrounds: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
-    ),
-  retractVerifies: z
-    .array(relationTargetEntryShape)
-    .optional()
-    .describe(
-      "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+      "Addresses whose use edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
         RETRACTION_TAG_FORM_LINE,
     ),
   // The retraction-only mirrors (peer round T1466, finding P1-2) used to sit
@@ -1061,20 +1041,12 @@ export const settlementNoteInputShape = {
   // word reaches both writers from a single edit and the two vocabularies
   // cannot drift apart. See `noteInputShape`'s own field block for the full
   // restoration note.
-  override: noteInputShape.override,
-  narrows: noteInputShape.narrows,
-  extends: noteInputShape.extends,
-  indexes: noteInputShape.indexes,
-  consume: noteInputShape.consume,
-  grounds: noteInputShape.grounds,
-  verifies: noteInputShape.verifies,
-  retractOverride: noteInputShape.retractOverride,
-  retractNarrows: noteInputShape.retractNarrows,
-  retractExtends: noteInputShape.retractExtends,
-  retractIndexes: noteInputShape.retractIndexes,
-  retractConsume: noteInputShape.retractConsume,
-  retractGrounds: noteInputShape.retractGrounds,
-  retractVerifies: noteInputShape.retractVerifies,
+  correct: noteInputShape.correct,
+  verify: noteInputShape.verify,
+  use: noteInputShape.use,
+  retractCorrect: noteInputShape.retractCorrect,
+  retractVerify: noteInputShape.retractVerify,
+  retractUse: noteInputShape.retractUse,
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way

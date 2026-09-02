@@ -1127,7 +1127,7 @@ describe("used[] — consume-class external citations (the T1351 trap fix)", () 
     expect(stats?.citedness.testimonyFromNonMembers).toEqual([{ citingId: 6, citedId: 1, relation: "verifies" }]);
   });
 
-  test("the rendered text carries used[] beside grounds[]/testimony[]", () => {
+  test("the rendered text carries used[] beside depends[]/testimony[]", () => {
     expect(renderLaneCheckerReports(result)).toContain("used[T4->T1, T5->T2]");
   });
 });
@@ -1217,12 +1217,12 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     // by running the real implementation, like every other golden here, not
     // hand-guessed.
     "6 turn(s) whose whole index batch is one node:",
-    "  T901 indexes one node only (T900) -- a phase cut this fine is usually a step",
-    "  T906 indexes one node only (T900) -- a phase cut this fine is usually a step",
-    "  T915 indexes one node only (T914) -- a phase cut this fine is usually a step",
-    "  T946 indexes one node only (T945) -- a phase cut this fine is usually a step",
-    "  T990 indexes one node only (T989) -- a phase cut this fine is usually a step",
-    "  T1001 indexes one node only (T1000) -- a phase cut this fine is usually a step",
+    "  T901 converges one node only (T900) -- a phase cut this fine is usually a step",
+    "  T906 converges one node only (T900) -- a phase cut this fine is usually a step",
+    "  T915 converges one node only (T914) -- a phase cut this fine is usually a step",
+    "  T946 converges one node only (T945) -- a phase cut this fine is usually a step",
+    "  T990 converges one node only (T989) -- a phase cut this fine is usually a step",
+    "  T1001 converges one node only (T1000) -- a phase cut this fine is usually a step",
     "",
     "## Stock warnings -- rows that take part in no report",
     "(no cross-task tagged edges)",
@@ -1730,7 +1730,7 @@ describe("index granularity — a single-target index warns, two targets are sil
   test("the render states the diagnosis on the WARNING side, never as an error", () => {
     const text = renderLaneCheckerReports(indexingTurn([1]));
     expect(text).toContain("1 turn(s) whose whole index batch is one node:");
-    expect(text).toContain("T4 indexes one node only (T1) -- a phase cut this fine is usually a step");
+    expect(text).toContain("T4 converges one node only (T1) -- a phase cut this fine is usually a step");
     // The ERRORS block above it is empty, and the line sits after the WARNINGS
     // heading — the split the whole render is organised by.
     expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("index batch is one node"));

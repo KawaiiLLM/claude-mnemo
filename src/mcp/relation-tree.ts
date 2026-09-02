@@ -44,12 +44,21 @@ export function formatRelationArrow(words: readonly string[], crossLane: boolean
  * candidates of otherwise EQUAL coverage. `grounds`/`verifies`/`refutes`
  * fall through to the same defensive rank 4 as any relation this tie-break
  * never ranked explicitly.
+ *
+ * relation-vocabulary-v13 ticket 02: the three CLASS spellings are ranked
+ * alongside the seven words, at their INTERIM equivalents' ranks
+ * (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`), because this
+ * function now sees whichever spelling the row rendered as. Ranking them
+ * differently would make one chain's tie-break depend on when its edges were
+ * written rather than on what they say. It is a display tie-break, not a score:
+ * ticket 05a's weight remap does not touch it.
  */
 export function defaultRelationRank(relation: string): number {
-  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
+  if (relation === "correct(partial)") return 0;
   if (relation === "indexes") return 1;
   if (relation === "consume") return 2;
-  if (relation === "override") return 3;
+  if (relation === "override" || relation === "correct(full)") return 3;
   return 4;
 }
 

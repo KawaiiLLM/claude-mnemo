@@ -193,7 +193,7 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
   // narrowed to one of its two words. It printed a closure verdict and the
   // single terminus that verdict was computed from; both concepts left the
   // model, and a line that kept either half would keep teaching it. A reader
-  // who wants to know what this lane converged reads its `indexes` edges —
+  // who wants to know what this lane converged reads its out-edges —
   // `edges:` above already counts them.
   const grounds = lane.citedness.groundsFromNonMembers.map(
     (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses),
@@ -210,7 +210,7 @@ function renderStatsReport(lane: LaneStatsReport, addresses?: LaneAnchorAddresse
       formatTurnRef(fact.citedId, addresses),
   );
   lines.push(
-    "  cited from outside: grounds[" +
+    "  cited from outside: depends[" +
       (grounds.join(", ") || "-") +
       "] used[" +
       (used.join(", ") || "-") +
@@ -365,7 +365,13 @@ function renderUnattributedCluster(
 
 /**
  * The granularity warning (lane-state-retirement ticket 01): one turn whose
- * whole `indexes` batch is a single node.
+ * whole convergence batch is a single node.
+ *
+ * relation-vocabulary-v13 ticket 02: it reads STORED `indexes` rows and nothing
+ * else can create one any more (`indexes` is deleted as a write word, ruled at
+ * S15069/T2306), so this population only shrinks. The LINE stops naming the
+ * retired parameter — an agent shown a word it cannot write learns a call it
+ * will be refused for.
  *
  * The line says the DIAGNOSIS, not an instruction — decision 4 makes this a
  * reading ("说明太细了"), never a repair order, and a render that told the
@@ -379,7 +385,7 @@ function renderTooFineIndex(
   return (
     "  " +
     formatTurnRef(warning.citingId, addresses) +
-    " indexes one node only (" +
+    " converges one node only (" +
     formatTurnRef(warning.citedId, addresses) +
     ") -- a phase cut this fine is usually a step"
   );

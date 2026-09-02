@@ -687,7 +687,10 @@ describe("ticket 07 — Block A teaches the batched workstations, and timeline l
     expect(procedure).toContain("claim link, a phase hypothesis, its current frontier. Shared topic,");
     expect(procedure).toContain("adjacency and state-only turns are never candidates; there is no target");
     expect(procedure).toContain("count, and an empty batch ledger is valid. Record candidates only —");
-    expect(procedure).toContain("write no relation, no lane tag, no `indexes` yet.");
+    // relation-vocabulary-v13 ticket 02: `indexes` is deleted from the write
+    // vocabulary, so the sentence names what is still withheld and nothing
+    // else — naming a parameter a run cannot send is the stale-teacher shape.
+    expect(procedure).toContain("write no relation and no lane tag yet.");
   });
 
   test("BATCH STEP 3 back-links against the ledger's own frontiers, never every earlier turn", () => {
@@ -853,16 +856,16 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
 
   // Ticket 07: the old seven-step PER-THREAD procedure is gone, replaced by a
   // procedure that runs ONCE, after the last batch, over the ledger BATCH STEP
-  // 2/3 built. FINAL REVIEW, FINDING 1 took its FORM LANES step out, so it is
-  // four steps now and the numbering moved with it.
-  test("the four relation steps are present and ordered, ending in check-and-repair", () => {
+  // 2/3 built. FINAL REVIEW, FINDING 1 took its FORM LANES step out; and
+  // relation-vocabulary-v13 ticket 02 took DECLARE CONVERGENCE out with the
+  // `indexes` word itself (user ruling S15069/T2306), so it is THREE steps.
+  test("the three relation steps are present and ordered, ending in check-and-repair", () => {
     const bullet = edgesBullet(renderPrompt());
 
     const steps = [
       "1. DISPOSE every ledger candidate:",
       "2. JUDGE AND WRITE.",
-      "3. DECLARE CONVERGENCE, of a TURN and not of a lane.",
-      "4. CHECK AND REPAIR.",
+      "3. CHECK AND REPAIR.",
     ];
     let cursor = -1;
     for (const step of steps) {
@@ -871,7 +874,7 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
       cursor = at;
     }
 
-    expect(bullet).toContain("All relation writes happen HERE, after the last batch, in four steps:");
+    expect(bullet).toContain("All relation writes happen HERE, after the last batch, in three steps:");
     // DISPOSE: uncertainty never reads as CONVERGED — the trial's own root
     // cause for premature closure. The word was OPEN until lane state retired;
     // it now says STILL RUNNING, because OPEN named a lane state that no
@@ -882,18 +885,16 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // candidate, not a state the lane carries.
     expect(bullet).toContain("a state the lane carries");
     expect(bullet).not.toContain("Uncertainty is OPEN");
-    // JUDGE AND WRITE: the stored word is evidence of nothing; the claim
+    // JUDGE AND WRITE: the stored word is evidence of nothing; the class
     // test re-runs fresh every time.
-    expect(bullet).toContain("ignore the stored relation word and run the claim test as if no");
+    expect(bullet).toContain("ignore the stored relation word and run the class test as if no");
     expect(bullet).toContain("edge existed — the old word is evidence of nothing.");
-    // DECLARE CONVERGENCE (rewritten by lane-state-retirement ticket 01): the
-    // question is asked of a TURN, work merely stopping is still not evidence,
-    // and the granularity rule is stated as a WARNING and never a refusal.
-    expect(bullet).toContain("3. DECLARE CONVERGENCE, of a TURN and not of a lane.");
-    expect(bullet).toContain("Work merely stopping, or a batch ending, is");
-    expect(bullet).toContain("never convergence evidence — producing the declaration is your");
-    expect(bullet).toContain("node means the phase was cut too fine; `lane_check` says so as a");
-    expect(bullet).toContain("WARNING, and no write refuses on it,");
+    // DECLARE CONVERGENCE is DELETED (relation-vocabulary-v13 ticket 02, user
+    // ruling S15069/T2306): `indexes` is gone as a word, convergence is no
+    // longer declared, and a step teaching a run to write one would be a step
+    // whose every call is refused. Pinned as an ABSENCE, in both halves.
+    expect(bullet).not.toContain("DECLARE CONVERGENCE");
+    expect(bullet).not.toContain("never convergence evidence");
     // The lane-state clause is gone in BOTH its halves.
     expect(bullet).not.toContain("leaving a lane honestly OPEN is normal life");
     expect(bullet).not.toContain("never closure evidence");
@@ -901,21 +902,40 @@ describe("ticket 06 — the edges bullet teaches the entry forms and the lane pr
     // all — repairs repeat step 3, never a fresh work plan.
     expect(bullet).toContain("ERRORS are a repair queue for the graph you already");
     expect(bullet).toContain("judged, never the work plan; every repair repeats step 2.");
+    // THE PRECEDENCE, the principal-result rule and the coverage bit ride in
+    // JUDGE AND WRITE — a mutation dropping any one of them drives this red.
+    expect(bullet).toContain("BOTH ENDS ARE");
+    expect(bullet).toContain("PRINCIPAL RESULTS");
+    expect(bullet).toContain("Details do not");
+    expect(bullet).toContain("earn edges. Then run the PRECEDENCE, in order:");
+    expect(bullet).toContain("correct and verify are SUBSETS of use, and the slot stores the");
+    expect(bullet).toContain("most specific class");
+    expect(bullet).toContain("correct carries a coverage bit: `full` when the cited principal");
+    expect(bullet).toContain("stands as a premise.");
+    expect(bullet).toContain("VERIFY IS NARROW");
+    expect(bullet).toContain("the DOMINANT");
+    expect(bullet).toContain("action wins, not the safer label.");
+    // The sufficiency law, as a WRITING law with a warning-only lint.
+    expect(bullet).toContain("SUFFICIENT CITATION");
+    expect(bullet).toContain("This is a writing law, not a machine verdict");
+    // ARM B KEEPS the sparsity rule (ticket 04 deferred, ruling S15069/T2391).
+    expect(bullet).toContain("through existing edges is not re-drawn");
   });
 
   // T1466 (finding P2-5): the routing for a turn that TESTED the cited claim
   // carries forward into JUDGE AND WRITE (step 3 of the new five) — a
   // verification must never fall back to `extends`, the nearest neighbour a
   // model reaches for.
-  test("JUDGE AND WRITE routes a supporting check to verifies and a contrary one to override, never extends", () => {
+  test("JUDGE AND WRITE routes a supporting check to verify and a contrary one to correct, never use", () => {
     const bullet = edgesBullet(renderPrompt());
 
-    expect(bullet).toContain("a check THIS turn produced that SUPPORTS the");
-    expect(bullet).toContain("cited conclusion is verifies, never extends — one that goes against");
-    expect(bullet).toContain("it is override;");
-    // Lane-model v12 ticket 02: the fork the old line offered ("verifies or
-    // refutes") is gone with the word, so the routing has to name where a
-    // contrary result goes or a run reaches for `extends` again.
+    expect(bullet).toContain("negated or limited = correct;");
+    expect(bullet).toContain("confirmed or supported = verify.");
+    // The two nearest-neighbour traps the measurement found, restated in the
+    // new vocabulary: a completed blocker is `use` (not a correction), and a
+    // "confirms" about a DETAIL is `use` (not `verify`).
+    expect(bullet).toContain("a blocker satisfied by doing the work is completion (use),");
+    expect(bullet).toContain("DETAIL of the cited turn is use, not verify.");
     expect(bullet).not.toContain("refutes");
   });
 });
@@ -1369,7 +1389,11 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
   test("the prompt teaches the retraction mirrors", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("The\n     `retract<Relation>` mirrors delete one row each and still accept bare");
+    expect(prompt).toContain("`retractCorrect`/`retractVerify`/`retractUse` mirrors delete the");
+    expect(prompt).toContain("addressed placement's row of that CLASS");
+    // The half that keeps a legacy row deletable at all — the E2 deadlock is
+    // what a mirror that only reached the NEW vocabulary would re-arm.
+    expect(prompt).toContain("retired seven-word vocabulary included");
     expect(prompt).toContain("addresses (legacy rows stay deletable)");
     // Ticket 15: the membership `create` verb this test used to pin alongside
     // them retired, and the roster advice it carried went with it.
@@ -1385,15 +1409,13 @@ describe("ticket 07 — lane_check is forbidden inside the batch loop; the check
   // legal calls. Ticket 06 note: the word list is authored prose now rather
   // than a render of `EDGE_RELATIONS`, so this test is the guard that a
   // vocabulary change actually reached the bullet.
-  test("the prompt speaks indexes and states no retired rejection", () => {
+  test("the prompt speaks the three classes and states no retired rejection", () => {
     const prompt = renderPrompt();
 
-    expect(prompt).toContain("indexes");
-    // The authored bullet's own field list, exact — a relation dropped from
-    // it (or a retired one re-added) fails here.
-    expect(prompt).toContain(
-      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies fields",
-    );
+    // The authored bullet's own field list, exact — a class dropped from it
+    // (or a retired word re-added) fails here.
+    expect(prompt).toContain("`note`'s correct/verify/use fields — the three-class");
+    expect(prompt).toContain('or `"partial"`. A `correct` without it is refused naming the missing');
     expect(prompt).not.toContain("collects");
     expect(prompt).not.toContain("out-of-branch");
   });
@@ -1602,9 +1624,18 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
 
     // The guard against a mistyped `.replace()`: an unmatched needle would
     // leave `amended` equal to `body` and silently re-check the RETIRED text.
+    // RELATION-VOCABULARY-V13 TICKET 02: `indexes` is deleted from the write
+    // vocabulary (user ruling S15069/T2306), so BATCH STEP 2 stops naming it —
+    // a step that withholds a parameter no call may carry teaches the
+    // parameter.
+    const v13 = purged.replace(
+      words("write no relation, no lane tag, no `indexes` yet."),
+      words("write no relation and no lane tag yet."),
+    );
     expect(amended).not.toBe(body);
     expect(purged).not.toBe(amended);
-    expect(words(renderPrompt()).includes(purged)).toBe(true);
+    expect(v13).not.toBe(purged);
+    expect(words(renderPrompt()).includes(v13)).toBe(true);
   });
 
   // Block B, WITH lane-declaration ticket 08's three amendments applied to
@@ -2001,14 +2032,175 @@ describe("ticket 06/07 — the authored text integrates VERBATIM, every word (ac
       // law now follows.
       ;
 
+    // -----------------------------------------------------------------------
+    // RELATION-VOCABULARY-V13 TICKET 02 (user ruling S15069/T2391, "先直接落地
+    // B"): the seven-word vocabulary becomes THREE CLASSES, and the archive
+    // still carries the seven. Every amendment below is one of that ticket's
+    // own edits, recorded here for the same reason ticket 08's three were —
+    // the archive protects the STRING, and only a recorded amendment may move
+    // the contract.
+    // -----------------------------------------------------------------------
+    const v13 = purged
+      // The field list, and the coverage bit `correct` now carries.
+      .replace(
+        words(
+          "- edges: `note`'s override/narrows/extends/consume/indexes/grounds/ " +
+            "verifies fields. An entry is a bare address",
+        ),
+        words(
+          "- edges: `note`'s correct/verify/use fields — the three-class " +
+            "vocabulary. An entry is a bare address",
+        ),
+      )
+      // The retraction mirrors: class-level now, and explicitly reaching a row
+      // written under the retired vocabulary (the E2-deadlock repair).
+      .replace(
+        words(
+          "The `retract<Relation>` mirrors delete one row each and still accept " +
+            "bare addresses (legacy rows stay deletable). One pair may carry " +
+            "several relations at once; a call carrying nothing but relations is " +
+            "valid. All relation writes happen HERE, after the last batch, in " +
+            "four steps:",
+        ),
+        words(
+          "A `correct` entry ALSO carries its coverage bit — " +
+            "`{ \"turn\": …, \"tailTag\": …, \"headTag\": …, \"coverage\": \"full\" }` " +
+            "or `\"partial\"`. A `correct` without it is refused naming the missing " +
+            "bit; a `verify` or `use` carrying one is refused too. The " +
+            "`retractCorrect`/`retractVerify`/`retractUse` mirrors delete the " +
+            "addressed placement's row of that CLASS — a row written under the " +
+            "retired seven-word vocabulary included — and still accept bare " +
+            "addresses (legacy rows stay deletable). " +
+            "All relation writes happen HERE, after the last batch, in three steps:",
+        ),
+      )
+      // JUDGE AND WRITE: the seven-word ladder becomes the PRECEDENCE, with the
+      // principal-result rule in front of it and the coverage bit inside it.
+      .replace(
+        words(
+          "2. JUDGE AND WRITE. For every candidate and every stock row you touch, " +
+            "ignore the stored relation word and run the claim test as if no edge " +
+            "existed — the old word is evidence of nothing. Still fully valid and " +
+            "built upon = extends; partly withdrawn or re-scoped = narrows; " +
+            "replaced, withdrawn or disproved outright = override; merely used = " +
+            "consume; a check THIS turn produced that SUPPORTS the cited " +
+            "conclusion is verifies, never extends — one that goes against it is " +
+            "override; work this turn stands or falls with takes `grounds`. Shared " +
+            "topic, adjacency, or preserving lane shape are never extends evidence " +
+            "— and a blocker satisfied by doing the work is completion (extends), " +
+            "not a correction of the blocking judgment (narrows).",
+        ),
+        words(
+          "2. JUDGE AND WRITE. For every candidate and every stock row you touch, " +
+            "ignore the stored relation word and run the class test as if no edge " +
+            "existed — the old word is evidence of nothing. BOTH ENDS ARE " +
+            "PRINCIPAL RESULTS: the conclusion or output the cited turn actually " +
+            "established, never a detail it happened to mention. Details do not " +
+            "earn edges. Then run the PRECEDENCE, in order: " +
+            "(1) does this output change the cited principal result's acceptance, " +
+            "reliability or scope? negated or limited = correct; confirmed or " +
+            "supported = verify. (2) otherwise, is the cited principal result a " +
+            "DIRECT input to this new output — actually consulted, adopted, tested " +
+            "or incorporated? = use. Ancestors are excluded: cite the layer you " +
+            "used, not what it rested on. " +
+            "correct and verify are SUBSETS of use, and the slot stores the most " +
+            "specific class; a pair that was both corrected and built on is " +
+            "correct, and no second row is written for it. " +
+            "correct carries a coverage bit: `full` when the cited principal " +
+            "result has no substantial part left that may serve as a PREMISE — it " +
+            "survives only as history, and permanent historical facts (it " +
+            "dispatched something, it wrote a file, it ran a test) never rescue " +
+            "it; `partial` when a definite non-empty substantial part still stands " +
+            "as a premise. " +
+            "VERIFY IS NARROW: this turn's own work must bear on whether the cited " +
+            "principal result holds. Prose saying \"confirms\" about a DETAIL of " +
+            "the cited turn is use, not verify. " +
+            "Where a cited turn holds several parallel principal results and this " +
+            "turn verifies one while correcting another, the DOMINANT action wins, " +
+            "not the safer label. Shared topic, adjacency, or preserving lane shape " +
+            "are never use evidence — and a blocker satisfied by doing the work is " +
+            "completion (use), not a correction of the blocking judgment.",
+        ),
+      )
+      // The SUFFICIENCY LAW joins the one-edge-per-claim law, and ruling 2's
+      // one-row-per-pair rule joins it. The sparsity rule STAYS — arm B keeps
+      // it (ticket 04 deferred).
+      .replace(
+        words(
+          "No claim carries two edges, and a path already readable through " +
+            "existing edges is not re-drawn.",
+        ),
+        words(
+          "No claim carries two edges, and a path already readable through " +
+            "existing edges is not re-drawn. One pair of nodes carries ONE row, at " +
+            "the lane placement you judge honest — not one row per candidate lane. " +
+            "SUFFICIENT CITATION: where this turn's principal result rests on " +
+            "earlier nodes, every one of them is cited. Evidence this turn produced " +
+            "itself owes nothing — it IS this turn's contribution. This is a " +
+            "writing law, not a machine verdict; an address named in prose with no " +
+            "edge to it is reported as a WARNING only and never blocks a write.",
+        ),
+      )
+      // DECLARE CONVERGENCE is DELETED with the `indexes` word, so the step
+      // that followed it takes its number.
+      .replace(
+        words(
+          "3. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this turn " +
+            "close out a stretch of work — a design settled, an implementation " +
+            "landed, a batch verified, a version shipped? If it did, it writes an " +
+            "`indexes` citing the nodes that genuinely produced that ONE result. A " +
+            "lane may converge more than once — each finished stretch earns its own " +
+            "declaration, and an earlier one neither blocks nor substitutes for a " +
+            "later one. CITE THE BATCH — one `/to-spec` run, one release. A single " +
+            "cited node means the phase was cut too fine; `lane_check` says so as a " +
+            "WARNING, and no write refuses on it, so finish the batch rather than " +
+            "trimming it. Work merely stopping, or a batch ending, is never " +
+            "convergence evidence — producing the declaration is your job, and " +
+            "having nothing to declare this round is normal life. 4. CHECK AND REPAIR.",
+        ),
+        words("3. CHECK AND REPAIR."),
+      )
+      // The basis walk names the classes rather than "the seven words".
+      .replace(
+        words("a directed walk along its own out-edges (any of the seven words,"),
+        words("a directed walk along its own out-edges (any relation class,"),
+      )
+      // The settlement-actions half: `index` leaves the principle, and the
+      // coupling groups are re-expressed over the three classes.
+      .replace(
+        words("原则(判断性,不强制;index 不参与计算):"),
+        words("原则(判断性,不强制):"),
+      )
+      .replace(
+        words("一个宣告了 index 的节点,应该被泳道外的节点引用 ——"),
+        words("一个把一段工作收口的节点,应该被泳道外的节点引用 ——"),
+      )
+      .replace(
+        words(
+          "verify / override / narrow / extend 作用在被引节点的主张本身上," +
+            "在别人的主张上干活,通常说明两者本该同属一条泳道;ground 是本节点" +
+            "的成立依赖对方,可能是耦合,也可能是两条独立泳道之间正常的依赖," +
+            "需要读内容判断;consume / index 只是使用或汇总其产出,是两条独立" +
+            "泳道之间应有的往来。",
+        ),
+        words(
+          "correct / verify 作用在被引节点的主结果本身上,在别人的主张上" +
+            "干活,通常说明两者本该同属一条泳道;use 里本节点的成立依赖对方" +
+            "的那一种,可能是耦合,也可能是两条独立泳道之间正常的依赖,需要" +
+            "读内容判断;其余的 use 只是使用其产出,是两条独立泳道之间应有的" +
+            "往来。",
+        ),
+      );
+
     // The guard against a mistyped `.replace()`: if any needle above failed
     // to match the archive, `amended` would still equal `body`, and this
     // test would silently degrade into re-checking the RETIRED text.
     expect(amended).not.toBe(body);
     expect(purged).not.toBe(amended);
+    expect(v13).not.toBe(purged);
 
     const prompt = words(renderPrompt());
-    expect(prompt.includes(purged)).toBe(true);
+    expect(prompt.includes(v13)).toBe(true);
   });
 
   // Block D packages TWO separate insertion points (D1 into duty 3, D2
@@ -2150,13 +2342,15 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
   const SETTLEMENT_ONLY = [
     // The one surviving PRINCIPLE, reviewed against in the check-and-repair
     // step.
-    "原则(判断性,不强制;index 不参与计算):",
+    "原则(判断性,不强制):",
     "- 连通性:一条泳道的任意两个成员,应该通过两侧 tag 同为该泳道",
     // The three-group COUPLING count, and its explicit refusal to invent a
     // threshold — the input to "should these two lanes have been one".
     "耦合:跨泳道的边按三组分别计数,不产出机器判决 ——",
-    "把三个数摆出来由",
-    "人判断,不要发明一个门限。",
+    // relation-vocabulary-v13 ticket 02 re-wrapped these two lines with the
+    // three classes; the SENTENCE is unchanged.
+    "「较少」没有分母也没有阈值,把三个数摆出来由人判断,不要",
+    "发明一个门限。",
   ];
 
   test("every settlement-only rule is in the prompt", () => {
@@ -2183,7 +2377,7 @@ describe("ticket 12 — the settlement action half is in the duties, and only on
     // they govern, which is the whole reason this half is not a separate
     // injected block — and so before the session-fields duty (ticket 06: the
     // lane-disposition duty that used to sit between them is retired).
-    expect(duties.indexOf("原则(判断性,不强制;index 不参与计算):")).toBeLessThan(
+    expect(duties.indexOf("原则(判断性,不强制):")).toBeLessThan(
       duties.indexOf("2. SESSION FIELDS"),
     );
   });

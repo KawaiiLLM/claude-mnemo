@@ -593,6 +593,10 @@ describe("session queries", () => {
           relation: null,
           tailTag: "",
           headTag: "",
+          // relation-vocabulary-v13 ticket 02: a bare prose-citation row
+          // carries no class and no coverage.
+          relationClass: "",
+          relationCoverage: "",
           provenance: "text-ref",
           createdAtEpoch: 200,
         },

@@ -104,7 +104,7 @@ export const STAGE_ONE_NOTE_TOOL_DESCRIPTION =
   "word you leave out is REMOVED. A `topic:` word you leave out is REFUSED " +
   "instead: topic words are permanent, so restate them all. To correct one, " +
   "name it in `retireTopic` and put its replacement in the same `tags` write. " +
-  "RELATIONS ARE NOT YOURS: the seven relation fields and their retract " +
+  "RELATIONS ARE NOT YOURS: the three relation fields and their retract " +
   "mirrors are refused on this pass, naming stage 2, which reads the lanes " +
   "you draw and traces the edges inside them.";
 

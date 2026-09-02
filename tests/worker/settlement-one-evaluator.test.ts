@@ -379,7 +379,7 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
         noteReceipt = (
           (await handlers.get("note")!({
             turn: `S${sessionDbId}/T8`,
-            grounds: [
+            use: [
               { turn: `S${sessionDbId}/T4`, tailTag: "window-lane", headTag: "outside-lane" },
             ],
           })) as { content: Array<{ text: string }> }
@@ -450,7 +450,7 @@ describe("settlement-gate-taxonomy ticket 03 — one lane_check call does not co
         });
         await handlers.get("note")!({
           turn: `S${sessionDbId}/T8`,
-          grounds: [
+          use: [
             { turn: `S${sessionDbId}/T4`, tailTag: "window-lane", headTag: "outside-lane" },
           ],
         });

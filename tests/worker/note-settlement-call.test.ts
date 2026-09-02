@@ -412,8 +412,8 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain("3. SESSION FIELDS");
     expect(prompt).not.toContain("1. PROPOSALS");
     expect(prompt).not.toContain("4. COMMIT");
-    expect(prompt).toContain("override");
-    expect(prompt).toContain("consume");
+    expect(prompt).toContain("correct");
+    expect(prompt).toContain("use");
   });
 
   // Ticket 08 (edge-ownership-impl, "settlement four-field check-and-
@@ -457,28 +457,23 @@ describe("settlement context assembly", () => {
     expect(prompt).not.toContain('"used"');
     expect(prompt).not.toContain('"built on"');
 
-    // Revision 7 (ticket 07): the discriminator lives in the finalization
-    // pass's JUDGE AND WRITE step — every word mapped to the state of the
-    // CITED CLAIM, prefixed by the repair-is-re-judgment rule, plus the
-    // three non-evidences the trial mistook for extends.
+    // Revision 7 (ticket 07), re-aimed by relation-vocabulary-v13 ticket 02:
+    // the discriminator lives in the finalization pass's JUDGE AND WRITE step,
+    // and it is a PRECEDENCE now rather than a seven-word ladder — prefixed by
+    // the repair-is-re-judgment rule and by the principal-result rule, and
+    // followed by the same non-evidences the trial mistook for continuation.
     expect(prompt).toContain("2. JUDGE AND WRITE. For every candidate and every stock row you touch,");
-    expect(prompt).toContain("ignore the stored relation word and run the claim test as if no");
-    expect(prompt).toContain("edge existed — the old word is evidence of nothing. Still fully");
-    expect(prompt).toContain("valid and built upon = extends; partly withdrawn or re-scoped =");
-    expect(prompt).toContain("narrows; replaced, withdrawn or disproved outright = override;");
-    // T1466 (finding P2-5), re-aimed by lane-model v12 ticket 02: a check
-    // THIS turn produced routes to `verifies` when it SUPPORTS the cited
-    // claim and to `override` when it does not — `refutes` is gone, and
-    // `extends` is still named as the wrong reach.
-    expect(prompt).toContain("merely used = consume; a check THIS turn produced that SUPPORTS the");
-    expect(prompt).toContain("cited conclusion is verifies, never extends — one that goes against");
-    expect(prompt).toContain("it is override; work this turn stands or falls with takes");
-    expect(prompt).toContain("`grounds`. Shared topic,");
-    expect(prompt).toContain("adjacency, or preserving lane shape are never extends evidence —");
-    expect(prompt).toContain("One pair may carry several");
-    expect(prompt).toContain("relations at once; a call carrying nothing but relations is valid.");
+    expect(prompt).toContain("ignore the stored relation word and run the class test as if no");
+    expect(prompt).toContain("edge existed — the old word is evidence of nothing. BOTH ENDS ARE");
+    expect(prompt).toContain("earn edges. Then run the PRECEDENCE, in order:");
+    expect(prompt).toContain("acceptance, reliability or scope? negated or limited = correct;");
+    expect(prompt).toContain("confirmed or supported = verify. (2) otherwise, is the cited");
+    // The two nearest-neighbour traps, restated in the new vocabulary: a
+    // "confirms" about a DETAIL is `use`, and a completed blocker is `use`.
+    expect(prompt).toContain("DETAIL of the cited turn is use, not verify.");
+    expect(prompt).toContain("adjacency, or preserving lane shape are never use evidence —");
     expect(prompt).toContain(
-      "`note`'s override/narrows/extends/consume/indexes/grounds/\n     verifies fields",
+      "`note`'s correct/verify/use fields — the three-class",
     );
 
     // The retired fence's own wording, pinned ABSENT — the rule is gone, so
@@ -718,7 +713,7 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
           turn: "S1/T3",
           type: ["implement", "correction"],
           tags: ["lease"],
-          grounds: ["S1/T1"],
+          use: ["S1/T1"],
         });
         engine.writeNote({ turn: "S1/T2", type: ["research"], tags: ["lease"] });
         engine.writeMembership({
@@ -738,7 +733,17 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
 
     // The judged relation (spec C7's pre-state gate).
     const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
-    expect(judged.some((edge) => edge.relation === "grounds" && edge.provenance === "judged")).toBe(true);
+    // INTERIM storage word (relation-vocabulary-v13 ticket 02, replaced by
+    // ticket 05a): a `use` write lands under `extends`, with the class stored
+    // beside it.
+    expect(
+      judged.some(
+        (edge) =>
+          edge.relation === "extends" &&
+          edge.relationClass === "use" &&
+          edge.provenance === "judged",
+      ),
+    ).toBe(true);
 
     // The lane — declared on an existing segment, never a new one. Ticket 15:
     // settlement mints no segments at all, so the only open segments are the

@@ -14,7 +14,17 @@ import {
   type RetractEdgeInput,
   type WriteEdgeInput,
 } from "./memory-edges";
-import { EDGE_RELATIONS, RELATION_FIELD_NAME } from "../shared/turn-phase";
+import { EDGE_RELATIONS, type TurnEdgeRelation } from "../shared/turn-phase";
+import {
+  checkRelationCoverage,
+  interimLegacyRelation,
+  isRelationCoverage,
+  LEGACY_RELATIONS_BY_CLASS,
+  NO_RELATION_COVERAGE,
+  RELATION_CLASSES,
+  type RelationClass,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import {
   parseBareAddressReference,
   parseQualifiedReferences,
@@ -57,11 +67,19 @@ import { liveTurnSql } from "./turn-liveness";
 // write could request but stored rows still carried, so the read path had to
 // recognise them. Lane-model v12 ticket 03 ended that state — M-B rewrites
 // every such row onto `override` and M-D takes both words out of the table's
-// own CHECK — so the storage vocabulary is now EXACTLY the write vocabulary,
-// `shared/turn-phase.ts`'s `EDGE_RELATIONS`. It is still spelled out here
-// rather than imported, so this storage-layer module keeps its zero runtime
-// dependency on the write vocabulary; the guard test that used to pin the
-// DIFFERENCE between the two now pins their EQUALITY.
+// own CHECK — so the storage vocabulary equals `shared/turn-phase.ts`'s
+// `EDGE_RELATIONS`. It is still spelled out here rather than imported, so this
+// storage-layer module keeps its zero runtime dependency on that constant; the
+// guard test that used to pin the DIFFERENCE between the two now pins their
+// EQUALITY.
+//
+// RELATION-VOCABULARY-V13 TICKET 02: this is the STORAGE vocabulary and no
+// longer the WRITE vocabulary. A write asks for one of three CLASSES
+// (`shared/relation-class.ts`) and lands under this list's interim equivalent,
+// so nothing here moves — which is exactly the point: the `memory_edges` CHECK,
+// the row identity key and every reader still keyed on these seven words are
+// untouched by the vocabulary change, and ticket 03's migration of the existing
+// corpus stays additive because their stored word is never rewritten.
 export const CITATION_RELATIONS = [
   "override",
   "narrows",
@@ -111,14 +129,39 @@ export function isCitationRelation(value: unknown): value is CitationRelation {
  * one to `EDGE_RELATIONS` re-opens a WRITE path, and those remain different
  * decisions. Any future word frozen out of the vocabulary with rows still
  * standing belongs here for exactly as long as those rows do.
+ *
+ * RELATION-VOCABULARY-V13 TICKET 02 CHECKED THIS AGAIN AND IT STAYS EMPTY.
+ * The three-class write surface no longer offers `consume`/`grounds`/`indexes`,
+ * which would ordinarily strand their stored rows in exactly the E2 deadlock
+ * described above — a row nothing can delete. It does not, because retraction
+ * moved to the CLASS level: `retractUse` resolves through
+ * `shared/relation-class.ts`'s `LEGACY_RELATIONS_BY_CLASS` to every stored word
+ * that means `use`, so all seven remain deletable through the three mirrors.
+ * That resolution IS the fix; if it is ever narrowed back to one word per
+ * mirror, the four words it covers belong in this list the same day.
  */
 export const RETRACTION_ONLY_RELATIONS: readonly CitationRelation[] = [];
 
 /**
- * The seven named relation PARAMETERS, field name -> the relation it means —
- * DERIVED from `shared/turn-phase.ts`'s `EDGE_RELATIONS`/`RELATION_FIELD_NAME`
- * rather than a second hand-kept literal, so the closed set and its parameter
- * spelling cannot drift apart.
+ * The THREE named relation PARAMETERS, field name -> the CLASS it means —
+ * DERIVED from `shared/relation-class.ts`'s `RELATION_CLASSES` rather than a
+ * second hand-kept literal, so the closed set and its parameter spelling cannot
+ * drift apart.
+ *
+ * RELATION-VOCABULARY-V13 TICKET 02: it used to be seven entries keyed on the
+ * storage words. What made the seven-field surface wrong is not that it was
+ * long — it is that the writer was taught one vocabulary and every reader
+ * harvested another. The class carries the whole judgment now, and `correct`'s
+ * FULL/PARTIAL bit rides on the ENTRY (`SidedRelationTarget.coverage`) rather
+ * than splitting into two fields, so the precedence a writer runs
+ * (CORRECT > VERIFY > USE) is the same shape as the parameter list it writes.
+ *
+ * THE ONE SOURCE FOR EVERY SURFACE. `mcp/definitions.ts`'s two zod shapes,
+ * `mcp/note.ts`'s field loop, the settlement facade's own loop, and BOTH of
+ * `worker/note-settlement-sdk-query.ts`'s allowlists (the stage-2 field
+ * allowlist and the pre-`finalize` refusal) read this list. A vocabulary change
+ * that reaches only some of them produces refusals on fields the model was just
+ * taught to send — the exact failure the v13 shadow run hit.
  *
  * LIVES HERE since lane-model-v12 ticket 08. It used to live in `mcp/note.ts`
  * and be imported BY the settlement facade, which stopped making sense the
@@ -127,44 +170,40 @@ export const RETRACTION_ONLY_RELATIONS: readonly CitationRelation[] = [];
  * from a module that no longer writes edges. This module already owns the
  * storage vocabulary (`CITATION_RELATIONS`), the entry union and the two write
  * primitives' turn-scoped wrappers, so it is where the parameter names belong.
- *
- * Exported so a guard test can pin that these relation VALUES equal
- * `EDGE_RELATIONS` exactly and that every key names a real
- * `settlementNoteInputShape` parameter.
  */
 export const RELATION_FIELD_ENTRIES: ReadonlyArray<
-  readonly [key: string, relation: CitationRelation]
-> = EDGE_RELATIONS.map(
-  (relation) => [RELATION_FIELD_NAME[relation], relation as CitationRelation] as const,
-);
+  readonly [key: string, relationClass: RelationClass]
+> = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass] as const);
 
 /**
  * The retraction surface, DERIVED from the relation field names above rather
- * than spelled out a second time — `override` -> `retractOverride`. One
- * mechanical rule for all seven, so a relation added to `EDGE_RELATIONS`
- * tomorrow gets its retraction parameter for free.
+ * than spelled out a second time — `correct` -> `retractCorrect`. One
+ * mechanical rule for all three, so a class added tomorrow gets its retraction
+ * parameter for free.
  *
- * PEER ROUND T1466 (finding P1-2): the mirror set is WIDER than the relation
- * set by exactly `RETRACTION_ONLY_RELATIONS` — a word storage still holds rows
- * for and no write surface may assert. That set is EMPTY since lane-model v12
- * ticket 03, so today the two coincide; the union is kept rather than
- * collapsed because the asymmetry is a standing rule, not a historical
- * accident. Never invert this into a relation field — the E2 deadlock that
- * motivated the mirror is repaired by DELETING the frozen row, not by
- * re-admitting the word.
+ * PEER ROUND T1466 (finding P1-2): the mirror set used to be WIDER than the
+ * relation set by exactly `RETRACTION_ONLY_RELATIONS` — a word storage still
+ * holds rows for and no write surface may assert. That set is EMPTY, and under
+ * v13 it stays empty for a NEW reason worth stating: a mirror addresses a
+ * CLASS, and a class resolves to every stored word that means it
+ * (`LEGACY_RELATIONS_BY_CLASS`), so the four words the write surface dropped —
+ * `consume`, `grounds`, `indexes`, and `extends` beside them — are still
+ * deletable through `retractUse`. Never invert this into a relation field: the
+ * E2 deadlock the mirrors exist for is repaired by DELETING the frozen row, not
+ * by re-admitting the word.
+ *
+ * NO COVERAGE ON A RETRACTION. `retractCorrect` removes this turn's correct
+ * edge at the addressed placement whichever bit it carries: the bit says what
+ * KIND of correction was asserted, and withdrawing an assertion does not need
+ * to restate it. Demanding the bit back would also make a legacy `override`
+ * row un-retractable by anyone who had not first read which word it stored.
  */
 export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
-  readonly [key: string, relation: CitationRelation]
-> = [
-  ...RELATION_FIELD_ENTRIES.map(
-    ([key, relation]) =>
-      [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation] as const,
-  ),
-  ...RETRACTION_ONLY_RELATIONS.map(
-    (relation) =>
-      [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation] as const,
-  ),
-];
+  readonly [key: string, relationClass: RelationClass]
+> = RELATION_FIELD_ENTRIES.map(
+  ([key, relationClass]) =>
+    [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass] as const,
+);
 
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
@@ -185,6 +224,15 @@ const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
     "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
   "no-such-edge":
     "is not a relation this turn currently carries — nothing was retracted; read the turn to see what it does carry",
+  // relation-vocabulary-v13 ticket 02: the FULL/PARTIAL bit is a stored field,
+  // so a `correct` that never said which kind of correction it was is refused
+  // here rather than stored half-answered. The message names the missing bit
+  // and both legal values, because a writer told only "coverage required" has
+  // to go read a schema to find out what to send.
+  "coverage-required":
+    'is a `correct` edge with no coverage bit — add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
+  "coverage-not-allowed":
+    "carries a coverage bit, and only `correct` has one — `verify` and `use` make no claim about how much of the cited result survives",
 };
 
 /**
@@ -542,10 +590,15 @@ export type TurnRelationRejectionReason =
   | "unresolved"
   | "self-edge"
   | "segment-not-a-relation-node"
-  | "no-such-edge";
+  | "no-such-edge"
+  /** relation-vocabulary-v13 ticket 02: a `correct` entry with no FULL/PARTIAL bit. */
+  | "coverage-required"
+  /** relation-vocabulary-v13 ticket 02: a `verify`/`use` entry carrying a bit only `correct` has. */
+  | "coverage-not-allowed";
 
 export interface TurnRelationRejection {
-  relation: CitationRelation;
+  /** The CLASS the caller asked for (`correct`/`verify`/`use`), which is what its own message names back at it. */
+  relation: RelationClass;
   /** The token as the caller supplied it, for the message the tool layer builds. */
   raw: string;
   reason: TurnRelationRejectionReason;
@@ -577,16 +630,35 @@ export interface SidedRelationTarget {
   turn: string;
   tailTag: string;
   headTag: string;
+  /**
+   * relation-vocabulary-v13 ticket 02: CORRECT's FULL-or-PARTIAL bit, carried
+   * on the ENTRY rather than split into two fields.
+   *
+   * On the entry because it is a property of THIS edge, not of the field: one
+   * `correct` call may fully overturn one predecessor and partially limit
+   * another, and two fields would have made the writer sort its own targets by
+   * a distinction the precedence never asks it to make at field level.
+   *
+   * Required on a `correct` entry, refused on `verify`/`use` — both by
+   * `shared/relation-class.ts`'s `checkRelationCoverage`, the one place the
+   * pairing is stated.
+   */
+  coverage?: RelationCoverageValue;
 }
 export type RelationTargetEntry = string | SidedRelationTarget;
 
 /**
- * One named relation field's raw targets — the settlement facade's `override`
- * etc., and its `retractOverride` mirror, which addresses the same
- * (relation, addresses) shape at `retractTurnRelations` instead.
+ * One named relation field's raw targets — the settlement facade's `correct`
+ * etc., and its `retractCorrect` mirror, which addresses the same
+ * (class, addresses) shape at `retractTurnRelations` instead.
+ *
+ * relation-vocabulary-v13 ticket 02: keyed on the CLASS, not on a storage word.
+ * The write path resolves the class (plus the entry's coverage bit) to the
+ * storage word the row lands under; retraction resolves it to EVERY storage
+ * word that means it, which is what keeps a legacy `grounds` row deletable.
  */
 export interface TurnRelationFieldInput {
-  relation: CitationRelation;
+  relationClass: RelationClass;
   targets: readonly RelationTargetEntry[];
 }
 
@@ -610,14 +682,24 @@ export interface RelationTargetSides {
  */
 export function normalizeRelationTargetEntry(
   entry: RelationTargetEntry,
-): { raw: string } & RelationTargetSides {
+): { raw: string; coverage: RelationCoverageValue } & RelationTargetSides {
   if (typeof entry === "string") {
-    return { raw: entry, tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG };
+    return {
+      raw: entry,
+      tailTag: UNSETTLED_SIDE_TAG,
+      headTag: UNSETTLED_SIDE_TAG,
+      coverage: NO_RELATION_COVERAGE,
+    };
   }
   return {
     raw: entry.turn,
     tailTag: entry.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: entry.headTag ?? UNSETTLED_SIDE_TAG,
+    // Normalized to the `''` sentinel the same way the two sides are, so the
+    // coverage check and the storage layer see ONE spelling of "not stated" —
+    // and so a bare-address entry (the draft form) is a `correct` with no bit,
+    // which is refused rather than silently stored as an unqualified overturn.
+    coverage: isRelationCoverage(entry.coverage) ? entry.coverage : NO_RELATION_COVERAGE,
   };
 }
 
@@ -728,10 +810,20 @@ export function attachTurnRelations(
 
   for (const field of fields) {
     for (const entry of field.targets) {
-      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+      const { raw, tailTag, headTag, coverage } = normalizeRelationTargetEntry(entry);
+      // relation-vocabulary-v13 ticket 02: the coverage contract runs FIRST,
+      // before the address is even resolved. It is a property of the caller's
+      // own input — a `correct` with no bit is malformed whatever it points at
+      // — and checking it here rather than at one tool surface is what makes
+      // both writers owe it.
+      const coverageIssue = checkRelationCoverage(field.relationClass, coverage);
+      if (coverageIssue) {
+        rejected.push({ relation: field.relationClass, raw, reason: coverageIssue });
+        continue;
+      }
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
       // lane-model-v12 D2 (ticket 04): word-blind and phase-blind — NO
@@ -741,7 +833,7 @@ export function attachTurnRelations(
       // post-write gate would judge its terminus condition; that gate and the
       // condition are both deleted, so the carve-out goes with them.
       if (node.kind === "turn" && node.id === citingTurnId) {
-        rejected.push({ relation: field.relation, raw, reason: "self-edge" });
+        rejected.push({ relation: field.relationClass, raw, reason: "self-edge" });
         continue;
       }
       // [S15069/T1728]: refused HERE, beside the other reference-level
@@ -750,16 +842,24 @@ export function attachTurnRelations(
       // reaching either of those means this one was bypassed.
       if (node.kind !== "turn") {
         rejected.push({
-          relation: field.relation,
+          relation: field.relationClass,
           raw,
           reason: "segment-not-a-relation-node",
         });
         continue;
       }
+      // relation-vocabulary-v13 ticket 02, THE INTERIM EQUIVALENCE'S ONE CALL
+      // SITE (ticket 05a deletes it): the class plus its bit resolves to the
+      // seven-word value the `relation` column carries, so the table's CHECK,
+      // the row identity key and every reader still keyed on those words see a
+      // new edge exactly as they saw its old-vocabulary counterpart. The class
+      // and the bit are ALSO stored, in their own columns, and they are what
+      // any reader asking "which class is this" reads.
+      const relation = interimLegacyRelation(field.relationClass, coverage);
       // lane-model-v12 ticket 08: the two SIDES join the de-dup key — the same
       // (pair, relation) under two DIFFERENT side pairs is two independent
       // claims (D2's own multi-row identity), not a repeat of one.
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
+      const key = relationRowKey(citing, node, relation, { tailTag, headTag });
       // The same claim twice in one call is one claim. Two DIFFERENT relations
       // (or two different lane placements of the same relation) on the same
       // pair are two claims and both land (D2).
@@ -770,10 +870,12 @@ export function attachTurnRelations(
       inputs.push({
         citing,
         cited: node,
-        relation: field.relation,
+        relation,
         provenance,
         tailTag,
         headTag,
+        relationClass: field.relationClass,
+        relationCoverage: coverage,
       });
     }
   }
@@ -801,7 +903,10 @@ export function attachTurnRelations(
       rejected: storageRejected
         .filter((entry) => entry.input.relation !== null)
         .map((entry) => ({
-          relation: entry.input.relation as CitationRelation,
+          // The CLASS the caller asked for, not the interim storage word it
+          // resolved to: the message goes back to a writer that has never been
+          // taught the seven words.
+          relation: (entry.input.relationClass || "use") as RelationClass,
           raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
           reason: "segment-not-a-relation-node" as const,
         })),
@@ -994,24 +1099,44 @@ export function retractTurnRelations(
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
+      // RELATION-VOCABULARY-V13 TICKET 02: A RETRACTION ADDRESSES A CLASS, AND
+      // A CLASS RESOLVES TO EVERY STORED WORD THAT MEANS IT.
+      //
+      // Two things depend on this and neither is optional. (1) `correct` is one
+      // class stored under two words (`override` for FULL, `narrows` for
+      // PARTIAL), so a mirror that resolved to one of them could not withdraw
+      // an assertion made under the other. (2) `use` absorbs four words, three
+      // of which no write surface offers any more — and a stored row with no
+      // deletion path is the E2 DEADLOCK (`RETRACTION_ONLY_RELATIONS` above
+      // carries the full history: a window owning such a row can never commit).
+      // Resolving through the class is what keeps every legacy row deletable
+      // through three mirrors.
+      //
       // lane-model-v12 ticket 08: a bare address retracts the UNSETTLED row, a
       // two-sided one retracts exactly that placement — the same
       // (pair, relation, tail, head) key `attachTurnRelations` writes under, so
-      // a retraction removes exactly the row a matching write would have
+      // a retraction removes exactly the rows a matching write would have
       // restated.
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
-      if (!stored.has(key)) {
-        rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
+      const matching = LEGACY_RELATIONS_BY_CLASS[field.relationClass]
+        .map(
+          (relation) =>
+            [relation, relationRowKey(citing, node, relation, { tailTag, headTag })] as const,
+        )
+        .filter(([, key]) => stored.has(key));
+      if (matching.length === 0) {
+        rejected.push({ relation: field.relationClass, raw, reason: "no-such-edge" });
         continue;
       }
-      if (addressed.has(key)) {
-        continue;
+      for (const [relation, key] of matching) {
+        if (addressed.has(key)) {
+          continue;
+        }
+        addressed.add(key);
+        targets.push({ citing, cited: node, relation, tailTag, headTag });
       }
-      addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation, tailTag, headTag });
     }
   }
 

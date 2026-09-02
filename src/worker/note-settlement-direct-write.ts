@@ -307,8 +307,8 @@ function validateCommitReport(rawReport: unknown): CommitReportValidation {
       ok: false,
       refusal:
         '"report" is required and must be a non-empty, non-whitespace string ' +
-        "— state this window's FRICTION (a forced guess, a relation the seven " +
-        "words could not express, a commit-gate refusal you routed around, a " +
+        "— state this window's FRICTION (a forced guess, a relation the three " +
+        "classes could not express, a commit-gate refusal you routed around, a " +
         "turn you could not read), never a restatement of the counts.",
     };
   }

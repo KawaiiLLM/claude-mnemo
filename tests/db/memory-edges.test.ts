@@ -158,6 +158,9 @@ describe("universal memory edges", () => {
         relation: null,
         tailTag: "",
         headTag: "",
+        // relation-vocabulary-v13 ticket 02: a bare row carries no class.
+        relationClass: "",
+        relationCoverage: "",
         provenance: "text-ref",
         createdAtEpoch: 300,
       },
@@ -334,6 +337,11 @@ describe("universal memory edges", () => {
         relation: "narrows",
         tailTag: "",
         headTag: "",
+        // relation-vocabulary-v13 ticket 02: a direct `writeMemoryEdges` call
+        // states no class, so the row is UNCLASSIFIED — exactly the shape every
+        // row written before that release has.
+        relationClass: "",
+        relationCoverage: "",
         provenance: "judged",
         createdAtEpoch: 400,
       },
@@ -1696,6 +1704,8 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.outbound).toEqual([
       {
         relation: "override",
+        relationClass: "",
+        relationCoverage: "",
         tailTag: "rule-ledger-tickets",
         headTag: "rule-ledger-tickets",
         otherTurnId: outboundTarget,
@@ -1706,6 +1716,8 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.inbound).toEqual([
       {
         relation: "narrows",
+        relationClass: "",
+        relationCoverage: "",
         tailTag: "",
         headTag: "",
         otherTurnId: inboundSource,
@@ -1767,6 +1779,8 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
     expect(edges.outbound).toEqual([
       {
         relation: "grounds",
+        relationClass: "",
+        relationCoverage: "",
         tailTag: "",
         headTag: "",
         otherTurnId: foreign,

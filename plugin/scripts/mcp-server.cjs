@@ -7075,9 +7075,6 @@ function phasesForTypes(types) {
   }
   return phases;
 }
-function isTurnEdgeRelation(value) {
-  return typeof value === "string" && EDGE_RELATIONS.includes(value);
-}
 function sideLabel(side, address) {
   return side === "tail" ? `the tail side (the citing turn ${address})` : `the head side (the cited turn ${address})`;
 }
@@ -7149,7 +7146,7 @@ function validateRelationTarget(input) {
   }
   return checkSideTagLegality(input);
 }
-var TYPE_PHASE, EDGE_RELATIONS, TAGGABLE_RELATIONS, STANCE_RELATIONS, SELF_EDGE_DETAIL, UNSETTLED_LANE_TAG, SEGMENT_TARGET_DETAIL, RELATION_FIELD_NAME;
+var TYPE_PHASE, EDGE_RELATIONS, TAGGABLE_RELATIONS, STANCE_RELATIONS, SELF_EDGE_DETAIL, UNSETTLED_LANE_TAG, SEGMENT_TARGET_DETAIL;
 var init_turn_phase = __esm({
   "src/shared/turn-phase.ts"() {
     "use strict";
@@ -7181,15 +7178,107 @@ var init_turn_phase = __esm({
     SELF_EDGE_DETAIL = "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation \u2014 connectivity's unit is the turn, and design plus delivery inside one turn is one node, not two";
     UNSETTLED_LANE_TAG = "";
     SEGMENT_TARGET_DETAIL = "is a segment address \u2014 relation targets are turn-only; a segment tie goes through ownership (e.g. remember's assign/attach) or a bare cites reference, never a relation";
-    RELATION_FIELD_NAME = {
-      override: "override",
-      narrows: "narrows",
-      extends: "extends",
-      indexes: "indexes",
-      consume: "consume",
-      grounds: "grounds",
-      verifies: "verifies"
+  }
+});
+
+// src/shared/relation-class.ts
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+function relationClassRequiresCoverage(relationClass) {
+  return relationClass === "correct";
+}
+function interimLegacyRelation(relationClass, relationCoverage) {
+  const entry = INTERIM_LEGACY_RELATION.find(
+    (row) => row.relationClass === relationClass && row.relationCoverage === relationCoverage
+  );
+  if (!entry) {
+    throw new Error(
+      `no interim legacy relation for class "${relationClass}" coverage "${relationCoverage}"`
+    );
+  }
+  return entry.legacy;
+}
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+function checkRelationCoverage(relationClass, relationCoverage) {
+  if (relationClassRequiresCoverage(relationClass)) {
+    return relationCoverage === NO_RELATION_COVERAGE ? "coverage-required" : null;
+  }
+  return relationCoverage === NO_RELATION_COVERAGE ? null : "coverage-not-allowed";
+}
+function retiredRelationFieldRefusal(input) {
+  const reached = RETIRED_RELATION_FIELDS.filter(
+    ([retired]) => input[retired] !== void 0
+  );
+  if (reached.length === 0) {
+    return null;
+  }
+  const named = reached.map(([retired, replacement]) => `${retired} -> ${replacement}`).join("; ");
+  return `${reached.length === 1 ? "is a" : "are"} retired relation parameter${reached.length === 1 ? "" : "s"}: ${named}. The seven relation words are replaced by THREE CLASSES \u2014 \`correct\` (carrying a \`coverage\` of \`full\` or \`partial\`), \`verify\`, \`use\` \u2014 decided by precedence: does this output change the cited result's acceptance, reliability or scope (negated/limited = correct, confirmed/supported = verify)? otherwise, is the cited result a direct input to it (= use)? Nothing was written.`;
+}
+var RELATION_CLASSES, RELATION_COVERAGES, NO_RELATION_COVERAGE, NO_RELATION_CLASS, LEGACY_RELATION_CLASS, LEGACY_RELATIONS_BY_CLASS, INTERIM_LEGACY_RELATION, RETIRED_RELATION_FIELDS;
+var init_relation_class = __esm({
+  "src/shared/relation-class.ts"() {
+    "use strict";
+    init_turn_phase();
+    RELATION_CLASSES = ["correct", "verify", "use"];
+    RELATION_COVERAGES = ["full", "partial"];
+    NO_RELATION_COVERAGE = "";
+    NO_RELATION_CLASS = "";
+    LEGACY_RELATION_CLASS = {
+      override: { relationClass: "correct", relationCoverage: "full" },
+      narrows: { relationClass: "correct", relationCoverage: "partial" },
+      verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+      extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+      consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+      grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+      indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
     };
+    LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+      correct: EDGE_RELATIONS.filter(
+        (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+      ),
+      verify: EDGE_RELATIONS.filter(
+        (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+      ),
+      use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+    });
+    INTERIM_LEGACY_RELATION = Object.freeze([
+      { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+      { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+      { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+      { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+    ]);
+    RETIRED_RELATION_FIELDS = Object.freeze([
+      ["override", 'correct with `"coverage": "full"`'],
+      ["narrows", 'correct with `"coverage": "partial"`'],
+      ["extends", "use"],
+      ["consume", "use"],
+      ["grounds", "use"],
+      ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+      ["verifies", "verify"],
+      ["retractOverride", "retractCorrect"],
+      ["retractNarrows", "retractCorrect"],
+      ["retractExtends", "retractUse"],
+      ["retractConsume", "retractUse"],
+      ["retractGrounds", "retractUse"],
+      ["retractIndexes", "retractUse"],
+      ["retractVerifies", "retractVerify"]
+    ]);
   }
 });
 
@@ -7233,6 +7322,11 @@ function mapEdgeRow(row) {
     // reader on one convention rather than making each test for null.
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -7253,8 +7347,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
       -- target's last two components \u2014 identity is (pair, relation, tail,
       -- head), so a DIFFERENT side combination on the same (pair, relation)
@@ -7275,6 +7370,11 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
+        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
+        -- assigned here either. A restatement leaves an existing row exactly as
+        -- stored, so re-asserting a class over a legacy row does not
+        -- retroactively classify it -- classifying the existing corpus is
+        -- ticket 03's migration, which owns the reversibility story for it.
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
@@ -7333,6 +7433,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     if (edge.relation !== null) {
       const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -7342,6 +7444,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.provenance,
         tailTag,
         headTag,
+        relationClass,
+        relationCoverage,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -7436,6 +7540,8 @@ function getOutgoingEdges(db, citing) {
 function mapTurnRelationEdgeRow(row) {
   return {
     relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
@@ -7446,6 +7552,7 @@ function mapTurnRelationEdgeRow(row) {
 function getTurnRelationEdges(db, turnId) {
   const outbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
@@ -7461,6 +7568,7 @@ function getTurnRelationEdges(db, turnId) {
   ).all(turnId).map(mapTurnRelationEdgeRow);
   const inbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
@@ -7485,7 +7593,8 @@ function getRelationEdgesAmongTurns(db, turnIds) {
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -7498,7 +7607,9 @@ function getRelationEdgesAmongTurns(db, turnIds) {
     citedId: row.citedId,
     relation: row.relation,
     tailTag: row.tailTag,
-    headTag: row.headTag
+    headTag: row.headTag,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
   }));
 }
 function getRolledBackCiterIds(db, citingTurnIds) {
@@ -7572,6 +7683,7 @@ var init_memory_edges = __esm({
     init_database();
     init_turn_liveness();
     init_turn_phase();
+    init_relation_class();
     EDGE_NODE_KINDS = ["turn", "segment"];
     CITING_NODE_KINDS = ["turn", "segment", "session"];
     EDGE_PROVENANCES = [
@@ -7600,6 +7712,8 @@ var init_memory_edges = __esm({
   provenance,
   tail_tag AS tailTag,
   head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
     EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
@@ -7821,12 +7935,22 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
 }
 function normalizeRelationTargetEntry(entry) {
   if (typeof entry === "string") {
-    return { raw: entry, tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG };
+    return {
+      raw: entry,
+      tailTag: UNSETTLED_SIDE_TAG,
+      headTag: UNSETTLED_SIDE_TAG,
+      coverage: NO_RELATION_COVERAGE
+    };
   }
   return {
     raw: entry.turn,
     tailTag: entry.tailTag ?? UNSETTLED_SIDE_TAG,
-    headTag: entry.headTag ?? UNSETTLED_SIDE_TAG
+    headTag: entry.headTag ?? UNSETTLED_SIDE_TAG,
+    // Normalized to the `''` sentinel the same way the two sides are, so the
+    // coverage check and the storage layer see ONE spelling of "not stated" —
+    // and so a bare-address entry (the draft form) is a `correct` with no bit,
+    // which is refused rather than silently stored as an unqualified overturn.
+    coverage: isRelationCoverage(entry.coverage) ? entry.coverage : NO_RELATION_COVERAGE
   };
 }
 function resolveRelationTargetNode(db, raw) {
@@ -7857,25 +7981,31 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
   const claimed = /* @__PURE__ */ new Set();
   for (const field of fields) {
     for (const entry of field.targets) {
-      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+      const { raw, tailTag, headTag, coverage } = normalizeRelationTargetEntry(entry);
+      const coverageIssue = checkRelationCoverage(field.relationClass, coverage);
+      if (coverageIssue) {
+        rejected.push({ relation: field.relationClass, raw, reason: coverageIssue });
+        continue;
+      }
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
       if (node.kind === "turn" && node.id === citingTurnId) {
-        rejected.push({ relation: field.relation, raw, reason: "self-edge" });
+        rejected.push({ relation: field.relationClass, raw, reason: "self-edge" });
         continue;
       }
       if (node.kind !== "turn") {
         rejected.push({
-          relation: field.relation,
+          relation: field.relationClass,
           raw,
           reason: "segment-not-a-relation-node"
         });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
+      const relation = interimLegacyRelation(field.relationClass, coverage);
+      const key = relationRowKey(citing, node, relation, { tailTag, headTag });
       if (claimed.has(key)) {
         continue;
       }
@@ -7883,10 +8013,12 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
       inputs.push({
         citing,
         cited: node,
-        relation: field.relation,
+        relation,
         provenance,
         tailTag,
-        headTag
+        headTag,
+        relationClass: field.relationClass,
+        relationCoverage: coverage
       });
     }
   }
@@ -7903,7 +8035,10 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
       // function only ever builds relation rows — so the narrowing is a fact
       // about the caller, not a guess.
       rejected: storageRejected.filter((entry) => entry.input.relation !== null).map((entry) => ({
-        relation: entry.input.relation,
+        // The CLASS the caller asked for, not the interim storage word it
+        // resolved to: the message goes back to a writer that has never been
+        // taught the seven words.
+        relation: entry.input.relationClass || "use",
         raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
         reason: "segment-not-a-relation-node"
       }))
@@ -7976,19 +8111,23 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
-      if (!stored.has(key)) {
-        rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
+      const matching = LEGACY_RELATIONS_BY_CLASS[field.relationClass].map(
+        (relation) => [relation, relationRowKey(citing, node, relation, { tailTag, headTag })]
+      ).filter(([, key]) => stored.has(key));
+      if (matching.length === 0) {
+        rejected.push({ relation: field.relationClass, raw, reason: "no-such-edge" });
         continue;
       }
-      if (addressed.has(key)) {
-        continue;
+      for (const [relation, key] of matching) {
+        if (addressed.has(key)) {
+          continue;
+        }
+        addressed.add(key);
+        targets.push({ citing, cited: node, relation, tailTag, headTag });
       }
-      addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation, tailTag, headTag });
     }
   }
   if (rejected.length > 0 || targets.length === 0) {
@@ -8004,12 +8143,12 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
   );
   return { deleted, restored, rejected: [] };
 }
-var CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS, RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES, RELATION_REJECTION_TEXT;
+var CITATION_RELATIONS, RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES, RELATION_REJECTION_TEXT;
 var init_citations = __esm({
   "src/db/citations.ts"() {
     "use strict";
     init_memory_edges();
-    init_turn_phase();
+    init_relation_class();
     init_references();
     init_turn_liveness();
     CITATION_RELATIONS = [
@@ -8021,18 +8160,10 @@ var init_citations = __esm({
       "grounds",
       "verifies"
     ];
-    RETRACTION_ONLY_RELATIONS = [];
-    RELATION_FIELD_ENTRIES = EDGE_RELATIONS.map(
-      (relation) => [RELATION_FIELD_NAME[relation], relation]
+    RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
+    RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
+      ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
     );
-    RETRACTION_FIELD_ENTRIES = [
-      ...RELATION_FIELD_ENTRIES.map(
-        ([key, relation]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation]
-      ),
-      ...RETRACTION_ONLY_RELATIONS.map(
-        (relation) => [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation]
-      )
-    ];
     RELATION_REJECTION_TEXT = {
       malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
       unresolved: "does not resolve to a turn or segment",
@@ -8048,7 +8179,14 @@ var init_citations = __esm({
       // instead of a constraint failure.
       "segment-not-a-relation-node": "names a segment \u2014 a segment is a container, not a relation node, so no relation may point at it (prose naming it still records a bare citation)",
       "self-edge": "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
-      "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry"
+      "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry",
+      // relation-vocabulary-v13 ticket 02: the FULL/PARTIAL bit is a stored field,
+      // so a `correct` that never said which kind of correction it was is refused
+      // here rather than stored half-answered. The message names the missing bit
+      // and both legal values, because a writer told only "coverage required" has
+      // to go read a schema to find out what to send.
+      "coverage-required": 'is a `correct` edge with no coverage bit \u2014 add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
+      "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives"
     };
   }
 });
@@ -11865,7 +12003,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtjageg9" : "dev";
+    BUILD_ID = true ? "0.29.0-mtjut1j0" : "dev";
   }
 });
 
@@ -13091,6 +13229,20 @@ function ensureLaneDispositionJustificationEvidence(db) {
     "INTEGER NOT NULL DEFAULT 0"
   );
 }
+function ensureMemoryEdgesRelationClassColumns(db) {
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_class",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_class IN ('', 'correct', 'verify', 'use'))"
+  );
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_coverage",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_coverage IN ('', 'full', 'partial') AND (relation_coverage = '') = (relation_class <> 'correct'))"
+  );
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -13223,6 +13375,7 @@ function initializeSchema(db) {
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
   ensureMemoryEdgesRelationTurnScoped(db);
+  ensureMemoryEdgesRelationClassColumns(db);
   runSegmentOneTagMigration(db);
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
@@ -39855,7 +40008,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // only the common path (five fields), states that an edge is normally
   // settlement's hindsight call, and never claims the parameters are
   // unavailable — they simply are not the routine tool.
-  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (correct/verify/use and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -39973,7 +40126,16 @@ var relationTargetEntryShape = external_exports3.union([
   external_exports3.object({
     turn: external_exports3.string().min(1),
     tailTag: external_exports3.string(),
-    headTag: external_exports3.string()
+    headTag: external_exports3.string(),
+    // relation-vocabulary-v13 ticket 02: CORRECT's FULL-or-PARTIAL bit, on
+    // the ENTRY because it is a fact about this one edge — one `correct` call
+    // may fully overturn one predecessor and partially limit another.
+    // OPTIONAL here and required by the WRITE PATH (`db/citations.ts` ->
+    // `shared/relation-class.ts`'s `checkRelationCoverage`): the schema cannot
+    // express "required on `correct`, refused on `verify`/`use`" while all
+    // three fields share one entry shape, and a per-field entry shape would
+    // have put the pairing rule in three places instead of one.
+    coverage: external_exports3.enum(["full", "partial"]).optional()
   }).strict()
 ]);
 var RELATION_TAG_FORM_LINE = "Each entry is a bare address (both sides unsettled \u2014 the draft an edge starts as) or `{turn, tailTag, headTag}`: `tailTag` is the lane THIS turn writes from, `headTag` the lane the cited turn sits in. Place BOTH or NEITHER \u2014 one side alone rejects. Each side is checked against its OWN endpoint: the tag must be canonical, DECLARED in that endpoint's task, and already on that endpoint turn's own tags. The same word on both sides means one lane spanning the edge; two different lanes is a legal crossing, and so is the same word in two different tasks, which is two lanes.";
@@ -40049,53 +40211,41 @@ var noteInputShape = {
   // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
   // two-sided admission test; no describe states a phase requirement, since v12
   // retired phase pairing outright, and none says which word to choose.
-  override: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES \u2014 one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  // relation-vocabulary-v13 ticket 02: THREE CLASSES REPLACE SEVEN WORDS.
+  // Each describe carries the one-line READING of its class plus
+  // `RELATION_TAG_FORM_LINE`'s two-sided admission test; the PRECEDENCE that
+  // decides between them (CORRECT > VERIFY > USE, and both are subsets of USE)
+  // is judgment and lives in the Memory Rubric alone, per ADR-0009's three-way
+  // split. Property order is the precedence's own order, most specific first.
+  correct: external_exports3.array(relationTargetEntryShape).optional().describe(
+    'Addresses whose PRINCIPAL result this turn negates, limits or re-scopes. REQUIRES the coverage bit on every entry: `"coverage": "full"` when no substantial part of the cited result may still serve as a PREMISE (it survives only as history \u2014 permanent historical facts like having dispatched something or written a file never rescue it), `"coverage": "partial"` when a definite non-empty part still stands as one. An entry with no coverage is refused, naming the missing bit. ' + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  narrows: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds but cuts a piece OUT of \u2014 a correction or limit on a detail. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  verify: external_exports3.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose PRINCIPAL result this turn's own work confirms or supports \u2014 narrow: this turn's work must bear on whether that result holds, and prose saying \"confirms\" about a DETAIL of the cited turn is not this class. A check that came out AGAINST the cited result is `correct`. No `coverage` \u2014 refused if sent. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  extends: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds and adds a piece TO. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  use: external_exports3.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose PRINCIPAL result or output was a DIRECT input to this turn's own new conclusion or output \u2014 actually consulted, adopted, tested or incorporated. Ancestors are excluded: cite the layer you used, not what it rested on. The fallback class, used where this turn makes no claim about whether the cited result still holds. No `coverage` \u2014 refused if sent. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  indexes: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses the nodes this turn converges on and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes \u2014 lane structure and convergence declaration are separate facts. " + RELATION_TAG_FORM_LINE + " A same-lane entry declares that lane's convergence at this point. A lane has no state, so this closes nothing and a later member is not a contradiction. Judgment lives in the Memory Rubric."
-  ),
-  consume: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong \u2014 never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal \u2014 the declaration does not carry the lane-structure fact. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  grounds: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  verifies: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end \u2014 a check that came out AGAINST the cited claim is an override, not this word. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  // The seven retraction mirrors. A relation is never overwritten (a relation
+  // The three retraction mirrors. A relation is never overwritten (a relation
   // write is purely additive), so correcting a wrong one is two auditable acts
   // — retract, then write the right relation. The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
+  // (`retract` + the class parameter's own name), pinned against
   // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
   // the two halves of the vocabulary cannot drift apart.
-  retractOverride: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  //
+  // A mirror addresses a CLASS, so it deletes whichever stored row means that
+  // class at the addressed placement — including a row written under the
+  // retired seven-word vocabulary. That is what keeps every stored edge
+  // deletable through three parameters (`db/citations.ts`'s
+  // `retractTurnRelations` states why an undeletable row is a deadlock).
+  retractCorrect: external_exports3.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose correct edge FROM this turn is deleted, whichever coverage bit it carries; an address carrying no such edge rejects the call, naming it. No `coverage` here \u2014 withdrawing an assertion does not restate it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractNarrows: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  retractVerify: external_exports3.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose verify edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractExtends: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractIndexes: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractConsume: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractGrounds: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractVerifies: external_exports3.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  retractUse: external_exports3.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose use edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
   // The retraction-only mirrors (peer round T1466, finding P1-2) used to sit
   // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
@@ -40282,20 +40432,12 @@ var settlementNoteInputShape = {
   // word reaches both writers from a single edit and the two vocabularies
   // cannot drift apart. See `noteInputShape`'s own field block for the full
   // restoration note.
-  override: noteInputShape.override,
-  narrows: noteInputShape.narrows,
-  extends: noteInputShape.extends,
-  indexes: noteInputShape.indexes,
-  consume: noteInputShape.consume,
-  grounds: noteInputShape.grounds,
-  verifies: noteInputShape.verifies,
-  retractOverride: noteInputShape.retractOverride,
-  retractNarrows: noteInputShape.retractNarrows,
-  retractExtends: noteInputShape.retractExtends,
-  retractIndexes: noteInputShape.retractIndexes,
-  retractConsume: noteInputShape.retractConsume,
-  retractGrounds: noteInputShape.retractGrounds,
-  retractVerifies: noteInputShape.retractVerifies,
+  correct: noteInputShape.correct,
+  verify: noteInputShape.verify,
+  use: noteInputShape.use,
+  retractCorrect: noteInputShape.retractCorrect,
+  retractVerify: noteInputShape.retractVerify,
+  retractUse: noteInputShape.retractUse,
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way
@@ -40364,6 +40506,7 @@ var rememberInputSchema = external_exports3.object(rememberInputShape).strict().
 
 // src/mcp/note.ts
 init_citations();
+init_relation_class();
 init_database();
 
 // src/db/lane-edge-gate.ts
@@ -41970,6 +42113,9 @@ if (process.env.MNEMO_TOKENIZER_SELFTEST === "1") {
   );
 }
 
+// src/mcp/timeline.ts
+init_relation_class();
+
 // src/mcp/relation-tree.ts
 function formatRelationArrow(words, crossLane) {
   const stroke = crossLane ? "=" : "-";
@@ -41978,10 +42124,11 @@ function formatRelationArrow(words, crossLane) {
   return `${lead}${label}${stroke}>`;
 }
 function defaultRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
+  if (relation === "correct(partial)") return 0;
   if (relation === "indexes") return 1;
   if (relation === "consume") return 2;
-  if (relation === "override") return 3;
+  if (relation === "override" || relation === "correct(full)") return 3;
   return 4;
 }
 function groupHopEdges(edges) {
@@ -42072,6 +42219,7 @@ function renderRelationTree(tree, formatHopAddress, suffixOf) {
 
 // src/mcp/relations-view.ts
 init_memory_edges();
+init_relation_class();
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
 }
@@ -42096,7 +42244,13 @@ function buildCandidates(rows) {
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      relation: row.relation,
+      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
+      // written under, and the stored seven-word value only for a row written
+      // before that vocabulary existed (`displayEdgeRelation`). This is the
+      // surface settlement reads its own edges back through, so a writer taught
+      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
+      // what it just wrote.
+      relation: displayEdgeRelation(row),
       tailTag: row.tailTag,
       headTag: row.headTag
     }))
@@ -44235,7 +44389,13 @@ function buildElectedCitations(laneEdges, electedIds) {
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
     const entry = bucket.get(edge.citedId) ?? { words: /* @__PURE__ */ new Set(), crossLane: false };
-    entry.words.add(edge.relation);
+    entry.words.add(
+      displayEdgeRelation({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+      })
+    );
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
     }
@@ -45353,6 +45513,7 @@ function resolveTurnRowLinks(db, turns) {
     // graph's most visible face. Filtered at BOTH ends here, at the source:
     // the cited lookup below then reads only ids this filter already passed.
     `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
@@ -45394,7 +45555,13 @@ function resolveTurnRowLinks(db, turns) {
       byCiter.set(edge.citingId, bucket);
     }
     if (edge.relation !== null) {
-      entry.words.add(edge.relation);
+      entry.words.add(
+        displayEdgeRelation({
+          relation: edge.relation,
+          relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+          relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+        })
+      );
     }
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
@@ -45890,6 +46057,7 @@ function loadFrontierEdges(db, laneTags) {
   const placeholders = laneTags.map(() => "?").join(",");
   const rows = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -45913,7 +46081,17 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
+    // `relation` stays the STORED word: it is the SCORING key here
+    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
+    // owns re-keying those onto the class. What renders is `relationLabel`
+    // below — the two are kept apart on purpose, because conflating them would
+    // have made a vocabulary change silently move the frontier weights.
     relation: row.relation,
+    relationLabel: displayEdgeRelation({
+      relation: row.relation,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+    }),
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -46410,14 +46588,14 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       renderedEdges.add(edge);
       if (!inLane(edge)) {
         parts.push(
-          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
+          `${edge.relationLabel} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
         );
         break;
       }
       const targetPage = pageOf.get(edge.headTurnId);
       if (targetPage !== void 0 && targetPage !== pageNumber) {
         parts.push(
-          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
+          `${edge.relationLabel} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
         );
         break;
       }
@@ -46428,7 +46606,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       const mirrors = member === void 0 ? [] : mirrorsByHead.get(edge.headTurnId) ?? [];
       const continuable = member !== void 0 && !appeared.has(edge.headTurnId) && outs.length === 1 && mirrors.length === 0;
       if (continuable) {
-        parts.push(`${edge.relation} -> ${address}`);
+        parts.push(`${edge.relationLabel} -> ${address}`);
         appeared.add(edge.headTurnId);
         edge = outs[0];
         continue;
@@ -46437,7 +46615,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       if (!rendersElsewhere && member !== void 0) {
         appeared.add(edge.headTurnId);
       }
-      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
+      parts.push(`${edge.relationLabel} -> ${address}${rendersElsewhere ? "^" : ""}`);
       break;
     }
     return parts.join(" ");
@@ -46465,8 +46643,8 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
     for (const { edge: mirror, sameLane } of mirrors) {
       const arrow = sameLane ? "<-" : "<=";
       const source = sameLane ? `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^ (${pageOf.get(mirror.tailTurnId)}/${pageCount})` : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
-      const key = `${arrow}|${mirror.relation}`;
-      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      const key = `${arrow}|${mirror.relationLabel}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relationLabel, sources: [] };
       group.sources.push(source);
       foldGroups.set(key, group);
       mirrorCount += 1;
@@ -47269,22 +47447,27 @@ function isRelationTargetEntry(value) {
     return false;
   }
   const candidate = value;
-  return typeof candidate.turn === "string" && typeof candidate.tailTag === "string" && typeof candidate.headTag === "string";
+  return typeof candidate.turn === "string" && typeof candidate.tailTag === "string" && typeof candidate.headTag === "string" && // relation-vocabulary-v13 ticket 02: the coverage bit's SHAPE only. Whether
+  // this class may carry one at all is the write path's judgment
+  // (`shared/relation-class.ts`'s `checkRelationCoverage`), which is where
+  // both refusals — a `correct` with no bit, a `verify`/`use` with one — are
+  // stated once for both writers.
+  (candidate.coverage === void 0 || candidate.coverage === "full" || candidate.coverage === "partial");
 }
 function collectRelationFields(entries, input) {
   const fields = [];
-  for (const [key, relation] of entries) {
+  for (const [key, relationClass] of entries) {
     const provided = input[key];
     if (provided === void 0) {
       continue;
     }
     if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
       fail2(
-        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects when present.`
+        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects (with an optional "coverage" of "full" or "partial") when present.`
       );
     }
     if (provided.length > 0) {
-      fields.push({ relation, targets: provided });
+      fields.push({ relationClass, targets: provided });
     }
   }
   return fields;
@@ -47295,7 +47478,7 @@ function touchesEdgeFields(input) {
   );
 }
 function checkRelationTargetLegality(db, relation, raw, tailTag, headTag, citingTurnId, citingAddress, citingTurnTags, citingPhases) {
-  if (!isTurnEdgeRelation(relation)) {
+  if (!isRelationClass(relation)) {
     return null;
   }
   const reference = parseBareAddressReference(raw);
@@ -47343,7 +47526,7 @@ function resolveRelationFields(db, citingTurnId, citingAddress, citingTurnType, 
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const issue2 = checkRelationTargetLegality(
         db,
-        field.relation,
+        field.relationClass,
         raw,
         tailTag,
         headTag,
@@ -47473,10 +47656,14 @@ function handleTurnWrite(db, address, input, options) {
   const touchesProseFields = ["title", "content", "insight"].some(
     (field) => input[field] !== void 0 || isFieldEditMode(modeMap[field])
   );
+  const retiredRelations = retiredRelationFieldRefusal(input);
+  if (retiredRelations) {
+    return parameterError(retiredRelations);
+  }
   const touchesEdges = touchesEdgeFields(input);
   if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies), or one of their retract\u2026 mirrors is required.`
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (correct/verify/use), or one of their retract\u2026 mirrors is required.`
     );
   }
   const retireTopic = input.retireTopic;

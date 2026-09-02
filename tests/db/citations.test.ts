@@ -11,6 +11,7 @@ import {
   recomputeTurnCitedPairs,
   retractTurnRelations,
   type RecomputeTurnCitedPairsFields as RecomputeFields,
+  type RelationTargetEntry,
 } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import {
@@ -662,6 +663,20 @@ describe("recomputeTurnCitedPairs (spec C6)", () => {
   });
 });
 
+/**
+ * relation-vocabulary-v13 ticket 02: a `correct` entry MUST carry its
+ * FULL/PARTIAL coverage bit, so a bare address string is not a legal `correct`
+ * target — only `verify` and `use` take the bare draft form. The two sides stay
+ * `''` (unsettled), which is exactly what a bare address used to mean, so these
+ * fixtures test the same DRAFT shape they always did.
+ */
+function correctEntries(
+  addresses: readonly string[],
+  coverage: "full" | "partial",
+): RelationTargetEntry[] {
+  return addresses.map((turn) => ({ turn, tailTag: "", headTag: "", coverage }));
+}
+
 describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled by edge-mechanism-revision D1/D3, ticket 02)", () => {
   let db: Database;
   let sessionId: number;
@@ -703,7 +718,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "narrows", targets: [`S${sessionId}/T1`] }],
+      [{ relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") }],
       500,
     );
 
@@ -733,7 +748,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "consume", targets: [`S${sessionId}/T2`] }],
+      [{ relationClass: "use", targets: [`S${sessionId}/T2`] }],
       500,
     );
 
@@ -742,7 +757,11 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(result.written[0]?.cited).toEqual({ kind: "turn", id: turns[1]! });
     // The body's own bare pair to T1 is untouched alongside it (the sort is
     // lexical, so the bare `null` row lands last).
-    expect(relationsOn(turns[2]!)).toEqual(["consume", null]);
+    // relation-vocabulary-v13 ticket 02: a `use` write lands in the `relation`
+    // column as `extends` — the INTERIM equivalence
+    // (`shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION`), which ticket 05a
+    // replaces. The stored word, not the class, is what `relationsOn` reads.
+    expect(relationsOn(turns[2]!)).toEqual(["extends", null]);
   });
 
   // Ticket 02 (D2): the tool-surface "one relation per pair" refusal is gone,
@@ -751,7 +770,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "verifies", targets: [`S${sessionId}/T1`] }],
+      [{ relationClass: "verify", targets: [`S${sessionId}/T1`] }],
       500,
     );
 
@@ -759,8 +778,8 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       db,
       turns[2]!,
       [
-        { relation: "verifies", targets: [`S${sessionId}/T1`] },
-        { relation: "narrows", targets: [`S${sessionId}/T1`] },
+        { relationClass: "verify", targets: [`S${sessionId}/T1`] },
+        { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
       ],
       600,
     );
@@ -778,13 +797,13 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "consume", targets: [`S${sessionId}/T3`] }],
+      [{ relationClass: "use", targets: [`S${sessionId}/T3`] }],
       500,
     );
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "consume", raw: `S${sessionId}/T3`, reason: "self-edge" },
+      { relation: "use", raw: `S${sessionId}/T3`, reason: "self-edge" },
     ]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
@@ -798,13 +817,13 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "grounds", targets: [`S${sessionId}/T3`] }],
+      [{ relationClass: "use", targets: [`S${sessionId}/T3`] }],
       500,
     );
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "grounds", raw: `S${sessionId}/T3`, reason: "self-edge" },
+      { relation: "use", raw: `S${sessionId}/T3`, reason: "self-edge" },
     ]);
     expect(getOutgoingEdges(db, { kind: "turn", id: turns[2]! })).toEqual([]);
   });
@@ -814,16 +833,16 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       db,
       turns[2]!,
       [
-        { relation: "narrows", targets: ["not an address"] },
-        { relation: "consume", targets: [`S${sessionId}/T4242`] },
+        { relationClass: "correct", targets: correctEntries(["not an address"], "partial") },
+        { relationClass: "use", targets: [`S${sessionId}/T4242`] },
       ],
       500,
     );
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "narrows", raw: "not an address", reason: "malformed" },
-      { relation: "consume", raw: `S${sessionId}/T4242`, reason: "unresolved" },
+      { relation: "correct", raw: "not an address", reason: "malformed" },
+      { relation: "use", raw: `S${sessionId}/T4242`, reason: "unresolved" },
     ]);
   });
 
@@ -835,7 +854,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+      [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
       500,
     );
 
@@ -843,7 +862,11 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     expect(stored).toHaveLength(1);
     expect(stored[0]?.citing).toEqual({ kind: "turn", id: turns[2]! });
     expect(stored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
-    expect(stored[0]?.relation).toBe("consume");
+    // INTERIM (ticket 05a): `use` stores as `extends`, and the CLASS is what a
+    // reader asks for.
+    expect(stored[0]?.relation).toBe("extends");
+    expect(stored[0]?.relationClass).toBe("use");
+    expect(stored[0]?.relationCoverage).toBe("");
   });
 
   // [S15069/T1728] REVERSED, by ruling. This test used to assert the opposite,
@@ -861,7 +884,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     const result = attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "narrows", targets: [`E${segment.id}`] }],
+      [{ relationClass: "correct", targets: correctEntries([`E${segment.id}`], "partial") }],
       500,
     );
 
@@ -873,7 +896,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     // indistinguishable and a mutation removing this one survives.
     expect(result.rejected).toEqual([
       {
-        relation: "narrows",
+        relation: "correct",
         raw: `E${segment.id}`,
         reason: "segment-not-a-relation-node",
       },
@@ -894,14 +917,14 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       db,
       turns[2]!,
       [
-        { relation: "verifies", targets: [`S${sessionId}/T1`] },
-        { relation: "narrows", targets: [`S${sessionId}/T1`] },
+        { relationClass: "verify", targets: [`S${sessionId}/T1`] },
+        { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
       ],
       500,
     );
 
     const result = retractTurnRelations(db, turns[2]!, [
-      { relation: "narrows", targets: [`S${sessionId}/T1`] },
+      { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
     ]);
 
     expect(result.rejected).toEqual([]);
@@ -913,18 +936,18 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "verifies", targets: [`S${sessionId}/T1`] }],
+      [{ relationClass: "verify", targets: [`S${sessionId}/T1`] }],
       500,
     );
 
     const result = retractTurnRelations(db, turns[2]!, [
-      { relation: "verifies", targets: [`S${sessionId}/T1`] },
-      { relation: "narrows", targets: [`S${sessionId}/T1`] },
+      { relationClass: "verify", targets: [`S${sessionId}/T1`] },
+      { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "partial") },
     ]);
 
     expect(result.deleted).toEqual([]);
     expect(result.rejected).toEqual([
-      { relation: "narrows", raw: `S${sessionId}/T1`, reason: "no-such-edge" },
+      { relation: "correct", raw: `S${sessionId}/T1`, reason: "no-such-edge" },
     ]);
     // The one that WAS there survives — all-or-nothing, same as the attach path.
     expect(relationsOn(turns[2]!)).toEqual(["verifies"]);
@@ -938,12 +961,12 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
     attachTurnRelations(
       db,
       turns[2]!,
-      [{ relation: "verifies", targets: [`S${sessionId}/T1`] }],
+      [{ relationClass: "verify", targets: [`S${sessionId}/T1`] }],
       500,
     );
 
     const result = retractTurnRelations(db, turns[2]!, [
-      { relation: "verifies", targets: [`S${sessionId}/T1`] },
+      { relationClass: "verify", targets: [`S${sessionId}/T1`] },
     ]);
 
     expect(result.restored).toEqual([]);
@@ -987,21 +1010,21 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       attachTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         600,
       );
       // Replaced, not accompanied — the pair holds exactly one row.
-      expect(relationsOn(turns[2]!)).toEqual(["consume"]);
+      expect(relationsOn(turns[2]!)).toEqual(["extends"]);
 
       const result = retractTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         700,
       );
 
       expect(result.rejected).toEqual([]);
-      expect(result.deleted.map((edge) => edge.relation)).toEqual(["consume"]);
+      expect(result.deleted.map((edge) => edge.relation)).toEqual(["extends"]);
       expect(result.restored).toHaveLength(1);
       expect(result.restored[0]?.cited).toEqual({ kind: "turn", id: turns[0]! });
       expect(result.restored[0]?.relation).toBeNull();
@@ -1028,8 +1051,8 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
         db,
         turns[2]!,
         [
-          { relation: "override", targets: [`S${sessionId}/T1`] },
-          { relation: "extends", targets: [`S${sessionId}/T2`] },
+          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
+          { relationClass: "use", targets: [`S${sessionId}/T2`] },
         ],
         600,
       );
@@ -1038,8 +1061,8 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
         db,
         turns[2]!,
         [
-          { relation: "override", targets: [`S${sessionId}/T1`] },
-          { relation: "extends", targets: [`S${sessionId}/T2`] },
+          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
+          { relationClass: "use", targets: [`S${sessionId}/T2`] },
         ],
         700,
       );
@@ -1060,8 +1083,8 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
         db,
         turns[2]!,
         [
-          { relation: "verifies", targets: [`S${sessionId}/T1`] },
-          { relation: "consume", targets: [`S${sessionId}/T1`] },
+          { relationClass: "verify", targets: [`S${sessionId}/T1`] },
+          { relationClass: "use", targets: [`S${sessionId}/T1`] },
         ],
         600,
       );
@@ -1069,7 +1092,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       const result = retractTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         700,
       );
 
@@ -1087,14 +1110,14 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       attachTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         600,
       );
 
       const result = retractTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         700,
       );
 
@@ -1137,13 +1160,13 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       const attach = attachTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "extends", targets: [`E${segment.id}`] }],
+        [{ relationClass: "use", targets: [`E${segment.id}`] }],
         600,
       );
       expect(attach.written).toEqual([]);
       expect(attach.rejected).toEqual([
         {
-          relation: "extends",
+          relation: "use",
           raw: `E${segment.id}`,
           reason: "segment-not-a-relation-node",
         },
@@ -1162,7 +1185,7 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
       attachTurnRelations(
         db,
         turns[2]!,
-        [{ relation: "consume", targets: [`S${sessionId}/T1`] }],
+        [{ relationClass: "use", targets: [`S${sessionId}/T1`] }],
         600,
       );
 
@@ -1170,15 +1193,15 @@ describe("attachTurnRelations / retractTurnRelations (spec C1; prose decoupled b
         db,
         turns[2]!,
         [
-          { relation: "consume", targets: [`S${sessionId}/T1`] },
-          { relation: "override", targets: [`S${sessionId}/T1`] },
+          { relationClass: "use", targets: [`S${sessionId}/T1`] },
+          { relationClass: "correct", targets: correctEntries([`S${sessionId}/T1`], "full") },
         ],
         700,
       );
 
       expect(result.restored).toEqual([]);
       expect(result.deleted).toEqual([]);
-      expect(relationsOn(turns[2]!)).toEqual(["consume"]);
+      expect(relationsOn(turns[2]!)).toEqual(["extends"]);
     });
   });
 });

@@ -8,6 +8,12 @@ import {
 import { runWriteTransaction } from "./database";
 import { liveTurnSql } from "./turn-liveness";
 import { EDGE_RELATIONS } from "../shared/turn-phase";
+import {
+  NO_RELATION_CLASS,
+  NO_RELATION_COVERAGE,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 
 /**
  * The universal citation graph (spec D7). One table for every edge the system
@@ -116,6 +122,21 @@ export interface MemoryEdge {
   tailTag: string;
   /** lane-model-v12 D1: the CITED side's lane, `''` when unsettled. Identity-bearing, like `tailTag`. */
   headTag: string;
+  /**
+   * relation-vocabulary-v13 ticket 02: the THREE-CLASS value this row was
+   * written under — `correct`, `verify`, `use`, or `''` for every row written
+   * before that release. NOT identity-bearing: identity stays (pair, relation,
+   * tail, head), because the class is a FUNCTION of `relation` for a legacy row
+   * and is filled from `relation`'s own interim equivalent for a new one, so
+   * adding it to the key could only split one claim into two rows.
+   *
+   * Read it through `shared/relation-class.ts`'s `edgeRelationClass`, never
+   * directly: that function is what makes a legacy row answer the same question
+   * as a new one.
+   */
+  relationClass: RelationClassValue;
+  /** relation-vocabulary-v13 ticket 02: `full`/`partial` on a `correct` row, `''` everywhere else. The STORED bit a reader asks "can I still rely on the cited claim". */
+  relationCoverage: RelationCoverageValue;
   provenance: EdgeProvenance;
   createdAtEpoch: number;
 }
@@ -147,6 +168,17 @@ export interface WriteEdgeInput {
    */
   tailTag?: string;
   headTag?: string;
+  /**
+   * relation-vocabulary-v13 ticket 02: the three-class value to store beside
+   * `relation`. Omitted (or `''`) writes an UNCLASSIFIED row — the shape every
+   * pre-v13 caller and every bare/backfill write produces. Storage only: the
+   * class/coverage PAIRING is enforced by the table's own CHECK below this
+   * layer and by `shared/relation-class.ts`'s `checkRelationCoverage` above it,
+   * the same trust model the lane sides already have here.
+   */
+  relationClass?: RelationClassValue;
+  /** relation-vocabulary-v13 ticket 02: `full`/`partial`, and only on a `correct` class. */
+  relationCoverage?: RelationCoverageValue;
   /**
    * Historical override for a one-time backfill (schema.ts's legacy
    * `turn_citations` retirement): the row being carried across already
@@ -305,6 +337,8 @@ const EDGE_COLUMNS = `
   provenance,
   tail_tag AS tailTag,
   head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
 
@@ -328,6 +362,8 @@ interface EdgeRow {
   provenance: EdgeProvenance;
   tailTag: string;
   headTag: string;
+  relationClass: RelationClassValue | null;
+  relationCoverage: RelationCoverageValue | null;
   createdAtEpoch: number;
 }
 
@@ -342,6 +378,11 @@ function mapEdgeRow(row: EdgeRow): MemoryEdge {
     // reader on one convention rather than making each test for null.
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch,
   };
@@ -480,14 +521,17 @@ export function writeMemoryEdges(
       string,
       string,
       string,
+      string,
+      string,
       number,
     ]
   >(
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
       -- target's last two components — identity is (pair, relation, tail,
       -- head), so a DIFFERENT side combination on the same (pair, relation)
@@ -508,6 +552,11 @@ export function writeMemoryEdges(
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
+        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
+        -- assigned here either. A restatement leaves an existing row exactly as
+        -- stored, so re-asserting a class over a legacy row does not
+        -- retroactively classify it -- classifying the existing corpus is
+        -- ticket 03's migration, which owns the reversibility story for it.
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `,
@@ -635,6 +684,8 @@ export function writeMemoryEdges(
       // fact — there is no second representation left to keep in step.
       const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
       const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -644,6 +695,8 @@ export function writeMemoryEdges(
         edge.provenance,
         tailTag,
         headTag,
+        relationClass,
+        relationCoverage,
         createdAtEpoch,
       );
       dropBarePairRow.run(
@@ -839,6 +892,10 @@ export function getIncomingEdges(db: Database, cited: EdgeNode): MemoryEdge[] {
  */
 export interface TurnRelationEdgeView {
   relation: CitationRelation;
+  /** relation-vocabulary-v13 ticket 02: the stored three-class value, `''` on a row written before it. The renderer prints this (via `displayEdgeRelation`) so a writer reads back the vocabulary it was taught. */
+  relationClass: RelationClassValue;
+  /** relation-vocabulary-v13 ticket 02: `full`/`partial` on a `correct` row, `''` elsewhere. */
+  relationCoverage: RelationCoverageValue;
   /** lane-model-v12 ticket 08: the CITING side's lane, `''` unsettled — the renderer needs each side, since a crossing names two. */
   tailTag: string;
   /** The CITED side's lane, `''` unsettled. */
@@ -857,6 +914,8 @@ export interface TurnRelationEdges {
 
 interface TurnRelationEdgeRow {
   relation: CitationRelation;
+  relationClass: RelationClassValue | null;
+  relationCoverage: RelationCoverageValue | null;
   tailTag: string;
   headTag: string;
   otherTurnId: number;
@@ -867,6 +926,8 @@ interface TurnRelationEdgeRow {
 function mapTurnRelationEdgeRow(row: TurnRelationEdgeRow): TurnRelationEdgeView {
   return {
     relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
@@ -896,6 +957,7 @@ export function getTurnRelationEdges(db: Database, turnId: number): TurnRelation
   const outbound = db
     .query<TurnRelationEdgeRow, [number]>(
       `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
@@ -915,6 +977,7 @@ export function getTurnRelationEdges(db: Database, turnId: number): TurnRelation
   const inbound = db
     .query<TurnRelationEdgeRow, [number]>(
       `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
@@ -941,6 +1004,10 @@ export interface TurnRelationEdgeLite {
   relation: string;
   tailTag: string;
   headTag: string;
+  /** relation-vocabulary-v13 ticket 02: the stored class, `''` on a row written before it — carried so a RENDERER can print the vocabulary its writer was taught. Nothing that computes lane structure or election rank reads it (ticket 05a owns the weights). */
+  relationClass: RelationClassValue;
+  /** relation-vocabulary-v13 ticket 02: `full`/`partial` on a `correct` row. */
+  relationCoverage: RelationCoverageValue;
 }
 
 /**
@@ -989,11 +1056,14 @@ export function getRelationEdgesAmongTurns(
         relation: string;
         tailTag: string;
         headTag: string;
+        relationClass: RelationClassValue | null;
+        relationCoverage: RelationCoverageValue | null;
       },
       (number | string)[]
     >(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -1009,6 +1079,8 @@ export function getRelationEdgesAmongTurns(
       relation: row.relation,
       tailTag: row.tailTag,
       headTag: row.headTag,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     }));
 }
 

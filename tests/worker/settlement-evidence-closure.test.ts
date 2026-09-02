@@ -330,7 +330,7 @@ describe("settlement-gate-taxonomy ticket 04 — a defect this run CREATES on an
           });
           const written = (await handlers.get("note")!({
             turn: `S${fixture.sessionDbId}/T899`,
-            extends: [`S${fixture.sessionDbId}/T898`],
+            use: [`S${fixture.sessionDbId}/T898`],
           })) as { content: Array<{ text: string }> };
           expect(written.content[0]!.text).not.toContain("refused");
 

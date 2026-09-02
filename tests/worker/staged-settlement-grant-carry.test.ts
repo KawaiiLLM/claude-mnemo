@@ -204,7 +204,7 @@ describe("grant-carry across the transition (ticket 05) — the edges phase inhe
       const results = new Map<string, string>();
       const relationArgs = {
         turn: addr(fixture.sessionDbId, 1),
-        extends: [{ turn: addr(fixture.sessionDbId, 2) }],
+        use: [{ turn: addr(fixture.sessionDbId, 2) }],
       };
       const steps: ScriptedStep[] = [
         {
@@ -301,7 +301,7 @@ describe("grant-carry across the transition (ticket 05) — the edges phase inhe
       const results = new Map<string, string>();
       const relationArgs = {
         turn: addr(fixture.sessionDbId, 1),
-        extends: [{ turn: addr(fixture.sessionDbId, 2) }],
+        use: [{ turn: addr(fixture.sessionDbId, 2) }],
       };
       const steps: ScriptedStep[] = [
         {

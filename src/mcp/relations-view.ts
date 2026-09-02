@@ -4,6 +4,7 @@ import {
   getTurnRelationEdges,
   type TurnRelationEdgeView,
 } from "../db/memory-edges";
+import { displayEdgeRelation } from "../shared/relation-class";
 import {
   defaultRelationRank,
   groupHopEdges,
@@ -98,7 +99,13 @@ function buildCandidates(rows: readonly TurnRelationEdgeView[]): AddressedHop[] 
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      relation: row.relation,
+      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
+      // written under, and the stored seven-word value only for a row written
+      // before that vocabulary existed (`displayEdgeRelation`). This is the
+      // surface settlement reads its own edges back through, so a writer taught
+      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
+      // what it just wrote.
+      relation: displayEdgeRelation(row),
       tailTag: row.tailTag,
       headTag: row.headTag,
     })),

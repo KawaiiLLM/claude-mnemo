@@ -208,26 +208,18 @@ describe("note tool", () => {
       "retireTopic",
       "mode",
       // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
-      // seven relation parameters and their seven `retract…` mirrors sit HERE,
-      // between `mode` and the prose tail — RESTORED after lane-model-v12
-      // ticket 08 had deleted them from this shape on a misreading of the same
-      // ruling (its own words keep the capability: "工具上保留这些能力"). See
-      // `src/mcp/definitions.ts`'s `noteInputShape` field block for the full
-      // restoration note.
-      "override",
-      "narrows",
-      "extends",
-      "indexes",
-      "consume",
-      "grounds",
-      "verifies",
-      "retractOverride",
-      "retractNarrows",
-      "retractExtends",
-      "retractIndexes",
-      "retractConsume",
-      "retractGrounds",
-      "retractVerifies",
+      // relation parameters and their `retract…` mirrors sit HERE, between
+      // `mode` and the prose tail — RESTORED after lane-model-v12 ticket 08 had
+      // deleted them from this shape on a misreading of the same ruling (its
+      // own words keep the capability: "工具上保留这些能力").
+      // relation-vocabulary-v13 ticket 02: THREE classes, three mirrors, in the
+      // precedence's own order.
+      "correct",
+      "verify",
+      "use",
+      "retractCorrect",
+      "retractVerify",
+      "retractUse",
       "insight",
       "content",
     ]);
@@ -1418,6 +1410,10 @@ describe("note tool citations (spec C6)", () => {
         relation: null,
         tailTag: "",
         headTag: "",
+        // relation-vocabulary-v13 ticket 02: a bare prose-citation row carries
+        // no class and no coverage.
+        relationClass: "",
+        relationCoverage: "",
         provenance: "text-ref",
         createdAtEpoch: 900,
       },
@@ -1560,7 +1556,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
     const text = resultText(result);
     expect(text).toStartWith("Noted ");
@@ -1569,7 +1565,12 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
 
     const edges = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
     expect(edges).toHaveLength(1);
+    // INTERIM (relation-vocabulary-v13 ticket 02, replaced by ticket 05a): a
+    // `use` write lands in the `relation` column as `extends`, and the CLASS is
+    // stored beside it in its own column.
     expect(edges[0]?.relation).toBe("extends");
+    expect(edges[0]?.relationClass).toBe("use");
+    expect(edges[0]?.relationCoverage).toBe("");
     expect(edges[0]?.tailTag).toBe("lane-a");
     expect(edges[0]?.headTag).toBe("lane-a");
     expect(edges[0]?.cited.id).toBe(citedTurnId);
@@ -1584,7 +1585,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
     expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(1);
 
@@ -1593,7 +1594,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // mirror has to carry the identical two-sided form, not a bare address.
     const result = note({
       turn: `S${sessionId}/T2`,
-      retractExtends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      retractUse: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
     const text = resultText(result);
     expect(text).not.toStartWith("Parameter error");
@@ -1629,14 +1630,14 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
       turn: `S${sessionId}/T2`,
       title: "t",
       content: "c",
-      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
     attachTurnRelations(
       db,
       settlementCitingTurnId,
       [
         {
-          relation: "extends",
+          relationClass: "use",
           targets: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
       ],
@@ -1655,6 +1656,192 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     // Provenance is the one declared, deliberate difference — never the shape.
     expect(viaNote[0]?.provenance).toBe("asserted");
     expect(viaSettlement[0]?.provenance).toBe("judged");
+  });
+
+  // -------------------------------------------------------------------------
+  // RELATION-VOCABULARY-V13 TICKET 02: the three-class surface, its coverage
+  // bit, and the refusal a caller working from the retired vocabulary gets.
+  // -------------------------------------------------------------------------
+
+  describe("the three-class surface accepts, refuses and stores the coverage bit", () => {
+    function placed(coverage?: "full" | "partial") {
+      return {
+        turn: `S${sessionId}/T1`,
+        tailTag: "lane-a",
+        headTag: "lane-a",
+        ...(coverage ? { coverage } : {}),
+      };
+    }
+
+    test("a `correct` write stores the class AND its bit, readable from the row", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(
+        note({ turn: `S${sessionId}/T2`, correct: [placed("partial")] }),
+      );
+      expect(text).not.toStartWith("Parameter error");
+      expect(text).toContain("Attached 1 relation(s).");
+
+      const [edge] = getOutgoingEdges(db, { kind: "turn", id: citingTurnId });
+      // THE BIT IS A STORED FIELD, not prose: a reader deciding "can I still
+      // rely on the cited claim" reads it off the row.
+      expect(edge?.relationClass).toBe("correct");
+      expect(edge?.relationCoverage).toBe("partial");
+      // INTERIM (ticket 05a replaces the mapping): correct/partial lands in
+      // `relation` as `narrows`, which is what keeps the edge visible to every
+      // reader still keyed on the seven words.
+      expect(edge?.relation).toBe("narrows");
+    });
+
+    test("`full` and `partial` land as two DIFFERENT rows, so the bit is never lost to a de-dup", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      note({ turn: `S${sessionId}/T2`, correct: [placed("full")] });
+      note({ turn: `S${sessionId}/T2`, correct: [placed("partial")] });
+
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId }).map(
+        (edge) => [edge.relation, edge.relationClass, edge.relationCoverage] as const,
+      );
+      expect(stored).toEqual([
+        ["narrows", "correct", "partial"],
+        ["override", "correct", "full"],
+      ]);
+    });
+
+    test("a `correct` with no coverage is refused, NAMING the missing bit and both its values", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(note({ turn: `S${sessionId}/T2`, correct: [placed()] }));
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("is a `correct` edge with no coverage bit");
+      expect(text).toContain('"coverage": "full"');
+      expect(text).toContain('"coverage": "partial"');
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
+
+    test("a BARE address is a `correct` with no bit, and is refused the same way", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const text = resultText(
+        note({ turn: `S${sessionId}/T2`, correct: [`S${sessionId}/T1`] }),
+      );
+      expect(text).toStartWith("Parameter error:");
+      expect(text).toContain("no coverage bit");
+    });
+
+    test("`verify` and `use` are refused when they carry a coverage value", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      for (const field of ["verify", "use"] as const) {
+        const text = resultText(
+          note({ turn: `S${sessionId}/T2`, [field]: [placed("full")] }),
+        );
+        expect(text, field).toStartWith("Parameter error:");
+        expect(text, field).toContain("carries a coverage bit, and only `correct` has one");
+        expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+      }
+    });
+
+    test("`verify` and `use` land with an EMPTY coverage, never a defaulted one", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      note({ turn: `S${sessionId}/T2`, verify: [placed()], use: [placed()] });
+      const stored = getOutgoingEdges(db, { kind: "turn", id: citingTurnId }).map(
+        (edge) => [edge.relation, edge.relationClass, edge.relationCoverage] as const,
+      );
+      expect(stored).toEqual([
+        ["extends", "use", ""],
+        ["verifies", "verify", ""],
+      ]);
+    });
+
+    // EVERY retired parameter, assertion and mirror, gets NAMED with its
+    // replacement. "Unrecognized key" is not enough: a run working from a
+    // cached schema or an older prompt cannot repair from it in one round trip,
+    // and this codebase has paid for a stale teaching surface more than once.
+    test("every retired relation parameter is refused BY NAME, with the class to write instead", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+
+      const expected: Array<[string, string]> = [
+        ["override", 'correct with `"coverage": "full"`'],
+        ["narrows", 'correct with `"coverage": "partial"`'],
+        ["extends", "use"],
+        ["consume", "use"],
+        ["grounds", "use"],
+        ["indexes", "use"],
+        ["verifies", "verify"],
+        ["retractOverride", "retractCorrect"],
+        ["retractNarrows", "retractCorrect"],
+        ["retractExtends", "retractUse"],
+        ["retractConsume", "retractUse"],
+        ["retractGrounds", "retractUse"],
+        ["retractIndexes", "retractUse"],
+        ["retractVerifies", "retractVerify"],
+      ];
+      for (const [retired, replacement] of expected) {
+        const text = resultText(
+          note({ turn: `S${sessionId}/T2`, [retired]: [`S${sessionId}/T1`] }),
+        );
+        expect(text, retired).toStartWith("Parameter error:");
+        expect(text, retired).toContain(`${retired} -> ${replacement}`);
+        expect(text, retired).toContain("THREE CLASSES");
+        expect(text, retired).toContain("Nothing was written.");
+        expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+      }
+    });
+
+    // The mirrors address a CLASS, so they reach a row written under the
+    // retired vocabulary too — the E2 deadlock (a stored word with no deletion
+    // path) is exactly what that resolution exists to prevent.
+    test("retractUse deletes a legacy `grounds` row, and retractCorrect an `override` one", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+      // Seeded through the STORAGE primitive under the old words, exactly as a
+      // pre-v13 release wrote them: no class, no coverage.
+      writeMemoryEdges(
+        db,
+        (["grounds", "override"] as const).map((relation) => ({
+          citing: { kind: "turn" as const, id: citingTurnId },
+          cited: { kind: "turn" as const, id: citedTurnId },
+          relation,
+          provenance: "judged" as const,
+          tailTag: "lane-a",
+          headTag: "lane-a",
+        })),
+        900,
+      );
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toHaveLength(2);
+
+      expect(
+        resultText(note({ turn: `S${sessionId}/T2`, retractUse: [placed()] })),
+      ).toContain("Retracted 1 relation(s)");
+      expect(
+        resultText(note({ turn: `S${sessionId}/T2`, retractCorrect: [placed()] })),
+      ).toContain("Retracted 1 relation(s)");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
+
+    // `correct` is ONE class stored under TWO words, so a class-level
+    // retraction has to take both — a mirror that reached only one could not
+    // withdraw an assertion made under the other.
+    test("retractCorrect takes both coverages of a pair in one call", () => {
+      const { segmentTag } = homeAndDeclareLanes(db, ["lane-a"]);
+      placeBothEndpoints(segmentTag, ["lane-a"]);
+      note({ turn: `S${sessionId}/T2`, correct: [placed("full")] });
+      note({ turn: `S${sessionId}/T2`, correct: [placed("partial")] });
+
+      expect(
+        resultText(note({ turn: `S${sessionId}/T2`, retractCorrect: [placed()] })),
+      ).toContain("Retracted 2 relation(s)");
+      expect(getOutgoingEdges(db, { kind: "turn", id: citingTurnId })).toEqual([]);
+    });
   });
 
   // Acceptance criterion 4: a restored parameter is not a relaxed one — every
@@ -1676,7 +1863,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
           turn: `S${sessionId}/T2`,
           title: "t",
           content: "c",
-          extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-z", headTag: "lane-z" }],
+          use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-z", headTag: "lane-z" }],
         }),
       );
       expect(text).toStartWith("Parameter error:");
@@ -1693,7 +1880,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
           turn: `S${sessionId}/T2`,
           title: "t",
           content: "c",
-          extends: [{ turn: `S${sessionId}/T1`, tailTag: "Lane-A", headTag: "Lane-A" }],
+          use: [{ turn: `S${sessionId}/T1`, tailTag: "Lane-A", headTag: "Lane-A" }],
         }),
       );
       expect(text).toStartWith("Parameter error:");
@@ -1710,7 +1897,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
           turn: `S${sessionId}/T2`,
           title: "t",
           content: "c",
-          extends: [{ turn: `S${sessionId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
         }),
       );
       expect(text).toStartWith("Parameter error:");
@@ -1731,7 +1918,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
           turn: `S${sessionId}/T2`,
           title: "t",
           content: "c",
-          extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         }),
       );
       expect(text).toStartWith("Parameter error:");
@@ -1743,7 +1930,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
   test("the two-sided entry form is accepted — the same shape settlement's own relation fields carry", () => {
     const parsed = noteInputSchema.safeParse({
       turn: `S${sessionId}/T2`,
-      extends: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+      use: [{ turn: `S${sessionId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
     });
     expect(parsed.success).toBe(true);
   });
@@ -1774,7 +1961,7 @@ describe("`note` restores its relation surface (main-agent-edge-capability ticke
     expect(text).toStartWith("Parameter error:");
     expect(text).toContain("at least one of title, content, insight, type, tags");
     expect(text).toContain("a relation field");
-    expect(text).toContain("override/narrows/extends/indexes/consume/grounds/verifies");
+    expect(text).toContain("correct/verify/use");
     expect(text).toContain("retract");
   });
 });

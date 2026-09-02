@@ -355,7 +355,7 @@ describe("the unified run — origin-gated same-response siblings vs the next ro
       const results = new Map<string, string>();
       const relationArgs = {
         turn: addr(fixture.sessionDbId, 1),
-        extends: [{ turn: addr(fixture.sessionDbId, 2) }],
+        use: [{ turn: addr(fixture.sessionDbId, 2) }],
       };
       const steps: ScriptedStep[] = [
         {
@@ -923,7 +923,7 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
             {
               tool: "note",
               toolUseId: "tu_citer_retract",
-              args: { turn: addr(fixture.sessionDbId, 9), retractExtends: [addr(fixture.sessionDbId, 1)] },
+              args: { turn: addr(fixture.sessionDbId, 9), retractUse: [addr(fixture.sessionDbId, 1)] },
             },
           ],
         },
@@ -1024,7 +1024,7 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
           };
           const noteHandler = handlers.get("note")!;
           const raw = await noteHandler(
-            { turn: outsiderAddress, retractGrounds: [addr(fixture.sessionDbId, 1)] },
+            { turn: outsiderAddress, retractUse: [addr(fixture.sessionDbId, 1)] },
             { _meta: { [RESPONSE_ORIGIN_TOOL_USE_META_KEY]: "tu_widen_attempt" } },
           );
           results.set("tu_widen_attempt", resultText(raw));

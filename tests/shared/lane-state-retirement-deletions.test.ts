@@ -196,7 +196,9 @@ describe("lane-state-retirement ticket 01 — the retired symbols stay retired",
       ".scratch/lane-model-v12/rubric-v12-concepts.md",
     ]) {
       const text = read(path);
-      expect(text, path).toContain("被 override 的节点依然有效");
+      // relation-vocabulary-v13 ticket 02 renamed the word, not the law: the
+      // class that overturns a node still does not invalidate it.
+      expect(text, path).toContain("被 correct 的节点依然有效");
       expect(text, path).not.toContain("七个词里只有 index 参与 open / closed 的判定");
       expect(text, path).not.toContain("**closed**:泳道的最新成员是它的终点");
       expect(text, path).not.toContain("**open**:最新成员不是终点");

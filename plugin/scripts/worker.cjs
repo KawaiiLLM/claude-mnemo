@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjageg9" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjut1j0" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -390,15 +390,70 @@ var EDGE_RELATIONS = [
 ];
 var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
 var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-var RELATION_FIELD_NAME = {
-  override: "override",
-  narrows: "narrows",
-  extends: "extends",
-  indexes: "indexes",
-  consume: "consume",
-  grounds: "grounds",
-  verifies: "verifies"
+
+// src/shared/relation-class.ts
+var RELATION_CLASSES = ["correct", "verify", "use"];
+var RELATION_COVERAGES = ["full", "partial"];
+var NO_RELATION_COVERAGE = "";
+var NO_RELATION_CLASS = "";
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+var LEGACY_RELATION_CLASS = {
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
 };
+var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+  correct: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+  ),
+  verify: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+  ),
+  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+});
+var INTERIM_LEGACY_RELATION = Object.freeze([
+  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+]);
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+var RETIRED_RELATION_FIELDS = Object.freeze([
+  ["override", 'correct with `"coverage": "full"`'],
+  ["narrows", 'correct with `"coverage": "partial"`'],
+  ["extends", "use"],
+  ["consume", "use"],
+  ["grounds", "use"],
+  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+  ["verifies", "verify"],
+  ["retractOverride", "retractCorrect"],
+  ["retractNarrows", "retractCorrect"],
+  ["retractExtends", "retractUse"],
+  ["retractConsume", "retractUse"],
+  ["retractGrounds", "retractUse"],
+  ["retractIndexes", "retractUse"],
+  ["retractVerifies", "retractVerify"]
+]);
 
 // src/db/references.ts
 var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
@@ -541,18 +596,10 @@ var CITATION_RELATIONS = [
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
 }
-var RETRACTION_ONLY_RELATIONS = [];
-var RELATION_FIELD_ENTRIES = EDGE_RELATIONS.map(
-  (relation) => [RELATION_FIELD_NAME[relation], relation]
+var RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
+var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
+  ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
 );
-var RETRACTION_FIELD_ENTRIES = [
-  ...RELATION_FIELD_ENTRIES.map(
-    ([key, relation]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation]
-  ),
-  ...RETRACTION_ONLY_RELATIONS.map(
-    (relation) => [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation]
-  )
-];
 
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
@@ -611,6 +658,8 @@ var EDGE_COLUMNS = `
   provenance,
   tail_tag AS tailTag,
   head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
 var EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
@@ -625,6 +674,11 @@ function mapEdgeRow(row) {
     // reader on one convention rather than making each test for null.
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -642,8 +696,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
       -- target's last two components \u2014 identity is (pair, relation, tail,
       -- head), so a DIFFERENT side combination on the same (pair, relation)
@@ -664,6 +719,11 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
+        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
+        -- assigned here either. A restatement leaves an existing row exactly as
+        -- stored, so re-asserting a class over a legacy row does not
+        -- retroactively classify it -- classifying the existing corpus is
+        -- ticket 03's migration, which owns the reversibility story for it.
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
@@ -722,6 +782,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     if (edge.relation !== null) {
       const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -731,6 +793,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.provenance,
         tailTag,
         headTag,
+        relationClass,
+        relationCoverage,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -777,6 +841,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
 function mapTurnRelationEdgeRow(row) {
   return {
     relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
@@ -787,6 +853,7 @@ function mapTurnRelationEdgeRow(row) {
 function getTurnRelationEdges(db, turnId) {
   const outbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
@@ -802,6 +869,7 @@ function getTurnRelationEdges(db, turnId) {
   ).all(turnId).map(mapTurnRelationEdgeRow);
   const inbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
@@ -826,7 +894,8 @@ function getRelationEdgesAmongTurns(db, turnIds) {
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -839,7 +908,9 @@ function getRelationEdgesAmongTurns(db, turnIds) {
     citedId: row.citedId,
     relation: row.relation,
     tailTag: row.tailTag,
-    headTag: row.headTag
+    headTag: row.headTag,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
   }));
 }
 function getRolledBackCiterIds(db, citingTurnIds) {
@@ -6636,6 +6707,20 @@ function ensureLaneDispositionJustificationEvidence(db) {
     "INTEGER NOT NULL DEFAULT 0"
   );
 }
+function ensureMemoryEdgesRelationClassColumns(db) {
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_class",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_class IN ('', 'correct', 'verify', 'use'))"
+  );
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_coverage",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_coverage IN ('', 'full', 'partial') AND (relation_coverage = '') = (relation_class <> 'correct'))"
+  );
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -6768,6 +6853,7 @@ function initializeSchema(db) {
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
   ensureMemoryEdgesRelationTurnScoped(db);
+  ensureMemoryEdgesRelationClassColumns(db);
   runSegmentOneTagMigration(db);
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
@@ -11479,10 +11565,11 @@ function formatRelationArrow(words, crossLane) {
   return `${lead}${label}${stroke}>`;
 }
 function defaultRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
+  if (relation === "correct(partial)") return 0;
   if (relation === "indexes") return 1;
   if (relation === "consume") return 2;
-  if (relation === "override") return 3;
+  if (relation === "override" || relation === "correct(full)") return 3;
   return 4;
 }
 function groupHopEdges(edges) {
@@ -11596,7 +11683,13 @@ function buildCandidates(rows) {
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      relation: row.relation,
+      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
+      // written under, and the stored seven-word value only for a row written
+      // before that vocabulary existed (`displayEdgeRelation`). This is the
+      // surface settlement reads its own edges back through, so a writer taught
+      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
+      // what it just wrote.
+      relation: displayEdgeRelation(row),
       tailTag: row.tailTag,
       headTag: row.headTag
     }))
@@ -13937,7 +14030,13 @@ function buildElectedCitations(laneEdges, electedIds) {
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
     const entry = bucket.get(edge.citedId) ?? { words: /* @__PURE__ */ new Set(), crossLane: false };
-    entry.words.add(edge.relation);
+    entry.words.add(
+      displayEdgeRelation({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+      })
+    );
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
     }
@@ -15055,6 +15154,7 @@ function resolveTurnRowLinks(db, turns) {
     // graph's most visible face. Filtered at BOTH ends here, at the source:
     // the cited lookup below then reads only ids this filter already passed.
     `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
@@ -15096,7 +15196,13 @@ function resolveTurnRowLinks(db, turns) {
       byCiter.set(edge.citingId, bucket);
     }
     if (edge.relation !== null) {
-      entry.words.add(edge.relation);
+      entry.words.add(
+        displayEdgeRelation({
+          relation: edge.relation,
+          relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+          relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+        })
+      );
     }
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
@@ -15592,6 +15698,7 @@ function loadFrontierEdges(db, laneTags) {
   const placeholders = laneTags.map(() => "?").join(",");
   const rows = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -15615,7 +15722,17 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
+    // `relation` stays the STORED word: it is the SCORING key here
+    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
+    // owns re-keying those onto the class. What renders is `relationLabel`
+    // below — the two are kept apart on purpose, because conflating them would
+    // have made a vocabulary change silently move the frontier weights.
     relation: row.relation,
+    relationLabel: displayEdgeRelation({
+      relation: row.relation,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+    }),
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -16079,14 +16196,14 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       renderedEdges.add(edge);
       if (!inLane(edge)) {
         parts.push(
-          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
+          `${edge.relationLabel} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
         );
         break;
       }
       const targetPage = pageOf.get(edge.headTurnId);
       if (targetPage !== void 0 && targetPage !== pageNumber) {
         parts.push(
-          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
+          `${edge.relationLabel} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
         );
         break;
       }
@@ -16097,7 +16214,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       const mirrors = member === void 0 ? [] : mirrorsByHead.get(edge.headTurnId) ?? [];
       const continuable = member !== void 0 && !appeared.has(edge.headTurnId) && outs.length === 1 && mirrors.length === 0;
       if (continuable) {
-        parts.push(`${edge.relation} -> ${address}`);
+        parts.push(`${edge.relationLabel} -> ${address}`);
         appeared.add(edge.headTurnId);
         edge = outs[0];
         continue;
@@ -16106,7 +16223,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       if (!rendersElsewhere && member !== void 0) {
         appeared.add(edge.headTurnId);
       }
-      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
+      parts.push(`${edge.relationLabel} -> ${address}${rendersElsewhere ? "^" : ""}`);
       break;
     }
     return parts.join(" ");
@@ -16134,8 +16251,8 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
     for (const { edge: mirror, sameLane } of mirrors) {
       const arrow = sameLane ? "<-" : "<=";
       const source = sameLane ? `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^ (${pageOf.get(mirror.tailTurnId)}/${pageCount})` : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
-      const key = `${arrow}|${mirror.relation}`;
-      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      const key = `${arrow}|${mirror.relationLabel}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relationLabel, sources: [] };
       group.sources.push(source);
       foldGroups.set(key, group);
       mirrorCount += 1;
@@ -19106,19 +19223,26 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
-**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002
+**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002\u540C\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9,\u5B58\u5728\u5B83\u5199\u4E0B\u65F6\u5224\u65AD\u8BDA\u5B9E\u7684\u90A3\u4E2A\u6CF3\u9053\u4F4D\u7F6E\u4E0A,\u4E0D\u6309\u5019\u9009\u6CF3\u9053\u9010\u4E2A\u5F00\u884C\u3002
 
-**\u4E03\u4E2A\u5173\u7CFB\u8BCD**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3):
+**\u4E09\u4E2A\u5173\u7CFB\u7C7B**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3)\u3002\u8FB9\u7684\u4E24\u7AEF\u90FD\u662F\u8282\u70B9\u7684**\u4E3B\u7ED3\u679C** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u771F\u6B63\u7ACB\u4E0B\u7684\u7ED3\u8BBA\u6216\u4EA7\u51FA,\u4E0D\u662F\u5B83\u987A\u5E26\u63D0\u5230\u7684\u67D0\u4E2A\u7EC6\u8282;\u7EC6\u8282\u4E0D\u6323\u8FB9\u3002\u4E00\u4E2A turn \u53EF\u4EE5\u6709\u51E0\u4E2A\u5E76\u5217\u7684\u4E3B\u7ED3\u679C,\u5C31\u50CF\u5B83\u53EF\u4EE5\u5C5E\u4E8E\u51E0\u6761\u6CF3\u9053\u3002
 
-- **verify** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u9A8C\u8BC1\u3001\u652F\u6301\u3002
-- **override** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u5426\u51B3\u3001\u64A4\u56DE\u3001\u66FF\u6362\u3002
-- **narrow** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u4FEE\u6B63\u3001\u9650\u5236\u4E86\u7EC6\u8282\u3002
-- **extend** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u62D3\u5C55\u3001\u8865\u5145\u3002
-- **ground** \u2014\u2014 \u672C\u8282\u70B9\u7684\u5DE5\u4F5C\u4F9D\u8D56\u88AB\u5F15\u8282\u70B9\u6210\u7ACB,\u5B83\u82E5\u5012\u4E0B,\u672C\u8282\u70B9\u968F\u4E4B\u5012\u4E0B\u3002
-- **consume** \u2014\u2014 \u4F7F\u7528\u5176\u4ED6\u8282\u70B9\u7684\u4EA7\u51FA,\u4E0D\u4E3A\u5176\u6B63\u786E\u6027\u62C5\u8D23\u3002
-- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u6307\u5411\u7684\u662F\u771F\u6B63\u4FC3\u6210**\u540C\u4E00\u4E2A\u9636\u6BB5\u7ED3\u679C**\u7684\u90A3\u6279\u8282\u70B9 \u2014\u2014 \u4E00\u6B21 \`/to-spec\`\u3001\u4E00\u6B21\u53D1\u5E03\u3002\u53EA\u6307\u5411\u4E00\u4E2A\u8282\u70B9,\u8BF4\u660E\u8FD9\u4E2A\u9636\u6BB5\u5207\u5F97\u592A\u7EC6\u4E86\u3002
+- **correct** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u5426\u51B3\u3001\u64A4\u56DE\u3001\u66FF\u6362,\u6216\u88AB\u4FEE\u6B63\u3001\u9650\u7F29\u3002\u5B83\u5E26\u4E00\u4E2A\u8986\u76D6\u4F4D:
+  - **full** \u2014\u2014 \u88AB\u5F15\u4E3B\u7ED3\u679C\u6CA1\u6709\u4EFB\u4F55\u5B9E\u8D28\u90E8\u5206\u8FD8\u80FD\u4F5C\u4E3A\u540E\u7EED\u63A8\u7406\u6216\u884C\u52A8\u7684**\u524D\u63D0**,\u5B83\u53EA\u4F5C\u4E3A\u5386\u53F2\u7559\u5B58\u3002\u5386\u53F2\u4E8B\u5B9E(\u5B83\u6D3E\u53D1\u8FC7\u4EC0\u4E48\u3001\u5199\u8FC7\u54EA\u4E2A\u6587\u4EF6\u3001\u8DD1\u8FC7\u54EA\u4E2A\u6D4B\u8BD5)\u4E0D\u628A\u5B83\u6551\u56DE partial\u3002
+  - **partial** \u2014\u2014 \u4FEE\u6B63\u4E4B\u540E,\u5B83\u4ECD\u6709\u786E\u5B9A\u7684\u3001\u975E\u7A7A\u7684\u5B9E\u8D28\u90E8\u5206\u4F5C\u4E3A\u524D\u63D0\u7AD9\u5F97\u4F4F\u3002
+- **verify** \u2014\u2014 \u672C\u8282\u70B9\u81EA\u5DF1\u7684\u5DE5\u4F5C\u76F4\u63A5\u5173\u7CFB\u5230\u88AB\u5F15\u8282\u70B9\u4E3B\u7ED3\u679C\u662F\u5426\u6210\u7ACB,\u5E76\u4E14\u9A8C\u8BC1\u3001\u652F\u6301\u4E86\u5B83\u3002\u7A84:\u6563\u6587\u91CC\u5199\u7740\u300C\u786E\u8BA4\u300D\u4F46\u6307\u5411\u7684\u662F\u7EC6\u8282,\u4E0D\u6784\u6210 verify\u3002
+- **use** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u7ED3\u679C\u6216\u4EA7\u51FA,\u662F\u672C\u8282\u70B9\u5F62\u6210\u65B0\u7ED3\u8BBA\u6216\u65B0\u4EA7\u51FA\u7684**\u76F4\u63A5\u8F93\u5165**:\u771F\u7684\u88AB\u67E5\u9605\u3001\u91C7\u7EB3\u3001\u68C0\u9A8C\u6216\u5E76\u5165\u3002\u7956\u5148\u4E0D\u7B97 \u2014\u2014 \u53EA\u5199\u76F4\u63A5\u7528\u5230\u7684\u90A3\u4E00\u5C42\u3002
 
-**\u4E03\u4E2A\u8BCD\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
+\u5224\u5B9A\u662F\u4E00\u4E2A**\u4F18\u5148\u7EA7**,\u4E0D\u662F\u4E00\u4E2A\u5212\u5206,\u6309\u987A\u5E8F\u95EE:
+
+1. \u8FD9\u6B21\u4EA7\u51FA\u662F\u5426\u6539\u53D8\u4E86\u88AB\u5F15\u4EA7\u51FA\u7684\u63A5\u53D7\u5EA6\u3001\u53EF\u9760\u6027\u6216\u9002\u7528\u8303\u56F4?\u5426\u51B3\u6216\u9650\u7F29 = **correct**;\u786E\u8BA4\u6216\u652F\u6301 = **verify**\u3002
+2. \u90FD\u4E0D\u662F,\u800C\u88AB\u5F15\u4EA7\u51FA\u662F\u8FD9\u6B21\u65B0\u4EA7\u51FA\u7684\u76F4\u63A5\u8F93\u5165 = **use**\u3002
+
+\u6240\u4EE5 **correct \u4E0E verify \u662F use \u7684\u5B50\u96C6**,use \u662F\u4E0D\u4F5C\u771F\u503C\u65AD\u8A00\u65F6\u7684\u515C\u5E95;\u69FD\u4F4D\u5B58\u6700\u5177\u4F53\u7684\u90A3\u4E00\u7C7B\u3002\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9:\u300C\u65E2\u4FEE\u6B63\u4E86\u5B83\u53C8\u5728\u5B83\u4E0A\u9762\u7EE7\u7EED\u5EFA\u8BBE\u300D\u8BB0 correct,\u4E0D\u53E6\u5199\u4E00\u884C\u3002\u88AB\u5F15\u8282\u70B9\u82E5\u6301\u6709\u51E0\u4E2A\u5E76\u5217\u7684\u4E3B\u7ED3\u679C,\u800C\u672C\u8F6E\u5BF9\u5176\u4E2D\u4E00\u4E2A\u662F verify\u3001\u5BF9\u53E6\u4E00\u4E2A\u662F correct,**\u5360\u4E3B\u5BFC\u7684\u90A3\u4E2A\u52A8\u4F5C\u80DC\u51FA**,\u4E0D\u662F\u66F4\u5B89\u5168\u7684\u6807\u7B7E\u80DC\u51FA\u3002
+
+**\u5145\u5206\u5F15\u7528**:\u4E00\u4E2A\u8282\u70B9\u7684\u4E3B\u7ED3\u8BBA\u51E1\u662F\u5EFA\u7ACB\u5728\u66F4\u65E9\u8282\u70B9\u4E4B\u4E0A\u7684,\u90A3\u4E9B\u8282\u70B9\u90FD\u8981\u88AB\u5F15\u5230 \u2014\u2014 \u8FD9\u4E00\u8F6E\u81EA\u5DF1\u505A\u51FA\u6765\u7684\u8BC1\u636E\u4E0D\u6B20\u4EFB\u4F55\u5F15\u7528,\u5B83\u5C31\u662F\u8FD9\u4E00\u8F6E\u7684\u8D21\u732E\u3002\u8FD9\u662F**\u5199\u4F5C\u6CD5\u5219**,\u4E0D\u662F\u673A\u5668\u5224\u51B3:\u53EA\u6709\u5199\u7684\u4EBA\u77E5\u9053\u7ED3\u8BBA\u538B\u5728\u4EC0\u4E48\u4E0A\u9762\u3002\u552F\u4E00\u7684\u673A\u5668\u4EE3\u7406\u662F\u63D0\u9192\u2014\u2014\u6563\u6587\u91CC\u70B9\u4E86\u540D\u5374\u6CA1\u6709\u8FB9\u7684\u5730\u5740,\u53EA\u4F5C\u4E3A\u8B66\u544A\u51FA\u73B0,\u4ECE\u4E0D\u963B\u6B62\u5199\u5165\u3002
+
+**\u4E09\u4E2A\u7C7B\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB correct \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
 
 **\u5B57\u6BB5**:\u4E00\u4E2A turn \u7684\u7B14\u8BB0\u6709\u4E09\u4E2A\u5B57\u6BB5,\u5404\u53F8\u4E00\u804C\u3002
 
@@ -19308,10 +19432,11 @@ function renderImpressionTeaching() {
     "only: the lines are prefix-coupled, and a partial patch leaves a half-new",
     "state.",
     "",
-    "One thing is not a judgment call: an anchor your own edges OVERRODE this",
-    "window forces you to revise or delete the sentence that rests on it. A lane",
-    "whose anchors you overrode may not be retained. A `narrows` edge is a nudge",
-    "\u2014 reread the sentence; nothing is mechanically required.",
+    "One thing is not a judgment call: an anchor your own edges CORRECTED in",
+    "FULL this window forces you to revise or delete the sentence that rests on",
+    "it. A lane whose anchors you fully corrected may not be retained. A",
+    "`correct` with coverage `partial` is a nudge \u2014 reread the sentence;",
+    "nothing is mechanically required.",
     "",
     "GOLDEN SAMPLE \u2014 a full impression:",
     "",
@@ -19568,7 +19693,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "claim link, a phase hypothesis, its current frontier. Shared topic,",
     "adjacency and state-only turns are never candidates; there is no target",
     "count, and an empty batch ledger is valid. Record candidates only \u2014",
-    "write no relation, no lane tag, no `indexes` yet.",
+    "write no relation and no lane tag yet.",
     "",
     "BATCH STEP 3 \u2014 BACK-LINK. Compare this batch against the ledger's open",
     "frontiers, the batch's own explicit predecessor language, and any prior",
@@ -19687,7 +19812,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "",
     "1. TURN EDGES, via the `note` tool \u2014 every relation in the finalization",
     "   pass, as the procedure above describes. Judge each one with the Memory",
-    "   Rubric's **\u4E03\u4E2A\u5173\u7CFB\u8BCD** entry above; this prompt states only the",
+    "   Rubric's **\u4E09\u4E2A\u5173\u7CFB\u7C7B** entry above; this prompt states only the",
     "   call shape. The same `note` tool carries a turn's prose, type and tags,",
     "   and none of them is yours this pass: the first pass audited them and",
     "   its judgment stands, so reach for those fields only where an edge you",
@@ -19742,8 +19867,8 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // now the ones `note-settlement-sdk-query.ts` actually accepts, and THAT
     // file is the authority — when the two disagree again, it wins.
     // ------------------------------------------------------------------
-    "   - edges: `note`'s override/narrows/extends/consume/indexes/grounds/",
-    '     verifies fields. An entry is a bare address ("S15069/T7") \u2014 a DRAFT,',
+    "   - edges: `note`'s correct/verify/use fields \u2014 the three-class",
+    '     vocabulary. An entry is a bare address ("S15069/T7") \u2014 a DRAFT,',
     "     both sides UNSETTLED \u2014 or a TWO-SIDED entry",
     '     `{ "turn": "S15069/T7", "tailTag": "a", "headTag": "b" }`, which',
     "     places each END in a lane: `tailTag` names the lane THIS turn writes",
@@ -19761,11 +19886,16 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "     the partition and not a tags write to make. An edge write",
     "     also needs your own current read of the citing turn's RELATIONS \u2014 the",
     "     batch reads earn it, your own writes keep it current, and a",
-    "     stale one is re-read, never guessed. The",
-    "     `retract<Relation>` mirrors delete one row each and still accept bare",
-    "     addresses (legacy rows stay deletable). One pair may carry several",
-    "     relations at once; a call carrying nothing but relations is valid.",
-    "     All relation writes happen HERE, after the last batch, in four steps:",
+    "     stale one is re-read, never guessed.",
+    "     A `correct` entry ALSO carries its coverage bit \u2014",
+    '     `{ "turn": \u2026, "tailTag": \u2026, "headTag": \u2026, "coverage": "full" }`',
+    '     or `"partial"`. A `correct` without it is refused naming the missing',
+    "     bit; a `verify` or `use` carrying one is refused too. The",
+    "     `retractCorrect`/`retractVerify`/`retractUse` mirrors delete the",
+    "     addressed placement's row of that CLASS \u2014 a row written under the",
+    "     retired seven-word vocabulary included \u2014 and still accept bare",
+    "     addresses (legacy rows stay deletable).",
+    "     All relation writes happen HERE, after the last batch, in three steps:",
     "     1. DISPOSE every ledger candidate: NOT A LANE, STILL RUNNING, or",
     "        CONVERGED \u2014 exactly one each. Uncertainty is STILL RUNNING, never",
     "        CONVERGED. These three describe THIS CANDIDATE at this moment, not",
@@ -19777,17 +19907,35 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "        release, or exact downstream adoption. There is no target number of",
     "        lanes or declarations.",
     "     2. JUDGE AND WRITE. For every candidate and every stock row you touch,",
-    "        ignore the stored relation word and run the claim test as if no",
-    "        edge existed \u2014 the old word is evidence of nothing. Still fully",
-    "        valid and built upon = extends; partly withdrawn or re-scoped =",
-    "        narrows; replaced, withdrawn or disproved outright = override;",
-    "        merely used = consume; a check THIS turn produced that SUPPORTS the",
-    "        cited conclusion is verifies, never extends \u2014 one that goes against",
-    "        it is override; work this turn stands or falls with takes",
-    "        `grounds`. Shared topic,",
-    "        adjacency, or preserving lane shape are never extends evidence \u2014",
-    "        and a blocker satisfied by doing the work is completion (extends),",
-    "        not a correction of the blocking judgment (narrows). The",
+    "        ignore the stored relation word and run the class test as if no",
+    "        edge existed \u2014 the old word is evidence of nothing. BOTH ENDS ARE",
+    "        PRINCIPAL RESULTS: the conclusion or output the cited turn actually",
+    "        established, never a detail it happened to mention. Details do not",
+    "        earn edges. Then run the PRECEDENCE, in order:",
+    "        (1) does this output change the cited principal result's",
+    "        acceptance, reliability or scope? negated or limited = correct;",
+    "        confirmed or supported = verify. (2) otherwise, is the cited",
+    "        principal result a DIRECT input to this new output \u2014 actually",
+    "        consulted, adopted, tested or incorporated? = use. Ancestors are",
+    "        excluded: cite the layer you used, not what it rested on.",
+    "        correct and verify are SUBSETS of use, and the slot stores the",
+    "        most specific class; a pair that was both corrected and built on",
+    "        is correct, and no second row is written for it.",
+    "        correct carries a coverage bit: `full` when the cited principal",
+    "        result has no substantial part left that may serve as a PREMISE \u2014",
+    "        it survives only as history, and permanent historical facts (it",
+    "        dispatched something, it wrote a file, it ran a test) never rescue",
+    "        it; `partial` when a definite non-empty substantial part still",
+    "        stands as a premise.",
+    "        VERIFY IS NARROW: this turn's own work must bear on whether the",
+    '        cited principal result holds. Prose saying "confirms" about a',
+    "        DETAIL of the cited turn is use, not verify.",
+    "        Where a cited turn holds several parallel principal results and",
+    "        this turn verifies one while correcting another, the DOMINANT",
+    "        action wins, not the safer label. Shared topic,",
+    "        adjacency, or preserving lane shape are never use evidence \u2014",
+    "        and a blocker satisfied by doing the work is completion (use),",
+    "        not a correction of the blocking judgment. The",
     "        members are already tagged and the frozen worklist is which lanes",
     "        they sit in; write only what the fresh judgment supports.",
     // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030, reviewer-pinned
@@ -19799,7 +19947,19 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     "        such claim gets its own edge \u2014 an edge already written excuses",
     "        none of the others, and the preceding turn is never a default",
     "        target. No claim carries two edges, and a path already readable",
-    "        through existing edges is not re-drawn.",
+    "        through existing edges is not re-drawn. One pair of nodes carries",
+    "        ONE row, at the lane placement you judge honest \u2014 not one row per",
+    "        candidate lane.",
+    // SUFFICIENT CITATION (v13 spec's sufficiency law, user ruling
+    // S15069/T2300 — CONDITIONAL): a WRITING law, and the "mentioned but not
+    // cited" lint is its only mechanical proxy — a WARNING, never a refusal,
+    // because only the writer knows what its own conclusion rests on.
+    "        SUFFICIENT CITATION: where this turn's principal result rests on",
+    "        earlier nodes, every one of them is cited. Evidence this turn",
+    "        produced itself owes nothing \u2014 it IS this turn's contribution.",
+    "        This is a writing law, not a machine verdict; an address named in",
+    "        prose with no edge to it is reported as a WARNING only and never",
+    "        blocks a write.",
     // ------------------------------------------------------------------
     // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
     // question about a LANE ("is this lane finished?"), which a bounded
@@ -19807,20 +19967,14 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // is why `index` was used ONCE in 819 edges. It now asks the question the
     // window CAN answer, about a TURN, and carries the granularity rule.
     // ------------------------------------------------------------------
-    "     3. DECLARE CONVERGENCE, of a TURN and not of a lane. Ask: did this",
-    "        turn close out a stretch of work \u2014 a design settled, an",
-    "        implementation landed, a batch verified, a version shipped? If it",
-    "        did, it writes an `indexes` citing the nodes that genuinely",
-    "        produced that ONE result. A lane may converge more than once \u2014",
-    "        each finished stretch earns its own declaration, and an earlier",
-    "        one neither blocks nor substitutes for a later one.",
-    "        CITE THE BATCH \u2014 one `/to-spec` run, one release. A single cited",
-    "        node means the phase was cut too fine; `lane_check` says so as a",
-    "        WARNING, and no write refuses on it, so finish the batch rather",
-    "        than trimming it. Work merely stopping, or a batch ending, is",
-    "        never convergence evidence \u2014 producing the declaration is your",
-    "        job, and having nothing to declare this round is normal life.",
-    "     4. CHECK AND REPAIR. After the first complete graph write, call",
+    // STEP 3 (DECLARE CONVERGENCE) IS DELETED — relation-vocabulary-v13,
+    // ruled at S15069/T2306: `indexes` is deleted as a word, and convergence
+    // is not declared any more. A turn that converges a stretch of work simply
+    // `use`s the nodes that produced it, and out-degree is what ranks it (a
+    // PROXY, per the same ruling — the spec states plainly that a function of
+    // out-degree cannot RECOVER representation, and ticket 05a is where that
+    // is measured against a frozen gate).
+    "     3. CHECK AND REPAIR. After the first complete graph write, call",
     "        `lane_check`. ERRORS are a repair queue for the graph you already",
     "        judged, never the work plan; every repair repeats step 2. WARNINGS",
     // Ticket 15: "and minimality" dropped with 最小连通's own retirement — the
@@ -19855,8 +20009,8 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // teaching is here so the graph is already correct the day the gate
     // arms.
     "        A landing turn (implement/fix/refactor) should be traceable, by",
-    "        a directed walk along its own out-edges (any of the seven",
-    "        words, an unbounded hop count, crossing lanes and tasks freely), to a basis",
+    "        a directed walk along its own out-edges (any relation class,",
+    "        an unbounded hop count, crossing lanes and tasks freely), to a basis",
     "        node (design/correction/measure/research/review) \u2014 its execution",
     "        basis. EDGE FIRST: prefer writing the edge that already exists in",
     "        the work over retyping the turn. Only retype a landing turn to",
@@ -19892,7 +20046,7 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // already readable through existing edges is not re-drawn (which is what
     // 最小连通 was actually reaching for, minus the "fewest edges" framing).
     // ------------------------------------------------------------------
-    "        \u539F\u5219(\u5224\u65AD\u6027,\u4E0D\u5F3A\u5236;index \u4E0D\u53C2\u4E0E\u8BA1\u7B97):",
+    "        \u539F\u5219(\u5224\u65AD\u6027,\u4E0D\u5F3A\u5236):",
     // The coupling principle's second sentence, re-expressed by ticket 01
     // without lane state. It used to read "一条 closed 泳道的终点,应该被外部
     // 节点引用" — a claim about a lane's single terminus, and both halves of
@@ -19900,15 +20054,15 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // untouched and is now stated of the NODE that declared: a convergence
     // exists to be picked up.
     "        - \u8FDE\u901A\u6027:\u4E00\u6761\u6CF3\u9053\u7684\u4EFB\u610F\u4E24\u4E2A\u6210\u5458,\u5E94\u8BE5\u901A\u8FC7\u4E24\u4FA7 tag \u540C\u4E3A\u8BE5\u6CF3\u9053",
-    "          \u7684\u8FB9\u8FDE\u901A\u3002\u4E00\u4E2A\u5BA3\u544A\u4E86 index \u7684\u8282\u70B9,\u5E94\u8BE5\u88AB\u6CF3\u9053\u5916\u7684\u8282\u70B9\u5F15\u7528 \u2014\u2014",
+    "          \u7684\u8FB9\u8FDE\u901A\u3002\u4E00\u4E2A\u628A\u4E00\u6BB5\u5DE5\u4F5C\u6536\u53E3\u7684\u8282\u70B9,\u5E94\u8BE5\u88AB\u6CF3\u9053\u5916\u7684\u8282\u70B9\u5F15\u7528 \u2014\u2014",
     "          \u6536\u655B\u662F\u7ED9\u540E\u6765\u8005\u63A5\u624B\u7684\u30020/1 \u6210\u5458\u7684\u65B0\u58F0\u660E\u6CF3\u9053\u4E0D\u9002\u7528,\u4E0D\u62A5\u4E3A\u7F3A\u9677\u3002",
     "        \u8026\u5408:\u8DE8\u6CF3\u9053\u7684\u8FB9\u6309\u4E09\u7EC4\u5206\u522B\u8BA1\u6570,\u4E0D\u4EA7\u51FA\u673A\u5668\u5224\u51B3 \u2014\u2014",
-    "        verify / override / narrow / extend \u4F5C\u7528\u5728\u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u5F20\u672C\u8EAB\u4E0A,",
-    "        \u5728\u522B\u4EBA\u7684\u4E3B\u5F20\u4E0A\u5E72\u6D3B,\u901A\u5E38\u8BF4\u660E\u4E24\u8005\u672C\u8BE5\u540C\u5C5E\u4E00\u6761\u6CF3\u9053;ground \u662F\u672C\u8282\u70B9",
-    "        \u7684\u6210\u7ACB\u4F9D\u8D56\u5BF9\u65B9,\u53EF\u80FD\u662F\u8026\u5408,\u4E5F\u53EF\u80FD\u662F\u4E24\u6761\u72EC\u7ACB\u6CF3\u9053\u4E4B\u95F4\u6B63\u5E38\u7684\u4F9D\u8D56,",
-    "        \u9700\u8981\u8BFB\u5185\u5BB9\u5224\u65AD;consume / index \u53EA\u662F\u4F7F\u7528\u6216\u6C47\u603B\u5176\u4EA7\u51FA,\u662F\u4E24\u6761\u72EC\u7ACB",
-    "        \u6CF3\u9053\u4E4B\u95F4\u5E94\u6709\u7684\u5F80\u6765\u3002\u300C\u8F83\u5C11\u300D\u6CA1\u6709\u5206\u6BCD\u4E5F\u6CA1\u6709\u9608\u503C,\u628A\u4E09\u4E2A\u6570\u6446\u51FA\u6765\u7531",
-    "        \u4EBA\u5224\u65AD,\u4E0D\u8981\u53D1\u660E\u4E00\u4E2A\u95E8\u9650\u3002",
+    "        correct / verify \u4F5C\u7528\u5728\u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u7ED3\u679C\u672C\u8EAB\u4E0A,\u5728\u522B\u4EBA\u7684\u4E3B\u5F20\u4E0A",
+    "        \u5E72\u6D3B,\u901A\u5E38\u8BF4\u660E\u4E24\u8005\u672C\u8BE5\u540C\u5C5E\u4E00\u6761\u6CF3\u9053;use \u91CC\u672C\u8282\u70B9\u7684\u6210\u7ACB\u4F9D\u8D56\u5BF9\u65B9",
+    "        \u7684\u90A3\u4E00\u79CD,\u53EF\u80FD\u662F\u8026\u5408,\u4E5F\u53EF\u80FD\u662F\u4E24\u6761\u72EC\u7ACB\u6CF3\u9053\u4E4B\u95F4\u6B63\u5E38\u7684\u4F9D\u8D56,\u9700\u8981",
+    "        \u8BFB\u5185\u5BB9\u5224\u65AD;\u5176\u4F59\u7684 use \u53EA\u662F\u4F7F\u7528\u5176\u4EA7\u51FA,\u662F\u4E24\u6761\u72EC\u7ACB\u6CF3\u9053\u4E4B\u95F4\u5E94\u6709\u7684",
+    "        \u5F80\u6765\u3002\u300C\u8F83\u5C11\u300D\u6CA1\u6709\u5206\u6BCD\u4E5F\u6CA1\u6709\u9608\u503C,\u628A\u4E09\u4E2A\u6570\u6446\u51FA\u6765\u7531\u4EBA\u5224\u65AD,\u4E0D\u8981",
+    "        \u53D1\u660E\u4E00\u4E2A\u95E8\u9650\u3002",
     // ------------------------------------------------------------- end B --
     // STAGE 2'S OWN THREE EDGE DUTIES (staged-settlement spec Rev 5,
     // §Solution stage 2). Seated here, inside the edges bullet and after the
@@ -20343,7 +20497,7 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "   `turn` budget \u2014 and identify the claim-level links wholly visible among",
     "   them; a shared topic, adjacency or state-only pairing is never a link on",
     "   its own. Write the relations you find, judged by the Memory Rubric's",
-    "   **\u4E03\u4E2A\u5173\u7CFB\u8BCD** entry above. PLACE EVERY EDGE AT WRITE: each relation",
+    "   **\u4E09\u4E2A\u5173\u7CFB\u7C7B** entry above. PLACE EVERY EDGE AT WRITE: each relation",
     "   entry is `{turn, tailTag, headTag}` in the call that writes it \u2014",
     "   `tailTag` the lane THIS turn writes from, `headTag` the lane the cited",
     "   turn sits in, both sides or neither. A bare address writes a DRAFT, and",
@@ -22709,7 +22863,7 @@ function renderStatsReport(lane, addresses) {
     (fact) => formatTurnRef(fact.citingId, addresses) + " " + fact.relation + " " + formatTurnRef(fact.citedId, addresses)
   );
   lines.push(
-    "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
+    "  cited from outside: depends[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
   );
   const membership = lane.coverage.membership;
   lines.push(
@@ -22747,7 +22901,7 @@ function renderUnattributedCluster(cluster, addresses) {
   return "  " + cluster.turnCount + " turns joined by edges with no lane on either side: " + formatTurnRefList(cluster.turnIds, addresses) + cappedCountSuffix(cluster.turnCount, cluster.turnIds.length);
 }
 function renderTooFineIndex(warning, addresses) {
-  return "  " + formatTurnRef(warning.citingId, addresses) + " indexes one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
+  return "  " + formatTurnRef(warning.citingId, addresses) + " converges one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
 }
 function formatAllowance(allowance) {
   return Number.isInteger(allowance) ? String(allowance) : allowance.toFixed(2);

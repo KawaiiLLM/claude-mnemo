@@ -134,9 +134,9 @@ export interface ImpressionAdvisory extends ImpressionContainerRef {
    * `"flat"` for the task tier, whose cap has no membership coordinate to fence.
    */
   membershipGeneration: string;
-  /** Anchors in the CURRENT text that this window's own `override` edges invalidated — a `retain` is refused while any stands. */
+  /** Anchors in the CURRENT text that this window's own FULL corrections invalidated (stored as `override`, the interim word for `correct`+`full` — see `shared/relation-class.ts`) — a `retain` is refused while any stands. */
   overriddenAnchors: string[];
-  /** Anchors this window's own `narrows` edges NUDGE (spec: never a mechanical deletion). */
+  /** Anchors this window's own PARTIAL corrections NUDGE (stored as `narrows`, the interim word for `correct`+`partial`; spec: never a mechanical deletion). */
   narrowedAnchors: string[];
 }
 

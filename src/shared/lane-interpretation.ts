@@ -140,6 +140,10 @@
  * more, and nothing should re-derive one under another name.
  */
 
+import type {
+  RelationClassValue,
+  RelationCoverageValue,
+} from "./relation-class";
 import type { TurnPhase } from "./turn-phase";
 
 // Re-exported so a consumer that only wants the phase vocabulary need not
@@ -293,6 +297,17 @@ export interface LaneEdgeInput {
   relation: string;
   tailTag: string;
   headTag: string;
+  /**
+   * relation-vocabulary-v13 ticket 02: the row's stored three-class value, when
+   * the loader read it. OPTIONAL and absent-means-unclassified, so every
+   * existing constructor of this shape (the lane checker's fixtures, the
+   * election's own inputs) keeps compiling and keeps its meaning — the class is
+   * a RENDERING and future-scoring fact, never a graph-shape one, and nothing
+   * that computes lane structure reads either field.
+   */
+  relationClass?: RelationClassValue;
+  /** relation-vocabulary-v13 ticket 02: `full`/`partial` on a `correct` row. */
+  relationCoverage?: RelationCoverageValue;
 }
 
 /** A lane's machine identity (D5, v11): segment + ONE canonical tag — never a set. No subset/hierarchy is read here — that is a human layer over this per-tag data (draft: "层级是解读,不是机制"). */

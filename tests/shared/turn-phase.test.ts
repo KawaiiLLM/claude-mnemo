@@ -4,7 +4,6 @@ import {
   EDGE_RELATIONS,
   isTurnEdgeRelation,
   phasesForTypes,
-  RELATION_FIELD_NAME,
   TAGGABLE_RELATIONS,
   TURN_PHASES,
   TYPE_PHASE,
@@ -13,6 +12,10 @@ import {
   type TurnEdgeRelation,
   type TurnPhase,
 } from "../../src/shared/turn-phase";
+import {
+  LEGACY_RELATION_CLASS,
+  RELATION_CLASSES,
+} from "../../src/shared/relation-class";
 import { containsToolCallSyntax } from "../../src/shared/tool-call-syntax";
 import { MEMORY_TYPES } from "../../src/shared/type-vocabulary";
 
@@ -303,14 +306,29 @@ describe("validateRelationTarget — the shared judgment, called directly", () =
     expect(result.ok).toBe(true);
   });
 
-  // RELATION_FIELD_NAME is the same map `mcp/note.ts`'s `RELATION_FIELD_ENTRIES`
-  // derives from — pinned here too so a future caller cannot read a stale copy.
-  test("RELATION_FIELD_NAME covers every EDGE_RELATIONS word with a distinct name", () => {
-    const names = EDGE_RELATIONS.map((relation) => RELATION_FIELD_NAME[relation]);
-    expect(new Set(names).size).toBe(EDGE_RELATIONS.length);
+  // `RELATION_FIELD_NAME` STOOD HERE and is DELETED with the constant
+  // (relation-vocabulary-v13 ticket 02). It mapped each STORAGE word to its own
+  // `note` parameter, and the write surface no longer offers a parameter per
+  // word — it offers one per CLASS, so `db/citations.ts`'s
+  // `RELATION_FIELD_ENTRIES` derives from `RELATION_CLASSES` instead. The
+  // replacement's own coverage is in `tests/mcp/definitions.test.ts`. What
+  // survives HERE is the fact this file is about: EVERY storage word still maps
+  // to a class, so no stored row reads as unclassified.
+  test("every storage word maps to exactly one class, and only `correct` carries a bit", () => {
     for (const relation of EDGE_RELATIONS) {
-      expect(RELATION_FIELD_NAME[relation]).toBeTruthy();
+      const mapped = LEGACY_RELATION_CLASS[relation];
+      expect(mapped, relation).toBeTruthy();
+      expect(RELATION_CLASSES, relation).toContain(mapped.relationClass);
+      // The bit exists exactly where the class carries one.
+      expect(mapped.relationCoverage !== "", relation).toBe(
+        mapped.relationClass === "correct",
+      );
     }
+    // And every class is reachable from some storage word, so the interim
+    // equivalence has no orphan on either side.
+    expect(
+      new Set(EDGE_RELATIONS.map((r) => LEGACY_RELATION_CLASS[r].relationClass)).size,
+    ).toBe(RELATION_CLASSES.length);
   });
 
   // lane-model-v12 D2 (ticket 04): the whole conditional self-citation

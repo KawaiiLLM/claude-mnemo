@@ -4203,6 +4203,44 @@ function ensureLaneDispositionJustificationEvidence(db: Database): void {
   );
 }
 
+/**
+ * Relation-vocabulary-v13 ticket 02: the THREE-CLASS vocabulary's two storage
+ * columns, added BESIDE `relation` rather than replacing it.
+ *
+ * WHY ADDITIVE. Ticket 03 migrates the existing corpus and must be reversible
+ * by a READ-SIDE switch: an existing row keeps its original seven-word value in
+ * `relation` and gains a class here, so backing the change out is "stop reading
+ * these two columns", never a data restore. A design that put the class word
+ * into `relation` itself would have forced a full table REBUILD (SQLite cannot
+ * alter a CHECK in place) on the production edge table and would have made
+ * ticket 03's migration an in-place rewrite of the very column it is supposed
+ * to preserve.
+ *
+ * `''` is the "not stated" value in both columns, matching `tail_tag`/
+ * `head_tag`'s own convention one column over — NOT NULL with an empty-string
+ * sentinel, so no reader has to know a third state.
+ *
+ * The CHECKs are column-level but cross-column, which SQLite allows on ADD
+ * COLUMN and which is what makes the coverage bit a STORED guarantee rather
+ * than a convention the write path happens to honour: coverage exists exactly
+ * when the class is `correct`. Existing rows carry `''` in both and satisfy it.
+ */
+function ensureMemoryEdgesRelationClassColumns(db: Database): void {
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_class",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_class IN ('', 'correct', 'verify', 'use'))",
+  );
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_coverage",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_coverage IN ('', 'full', 'partial') " +
+      "AND (relation_coverage = '') = (relation_class <> 'correct'))",
+  );
+}
+
 /** Rows with NEITHER side settled — the queue the spec's first control quantity counts (target: 0, once attribution is done). */
 function countUnsettledEdges(db: Database): number {
   return (
@@ -4488,6 +4526,13 @@ export function initializeSchema(db: Database): void {
   // "phase doing another phase's job" hazard M-A's own comment states for
   // itself against M-D).
   ensureMemoryEdgesRelationTurnScoped(db);
+  // Relation-vocabulary-v13 ticket 02, and STRICTLY AFTER every `memory_edges`
+  // rebuild above (`runLaneModelV12EdgeMigration`, then the turn-scoped
+  // narrowing): those rebuilds copy an explicit column list into a freshly
+  // created table, so two columns added before them would be silently dropped
+  // on the one open that runs them. ADD COLUMN is additive and idempotent, so
+  // running it last costs nothing and cannot lose data.
+  ensureMemoryEdgesRelationClassColumns(db);
   // Lane-model-v12 ticket 14 (spec D3e), strictly LAST and strictly after
   // `runLaneRegistryMigration`: that migration's M3 reads `segments.tags` as
   // the CURATED vocabulary and stamps members from it, against a hardcoded

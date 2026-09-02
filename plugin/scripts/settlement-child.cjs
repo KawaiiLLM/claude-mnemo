@@ -35559,7 +35559,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // only the common path (five fields), states that an edge is normally
   // settlement's hindsight call, and never claims the parameters are
   // unavailable — they simply are not the routine tool.
-  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (override/narrows/extends/indexes/consume/grounds/verifies and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (correct/verify/use and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
@@ -35677,7 +35677,16 @@ var relationTargetEntryShape = external_exports.union([
   external_exports.object({
     turn: external_exports.string().min(1),
     tailTag: external_exports.string(),
-    headTag: external_exports.string()
+    headTag: external_exports.string(),
+    // relation-vocabulary-v13 ticket 02: CORRECT's FULL-or-PARTIAL bit, on
+    // the ENTRY because it is a fact about this one edge — one `correct` call
+    // may fully overturn one predecessor and partially limit another.
+    // OPTIONAL here and required by the WRITE PATH (`db/citations.ts` ->
+    // `shared/relation-class.ts`'s `checkRelationCoverage`): the schema cannot
+    // express "required on `correct`, refused on `verify`/`use`" while all
+    // three fields share one entry shape, and a per-field entry shape would
+    // have put the pairing rule in three places instead of one.
+    coverage: external_exports.enum(["full", "partial"]).optional()
   }).strict()
 ]);
 var RELATION_TAG_FORM_LINE = "Each entry is a bare address (both sides unsettled \u2014 the draft an edge starts as) or `{turn, tailTag, headTag}`: `tailTag` is the lane THIS turn writes from, `headTag` the lane the cited turn sits in. Place BOTH or NEITHER \u2014 one side alone rejects. Each side is checked against its OWN endpoint: the tag must be canonical, DECLARED in that endpoint's task, and already on that endpoint turn's own tags. The same word on both sides means one lane spanning the edge; two different lanes is a legal crossing, and so is the same word in two different tasks, which is two lanes.";
@@ -35753,53 +35762,41 @@ var noteInputShape = {
   // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
   // two-sided admission test; no describe states a phase requirement, since v12
   // retired phase pairing outright, and none says which word to choose.
-  override: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a predecessor whose main result this turn OVERTURNS, WITHDRAWS or REPLACES \u2014 one word for all four, disproof included (a measurement contradicting the cited claim is an override, not a separate verdict word). " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  // relation-vocabulary-v13 ticket 02: THREE CLASSES REPLACE SEVEN WORDS.
+  // Each describe carries the one-line READING of its class plus
+  // `RELATION_TAG_FORM_LINE`'s two-sided admission test; the PRECEDENCE that
+  // decides between them (CORRECT > VERIFY > USE, and both are subsets of USE)
+  // is judgment and lives in the Memory Rubric alone, per ADR-0009's three-way
+  // split. Property order is the precedence's own order, most specific first.
+  correct: external_exports.array(relationTargetEntryShape).optional().describe(
+    'Addresses whose PRINCIPAL result this turn negates, limits or re-scopes. REQUIRES the coverage bit on every entry: `"coverage": "full"` when no substantial part of the cited result may still serve as a PREMISE (it survives only as history \u2014 permanent historical facts like having dispatched something or written a file never rescue it), `"coverage": "partial"` when a definite non-empty part still stands as one. An entry with no coverage is refused, naming the missing bit. ' + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  narrows: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds but cuts a piece OUT of \u2014 a correction or limit on a detail. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  verify: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose PRINCIPAL result this turn's own work confirms or supports \u2014 narrow: this turn's work must bear on whether that result holds, and prose saying \"confirms\" about a DETAIL of the cited turn is not this class. A check that came out AGAINST the cited result is `correct`. No `coverage` \u2014 refused if sent. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  extends: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a result this turn still holds and adds a piece TO. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
+  use: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose PRINCIPAL result or output was a DIRECT input to this turn's own new conclusion or output \u2014 actually consulted, adopted, tested or incorporated. Ancestors are excluded: cite the layer you used, not what it rested on. The fallback class, used where this turn makes no claim about whether the cited result still holds. No `coverage` \u2014 refused if sent. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
   ),
-  indexes: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses the nodes this turn converges on and stands for \u2014 they carry its content and readers reach them through it (a settlement's carrying members, a release's shipped artifacts). No membership condition. An indexed target is not also consumed by an UNSETTLED edge; a lane-placed consume may sit beside a lane-placed indexes \u2014 lane structure and convergence declaration are separate facts. " + RELATION_TAG_FORM_LINE + " A same-lane entry declares that lane's convergence at this point. A lane has no state, so this closes nothing and a later member is not a contradiction. Judgment lives in the Memory Rubric."
-  ),
-  consume: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses work this turn used, with no liability if it turns out wrong \u2014 never written beside an extends on the same pair, and never unsettled beside an indexes (each already implies it); a LANE-PLACED consume beside a lane-placed indexes is legal \u2014 the declaration does not carry the lane-structure fact. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  grounds: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses a finding or ruling this turn's own conclusion FALLS WITH if it were false; absorbs the retired grounded-on/encodes. One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds and the other artifacts consume it; with design and spec in one turn, each artifact grounds directly. Turn-only; a self target is refused, for this word as for every other. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  verifies: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses the claim this turn's own result VERIFIES or supports. No type requirement on either end \u2014 a check that came out AGAINST the cited claim is an override, not this word. " + RELATION_TAG_FORM_LINE + " Judgment lives in the Memory Rubric."
-  ),
-  // The seven retraction mirrors. A relation is never overwritten (a relation
+  // The three retraction mirrors. A relation is never overwritten (a relation
   // write is purely additive), so correcting a wrong one is two auditable acts
   // — retract, then write the right relation. The spelling is mechanical
-  // (`retract` + the relation parameter's own name), pinned against
+  // (`retract` + the class parameter's own name), pinned against
   // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
   // the two halves of the vocabulary cannot drift apart.
-  retractOverride: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose override edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  //
+  // A mirror addresses a CLASS, so it deletes whichever stored row means that
+  // class at the addressed placement — including a row written under the
+  // retired seven-word vocabulary. That is what keeps every stored edge
+  // deletable through three parameters (`db/citations.ts`'s
+  // `retractTurnRelations` states why an undeletable row is a deadlock).
+  retractCorrect: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose correct edge FROM this turn is deleted, whichever coverage bit it carries; an address carrying no such edge rejects the call, naming it. No `coverage` here \u2014 withdrawing an assertion does not restate it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractNarrows: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose narrows edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  retractVerify: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose verify edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
-  retractExtends: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose extends edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractIndexes: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose indexes edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractConsume: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose consume edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractGrounds: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose grounds edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
-  ),
-  retractVerifies: external_exports.array(relationTargetEntryShape).optional().describe(
-    "Addresses whose verifies edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
+  retractUse: external_exports.array(relationTargetEntryShape).optional().describe(
+    "Addresses whose use edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " + RETRACTION_TAG_FORM_LINE
   ),
   // The retraction-only mirrors (peer round T1466, finding P1-2) used to sit
   // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
@@ -35986,20 +35983,12 @@ var settlementNoteInputShape = {
   // word reaches both writers from a single edit and the two vocabularies
   // cannot drift apart. See `noteInputShape`'s own field block for the full
   // restoration note.
-  override: noteInputShape.override,
-  narrows: noteInputShape.narrows,
-  extends: noteInputShape.extends,
-  indexes: noteInputShape.indexes,
-  consume: noteInputShape.consume,
-  grounds: noteInputShape.grounds,
-  verifies: noteInputShape.verifies,
-  retractOverride: noteInputShape.retractOverride,
-  retractNarrows: noteInputShape.retractNarrows,
-  retractExtends: noteInputShape.retractExtends,
-  retractIndexes: noteInputShape.retractIndexes,
-  retractConsume: noteInputShape.retractConsume,
-  retractGrounds: noteInputShape.retractGrounds,
-  retractVerifies: noteInputShape.retractVerifies,
+  correct: noteInputShape.correct,
+  verify: noteInputShape.verify,
+  use: noteInputShape.use,
+  retractCorrect: noteInputShape.retractCorrect,
+  retractVerify: noteInputShape.retractVerify,
+  retractUse: noteInputShape.retractUse,
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way
@@ -36108,9 +36097,6 @@ var EDGE_RELATIONS = [
   "grounds",
   "verifies"
 ];
-function isTurnEdgeRelation(value) {
-  return typeof value === "string" && EDGE_RELATIONS.includes(value);
-}
 var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
 var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
 var SELF_EDGE_DETAIL = "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation \u2014 connectivity's unit is the turn, and design plus delivery inside one turn is one node, not two";
@@ -36187,15 +36173,100 @@ function validateRelationTarget(input) {
   }
   return checkSideTagLegality(input);
 }
-var RELATION_FIELD_NAME = {
-  override: "override",
-  narrows: "narrows",
-  extends: "extends",
-  indexes: "indexes",
-  consume: "consume",
-  grounds: "grounds",
-  verifies: "verifies"
+
+// src/shared/relation-class.ts
+var RELATION_CLASSES = ["correct", "verify", "use"];
+var RELATION_COVERAGES = ["full", "partial"];
+var NO_RELATION_COVERAGE = "";
+var NO_RELATION_CLASS = "";
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+function relationClassRequiresCoverage(relationClass) {
+  return relationClass === "correct";
+}
+var LEGACY_RELATION_CLASS = {
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
 };
+var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+  correct: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+  ),
+  verify: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+  ),
+  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+});
+var INTERIM_LEGACY_RELATION = Object.freeze([
+  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+]);
+function interimLegacyRelation(relationClass, relationCoverage) {
+  const entry = INTERIM_LEGACY_RELATION.find(
+    (row) => row.relationClass === relationClass && row.relationCoverage === relationCoverage
+  );
+  if (!entry) {
+    throw new Error(
+      `no interim legacy relation for class "${relationClass}" coverage "${relationCoverage}"`
+    );
+  }
+  return entry.legacy;
+}
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+function checkRelationCoverage(relationClass, relationCoverage) {
+  if (relationClassRequiresCoverage(relationClass)) {
+    return relationCoverage === NO_RELATION_COVERAGE ? "coverage-required" : null;
+  }
+  return relationCoverage === NO_RELATION_COVERAGE ? null : "coverage-not-allowed";
+}
+var RETIRED_RELATION_FIELDS = Object.freeze([
+  ["override", 'correct with `"coverage": "full"`'],
+  ["narrows", 'correct with `"coverage": "partial"`'],
+  ["extends", "use"],
+  ["consume", "use"],
+  ["grounds", "use"],
+  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+  ["verifies", "verify"],
+  ["retractOverride", "retractCorrect"],
+  ["retractNarrows", "retractCorrect"],
+  ["retractExtends", "retractUse"],
+  ["retractConsume", "retractUse"],
+  ["retractGrounds", "retractUse"],
+  ["retractIndexes", "retractUse"],
+  ["retractVerifies", "retractVerify"]
+]);
+function retiredRelationFieldRefusal(input) {
+  const reached = RETIRED_RELATION_FIELDS.filter(
+    ([retired]) => input[retired] !== void 0
+  );
+  if (reached.length === 0) {
+    return null;
+  }
+  const named = reached.map(([retired, replacement]) => `${retired} -> ${replacement}`).join("; ");
+  return `${reached.length === 1 ? "is a" : "are"} retired relation parameter${reached.length === 1 ? "" : "s"}: ${named}. The seven relation words are replaced by THREE CLASSES \u2014 \`correct\` (carrying a \`coverage\` of \`full\` or \`partial\`), \`verify\`, \`use\` \u2014 decided by precedence: does this output change the cited result's acceptance, reliability or scope (negated/limited = correct, confirmed/supported = verify)? otherwise, is the cited result a direct input to it (= use)? Nothing was written.`;
+}
 
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
@@ -36238,6 +36309,8 @@ var EDGE_COLUMNS = `
   provenance,
   tail_tag AS tailTag,
   head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
 var EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
@@ -36252,6 +36325,11 @@ function mapEdgeRow(row) {
     // reader on one convention rather than making each test for null.
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -36272,8 +36350,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
       -- target's last two components \u2014 identity is (pair, relation, tail,
       -- head), so a DIFFERENT side combination on the same (pair, relation)
@@ -36294,6 +36373,11 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
+        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
+        -- assigned here either. A restatement leaves an existing row exactly as
+        -- stored, so re-asserting a class over a legacy row does not
+        -- retroactively classify it -- classifying the existing corpus is
+        -- ticket 03's migration, which owns the reversibility story for it.
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
@@ -36352,6 +36436,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     if (edge.relation !== null) {
       const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -36361,6 +36447,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.provenance,
         tailTag,
         headTag,
+        relationClass,
+        relationCoverage,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -36455,6 +36543,8 @@ function getOutgoingEdges(db, citing) {
 function mapTurnRelationEdgeRow(row) {
   return {
     relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
@@ -36465,6 +36555,7 @@ function mapTurnRelationEdgeRow(row) {
 function getTurnRelationEdges(db, turnId) {
   const outbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
@@ -36480,6 +36571,7 @@ function getTurnRelationEdges(db, turnId) {
   ).all(turnId).map(mapTurnRelationEdgeRow);
   const inbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
@@ -36504,7 +36596,8 @@ function getRelationEdgesAmongTurns(db, turnIds) {
   const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -36517,7 +36610,9 @@ function getRelationEdgesAmongTurns(db, turnIds) {
     citedId: row.citedId,
     relation: row.relation,
     tailTag: row.tailTag,
-    headTag: row.headTag
+    headTag: row.headTag,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
   }));
 }
 function getRolledBackCiterIds(db, citingTurnIds) {
@@ -36757,18 +36852,10 @@ var CITATION_RELATIONS = [
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
 }
-var RETRACTION_ONLY_RELATIONS = [];
-var RELATION_FIELD_ENTRIES = EDGE_RELATIONS.map(
-  (relation) => [RELATION_FIELD_NAME[relation], relation]
+var RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
+var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
+  ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
 );
-var RETRACTION_FIELD_ENTRIES = [
-  ...RELATION_FIELD_ENTRIES.map(
-    ([key, relation]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation]
-  ),
-  ...RETRACTION_ONLY_RELATIONS.map(
-    (relation) => [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation]
-  )
-];
 var RELATION_REJECTION_TEXT = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
@@ -36784,7 +36871,14 @@ var RELATION_REJECTION_TEXT = {
   // instead of a constraint failure.
   "segment-not-a-relation-node": "names a segment \u2014 a segment is a container, not a relation node, so no relation may point at it (prose naming it still records a bare citation)",
   "self-edge": "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
-  "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry"
+  "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry",
+  // relation-vocabulary-v13 ticket 02: the FULL/PARTIAL bit is a stored field,
+  // so a `correct` that never said which kind of correction it was is refused
+  // here rather than stored half-answered. The message names the missing bit
+  // and both legal values, because a writer told only "coverage required" has
+  // to go read a schema to find out what to send.
+  "coverage-required": 'is a `correct` edge with no coverage bit \u2014 add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
+  "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives"
 };
 function formatRelationRejections(rejections, surface) {
   const lines = rejections.map(
@@ -36819,12 +36913,22 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
 }
 function normalizeRelationTargetEntry(entry) {
   if (typeof entry === "string") {
-    return { raw: entry, tailTag: UNSETTLED_SIDE_TAG, headTag: UNSETTLED_SIDE_TAG };
+    return {
+      raw: entry,
+      tailTag: UNSETTLED_SIDE_TAG,
+      headTag: UNSETTLED_SIDE_TAG,
+      coverage: NO_RELATION_COVERAGE
+    };
   }
   return {
     raw: entry.turn,
     tailTag: entry.tailTag ?? UNSETTLED_SIDE_TAG,
-    headTag: entry.headTag ?? UNSETTLED_SIDE_TAG
+    headTag: entry.headTag ?? UNSETTLED_SIDE_TAG,
+    // Normalized to the `''` sentinel the same way the two sides are, so the
+    // coverage check and the storage layer see ONE spelling of "not stated" —
+    // and so a bare-address entry (the draft form) is a `correct` with no bit,
+    // which is refused rather than silently stored as an unqualified overturn.
+    coverage: isRelationCoverage(entry.coverage) ? entry.coverage : NO_RELATION_COVERAGE
   };
 }
 function resolveRelationTargetNode(db, raw) {
@@ -36855,25 +36959,31 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
   const claimed = /* @__PURE__ */ new Set();
   for (const field of fields) {
     for (const entry of field.targets) {
-      const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+      const { raw, tailTag, headTag, coverage } = normalizeRelationTargetEntry(entry);
+      const coverageIssue = checkRelationCoverage(field.relationClass, coverage);
+      if (coverageIssue) {
+        rejected.push({ relation: field.relationClass, raw, reason: coverageIssue });
+        continue;
+      }
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
       if (node.kind === "turn" && node.id === citingTurnId) {
-        rejected.push({ relation: field.relation, raw, reason: "self-edge" });
+        rejected.push({ relation: field.relationClass, raw, reason: "self-edge" });
         continue;
       }
       if (node.kind !== "turn") {
         rejected.push({
-          relation: field.relation,
+          relation: field.relationClass,
           raw,
           reason: "segment-not-a-relation-node"
         });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
+      const relation = interimLegacyRelation(field.relationClass, coverage);
+      const key = relationRowKey(citing, node, relation, { tailTag, headTag });
       if (claimed.has(key)) {
         continue;
       }
@@ -36881,10 +36991,12 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
       inputs.push({
         citing,
         cited: node,
-        relation: field.relation,
+        relation,
         provenance,
         tailTag,
-        headTag
+        headTag,
+        relationClass: field.relationClass,
+        relationCoverage: coverage
       });
     }
   }
@@ -36901,7 +37013,10 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
       // function only ever builds relation rows — so the narrowing is a fact
       // about the caller, not a guess.
       rejected: storageRejected.filter((entry) => entry.input.relation !== null).map((entry) => ({
-        relation: entry.input.relation,
+        // The CLASS the caller asked for, not the interim storage word it
+        // resolved to: the message goes back to a writer that has never been
+        // taught the seven words.
+        relation: entry.input.relationClass || "use",
         raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
         reason: "segment-not-a-relation-node"
       }))
@@ -36974,19 +37089,23 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const node = resolveRelationTargetNode(db, raw);
       if (typeof node === "string") {
-        rejected.push({ relation: field.relation, raw, reason: node });
+        rejected.push({ relation: field.relationClass, raw, reason: node });
         continue;
       }
-      const key = relationRowKey(citing, node, field.relation, { tailTag, headTag });
-      if (!stored.has(key)) {
-        rejected.push({ relation: field.relation, raw, reason: "no-such-edge" });
+      const matching = LEGACY_RELATIONS_BY_CLASS[field.relationClass].map(
+        (relation) => [relation, relationRowKey(citing, node, relation, { tailTag, headTag })]
+      ).filter(([, key]) => stored.has(key));
+      if (matching.length === 0) {
+        rejected.push({ relation: field.relationClass, raw, reason: "no-such-edge" });
         continue;
       }
-      if (addressed.has(key)) {
-        continue;
+      for (const [relation, key] of matching) {
+        if (addressed.has(key)) {
+          continue;
+        }
+        addressed.add(key);
+        targets.push({ citing, cited: node, relation, tailTag, headTag });
       }
-      addressed.add(key);
-      targets.push({ citing, cited: node, relation: field.relation, tailTag, headTag });
     }
   }
   if (rejected.length > 0 || targets.length === 0) {
@@ -42894,10 +43013,11 @@ function formatRelationArrow(words, crossLane) {
   return `${lead}${label}${stroke}>`;
 }
 function defaultRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
+  if (relation === "correct(partial)") return 0;
   if (relation === "indexes") return 1;
   if (relation === "consume") return 2;
-  if (relation === "override") return 3;
+  if (relation === "override" || relation === "correct(full)") return 3;
   return 4;
 }
 function groupHopEdges(edges) {
@@ -43011,7 +43131,13 @@ function buildCandidates(rows) {
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      relation: row.relation,
+      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
+      // written under, and the stored seven-word value only for a row written
+      // before that vocabulary existed (`displayEdgeRelation`). This is the
+      // surface settlement reads its own edges back through, so a writer taught
+      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
+      // what it just wrote.
+      relation: displayEdgeRelation(row),
       tailTag: row.tailTag,
       headTag: row.headTag
     }))
@@ -45143,7 +45269,13 @@ function buildElectedCitations(laneEdges, electedIds) {
     if (!electedIds.has(edge.citingId) || !electedIds.has(edge.citedId)) continue;
     const bucket = citedByTurn.get(edge.citingId) ?? /* @__PURE__ */ new Map();
     const entry = bucket.get(edge.citedId) ?? { words: /* @__PURE__ */ new Set(), crossLane: false };
-    entry.words.add(edge.relation);
+    entry.words.add(
+      displayEdgeRelation({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+      })
+    );
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
     }
@@ -46261,6 +46393,7 @@ function resolveTurnRowLinks(db, turns) {
     // graph's most visible face. Filtered at BOTH ends here, at the source:
     // the cited lookup below then reads only ids this filter already passed.
     `SELECT DISTINCT e.citing_id AS citingId, e.cited_id AS citedId, e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag
          FROM memory_edges e
          JOIN turns citing ON citing.id = e.citing_id
@@ -46302,7 +46435,13 @@ function resolveTurnRowLinks(db, turns) {
       byCiter.set(edge.citingId, bucket);
     }
     if (edge.relation !== null) {
-      entry.words.add(edge.relation);
+      entry.words.add(
+        displayEdgeRelation({
+          relation: edge.relation,
+          relationClass: edge.relationClass ?? NO_RELATION_CLASS,
+          relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
+        })
+      );
     }
     if (edge.tailTag !== "" && edge.headTag !== "" && edge.tailTag !== edge.headTag) {
       entry.crossLane = true;
@@ -46798,6 +46937,7 @@ function loadFrontierEdges(db, laneTags) {
   const placeholders = laneTags.map(() => "?").join(",");
   const rows = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -46821,7 +46961,17 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
+    // `relation` stays the STORED word: it is the SCORING key here
+    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
+    // owns re-keying those onto the class. What renders is `relationLabel`
+    // below — the two are kept apart on purpose, because conflating them would
+    // have made a vocabulary change silently move the frontier weights.
     relation: row.relation,
+    relationLabel: displayEdgeRelation({
+      relation: row.relation,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+    }),
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -47326,14 +47476,14 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       renderedEdges.add(edge);
       if (!inLane(edge)) {
         parts.push(
-          `${edge.relation} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
+          `${edge.relationLabel} => S${edge.headSessionId}/T${edge.headPromptNumber}^(E${edge.headSegmentId}/#${edge.headTag})`
         );
         break;
       }
       const targetPage = pageOf.get(edge.headTurnId);
       if (targetPage !== void 0 && targetPage !== pageNumber) {
         parts.push(
-          `${edge.relation} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
+          `${edge.relationLabel} -> S${edge.headSessionId}/T${edge.headPromptNumber}^ (${targetPage}/${pageCount})`
         );
         break;
       }
@@ -47344,7 +47494,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       const mirrors = member === void 0 ? [] : mirrorsByHead.get(edge.headTurnId) ?? [];
       const continuable = member !== void 0 && !appeared.has(edge.headTurnId) && outs.length === 1 && mirrors.length === 0;
       if (continuable) {
-        parts.push(`${edge.relation} -> ${address}`);
+        parts.push(`${edge.relationLabel} -> ${address}`);
         appeared.add(edge.headTurnId);
         edge = outs[0];
         continue;
@@ -47353,7 +47503,7 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
       if (!rendersElsewhere && member !== void 0) {
         appeared.add(edge.headTurnId);
       }
-      parts.push(`${edge.relation} -> ${address}${rendersElsewhere ? "^" : ""}`);
+      parts.push(`${edge.relationLabel} -> ${address}${rendersElsewhere ? "^" : ""}`);
       break;
     }
     return parts.join(" ");
@@ -47381,8 +47531,8 @@ function renderLaneAdjacencyPage(segment, lane, pageMembers, userPrompts, pageBu
     for (const { edge: mirror, sameLane } of mirrors) {
       const arrow = sameLane ? "<-" : "<=";
       const source = sameLane ? `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^ (${pageOf.get(mirror.tailTurnId)}/${pageCount})` : `S${mirror.tailSessionId}/T${mirror.tailPromptNumber}^(E${mirror.tailSegmentId}/#${mirror.tailTag})`;
-      const key = `${arrow}|${mirror.relation}`;
-      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relation, sources: [] };
+      const key = `${arrow}|${mirror.relationLabel}`;
+      const group = foldGroups.get(key) ?? { arrow, relation: mirror.relationLabel, sources: [] };
       group.sources.push(source);
       foldGroups.set(key, group);
       mirrorCount += 1;
@@ -48194,22 +48344,27 @@ function isRelationTargetEntry(value) {
     return false;
   }
   const candidate = value;
-  return typeof candidate.turn === "string" && typeof candidate.tailTag === "string" && typeof candidate.headTag === "string";
+  return typeof candidate.turn === "string" && typeof candidate.tailTag === "string" && typeof candidate.headTag === "string" && // relation-vocabulary-v13 ticket 02: the coverage bit's SHAPE only. Whether
+  // this class may carry one at all is the write path's judgment
+  // (`shared/relation-class.ts`'s `checkRelationCoverage`), which is where
+  // both refusals — a `correct` with no bit, a `verify`/`use` with one — are
+  // stated once for both writers.
+  (candidate.coverage === void 0 || candidate.coverage === "full" || candidate.coverage === "partial");
 }
 function collectRelationFields(entries, input) {
   const fields = [];
-  for (const [key, relation] of entries) {
+  for (const [key, relationClass] of entries) {
     const provided = input[key];
     if (provided === void 0) {
       continue;
     }
     if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
       fail2(
-        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects when present.`
+        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects (with an optional "coverage" of "full" or "partial") when present.`
       );
     }
     if (provided.length > 0) {
-      fields.push({ relation, targets: provided });
+      fields.push({ relationClass, targets: provided });
     }
   }
   return fields;
@@ -48220,7 +48375,7 @@ function touchesEdgeFields(input) {
   );
 }
 function checkRelationTargetLegality(db, relation, raw, tailTag, headTag, citingTurnId, citingAddress, citingTurnTags, citingPhases) {
-  if (!isTurnEdgeRelation(relation)) {
+  if (!isRelationClass(relation)) {
     return null;
   }
   const reference = parseBareAddressReference(raw);
@@ -48268,7 +48423,7 @@ function resolveRelationFields(db, citingTurnId, citingAddress, citingTurnType, 
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const issue3 = checkRelationTargetLegality(
         db,
-        field.relation,
+        field.relationClass,
         raw,
         tailTag,
         headTag,
@@ -48398,10 +48553,14 @@ function handleTurnWrite(db, address, input, options) {
   const touchesProseFields = ["title", "content", "insight"].some(
     (field) => input[field] !== void 0 || isFieldEditMode(modeMap[field])
   );
+  const retiredRelations = retiredRelationFieldRefusal(input);
+  if (retiredRelations) {
+    return parameterError(retiredRelations);
+  }
   const touchesEdges = touchesEdgeFields(input);
   if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
-      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (override/narrows/extends/indexes/consume/grounds/verifies), or one of their retract\u2026 mirrors is required.`
+      `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field (correct/verify/use), or one of their retract\u2026 mirrors is required.`
     );
   }
   const retireTopic = input.retireTopic;
@@ -53286,7 +53445,7 @@ function renderStatsReport(lane, addresses) {
     (fact) => formatTurnRef(fact.citingId, addresses) + " " + fact.relation + " " + formatTurnRef(fact.citedId, addresses)
   );
   lines.push(
-    "  cited from outside: grounds[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
+    "  cited from outside: depends[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
   );
   const membership = lane.coverage.membership;
   lines.push(
@@ -53320,7 +53479,7 @@ function renderUnattributedCluster(cluster, addresses) {
   return "  " + cluster.turnCount + " turns joined by edges with no lane on either side: " + formatTurnRefList(cluster.turnIds, addresses) + cappedCountSuffix(cluster.turnCount, cluster.turnIds.length);
 }
 function renderTooFineIndex(warning, addresses) {
-  return "  " + formatTurnRef(warning.citingId, addresses) + " indexes one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
+  return "  " + formatTurnRef(warning.citingId, addresses) + " converges one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
 }
 function formatAllowance(allowance) {
   return Number.isInteger(allowance) ? String(allowance) : allowance.toFixed(2);
@@ -54305,10 +54464,10 @@ var settlementTurnWriteInputSchema = external_exports.object(settlementTurnWrite
 var PROSE_FIELDS = ["title", "content", "insight"];
 function collectRelationFields2(entries, rawInput) {
   const fields = [];
-  for (const [key, relation] of entries) {
+  for (const [key, relationClass] of entries) {
     const provided = rawInput[key];
     if (provided !== void 0 && provided.length > 0) {
-      fields.push({ relation, targets: provided });
+      fields.push({ relationClass, targets: provided });
     }
   }
   return fields;
@@ -54504,13 +54663,19 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
   const proseFields = PROSE_FIELDS.filter(
     (field) => rawInput[field] !== void 0 || isFieldEditMode(modeMap[field])
   );
+  const retiredRelations = retiredRelationFieldRefusal(
+    rawInput
+  );
+  if (retiredRelations) {
+    return { ok: false, message: retiredRelations };
+  }
   const touchesReview = rawInput.type !== void 0 || rawInput.tags !== void 0;
   const relationFields = collectRelationFields2(RELATION_FIELD_ENTRIES, rawInput);
   const retractionFields = collectRelationFields2(RETRACTION_FIELD_ENTRIES, rawInput);
   if (proseFields.length === 0 && !touchesReview && relationFields.length === 0 && retractionFields.length === 0) {
     return {
       ok: false,
-      message: "at least one of title, content, insight, type, tags, a relation field (override/narrows/extends/indexes/consume/grounds/verifies) or one of their retract\u2026 mirrors is required."
+      message: "at least one of title, content, insight, type, tags, a relation field (correct/verify/use) or one of their retract\u2026 mirrors is required."
     };
   }
   let normalizedType;
@@ -54758,7 +54923,9 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     const citingTags = citingTurnTags();
     const rejections = [];
     for (const field of relationFields) {
-      const key = RELATION_FIELD_ENTRIES.find(([, relation]) => relation === field.relation)[0];
+      const key = RELATION_FIELD_ENTRIES.find(
+        ([, relationClass]) => relationClass === field.relationClass
+      )[0];
       for (const entry of field.targets) {
         const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
         const reference = parseBareAddressReference(raw);
@@ -54778,7 +54945,7 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
         const isSelf = node.kind === "turn" && node.id === turn.id;
         const citedTurn = node.kind === "turn" ? getTurnById(db, node.id) : null;
         const legality = validateRelationTarget({
-          relation: field.relation,
+          relation: field.relationClass,
           citingPhases: phases,
           targetKind: node.kind,
           isSelfReference: isSelf,
@@ -55109,7 +55276,7 @@ function validateCommitReport(rawReport) {
   if (typeof rawReport !== "string" || rawReport.trim().length === 0) {
     return {
       ok: false,
-      refusal: `"report" is required and must be a non-empty, non-whitespace string \u2014 state this window's FRICTION (a forced guess, a relation the seven words could not express, a commit-gate refusal you routed around, a turn you could not read), never a restatement of the counts.`
+      refusal: `"report" is required and must be a non-empty, non-whitespace string \u2014 state this window's FRICTION (a forced guess, a relation the three classes could not express, a commit-gate refusal you routed around, a turn you could not read), never a restatement of the counts.`
     };
   }
   if (rawReport.length > SETTLEMENT_COMMIT_REPORT_MAX_CHARS) {
@@ -56625,7 +56792,7 @@ var STAGE_TWO_SESSION_NOTE_FIELDS = /* @__PURE__ */ new Set([
   "title",
   "content"
 ]);
-var SETTLEMENT_NOTE_TOOL_DESCRIPTION = "WRITE a turn's EDGES, OR this session's narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set this prompt declares) or `session` (\"S<session>\", this session). On `turn` the only parameters this pass may carry are THE FOURTEEN EDGE FIELDS \u2014 the seven relations and their seven retract\u2026 mirrors, enumerated below \u2014 for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn's prose and type are the first pass's judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent's own later note, or a prior settlement attempt) moved this turn's relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn's `relations` and send it again. No field yields on its own. override/narrows/extends/indexes/consume/grounds/verifies: address lists, and normally yours \u2014 the main agent's `note` carries the same seven fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and \"-\" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn's own tags. A lane's identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run's own current read of the citing turn's relations \u2014 a relation write states how that turn's edges stand, so recall the turn with `filter={fields:[\"relations\"]}` first (Step 0's own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractOverride \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric's own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: \"write\" replaces it whole (supply the finished text), or the edit form `{ mode: \"edit\", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field's own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.";
+var SETTLEMENT_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s EDGES, OR this session\'s narrative \u2014 lands immediately, in this same call. Hindsight work: supply what is missing, correct what is wrong, retract what is false, judged by the Memory Rubric in the prompt. Exactly one of `turn` ("S<session>/T<prompt>", from the writable set this prompt declares) or `session` ("S<session>", this session). On `turn` the only parameters this pass may carry are THE SIX EDGE FIELDS \u2014 the three relation classes and their three retract\u2026 mirrors, enumerated below \u2014 for a turn in that writable set; omit to leave alone. `title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a turn address and the whole call writes nothing when one appears. A turn\'s prose and type are the first pass\'s judgment and it is settled; `tags` is worse than settled \u2014 it is a MEMBERSHIP write, and it would move turns between lanes underneath the frozen worklist, member lists and shape receipt this pass is reading. So there is no first-note rule here, and no `mode` vocabulary on a turn: an edge is DECLARED or RETRACTED, never replaced in place. The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another writer (the main agent\'s own later note, or a prior settlement attempt) moved this turn\'s relations since you read them, or you never read them, the WHOLE call is refused and NOTHING is written \u2014 re-read the turn\'s `relations` and send it again. No field yields on its own. correct/verify/use: address lists, and normally yours \u2014 the main agent\'s `note` carries the same three fields but is taught not to reach for them, so all but a few edges are ones you wrote. ASSERTION takes two entry forms and ALL THREE classes accept either: a bare address leaves both sides UNSETTLED (the draft an edge starts as), a `{turn, tailTag, headTag}` entry places each END in a lane \u2014 `tailTag` the lane this turn writes FROM, `headTag` the lane the cited turn sits in. A `correct` entry ALSO carries `"coverage": "full"` or `"partial"` \u2014 FULL when no substantial part of the cited principal result may still serve as a PREMISE (it survives only as history), PARTIAL when a definite non-empty part still stands as one. A `correct` with no coverage is refused naming the missing bit, and a `verify` or `use` carrying one is refused too \u2014 only `correct` has a coverage bit. A DRAFT \u2014 either side left empty, or both \u2014 is ACCEPTED here, but it does not survive `commit`: every edge inside your writable set with an empty side is error E6, and commit refuses while one remains. Place both sides before you finish, or retract the row. Each PLACED side is checked against ITS OWN endpoint, in this order: the tag must be canonical (lowercase letters, digits and "-" only, never leading or trailing); the lane must already be DECLARED (remember create) in the task THAT endpoint belongs to \u2014 an endpoint carrying no task tag is refused naming the turn; and the tag must already be on that endpoint turn\'s own tags. A lane\'s identity is (task, tag), so the same word on both sides means ONE lane spanning the edge, two different words is a legal CROSSING, and the same word in two different tasks is a crossing too \u2014 two lanes that merely share a name. An edge stands on its own: no prose citation, no pre-existing link between the two turns, and one pair may carry several relations at once; a structurally illegal call (an undeclared lane, a self-citation) is rejected, naming what is missing \u2014 the WORD itself is never refused, no relation requires a particular `type` on either end, and a SELF edge is refused outright whatever its lanes. Writing an edge also needs THIS run\'s own current read of the citing turn\'s relations \u2014 a relation write states how that turn\'s edges stand, so recall the turn with `filter={fields:["relations"]}` first (Step 0\'s own field list already delivers it) or the call is refused naming that read; your own edge writes keep the set current afterwards. RETRACTION is the other half: each relation has a retract\u2026 mirror (retractCorrect \u2026), same two entry forms. A bare entry deletes the UNSETTLED row and a two-sided one deletes exactly that lane placement; an address carrying no such edge rejects the call, naming it, and nothing is deleted. Which relation, if any, is the Memory Rubric\'s own vocabulary above \u2014 this call only enforces lane legality and the self-citation gate. On `session`: `title`/`content` only \u2014 type/tags/edges are refused. A field that already holds something needs `mode.<field>`: "write" replaces it whole (supply the finished text), or the edit form `{ mode: "edit", oldString, newString }` swaps one exactly-matched span inside it (`oldString` must match exactly once; add to the end by anchoring on the current last line and putting that line plus your new text in `newString`). With the edit form the field\'s own value is not also supplied \u2014 the new text belongs in `newString`. A whole-field `write` over text your own `recall` delivered only truncated is refused, and the edit form is the way through.';
 var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   page: external_exports.number().int().positive().optional().describe(
     "1-based; default 1. Every page RE-RUNS the check, so a page reflects the state at the moment you ask \u2014 a row you have repaired since page 1 is gone from page 2, and page boundaries can shift. Page through without writing in between when you want one consistent list."
@@ -56636,11 +56803,11 @@ var SETTLEMENT_LANE_CHECK_TOOL_SHAPE = {
   // NO `scope` (settlement-gate-taxonomy ticket 03) — see the doc comment
   // above. One projection, no widening to ask for.
 };
-var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 grounds, consume-class use, or testimony; a lane cited only by consume is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and there is nothing to file against it: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole `indexes` batch is ONE node \u2014 an index cites the batch that produced one phase result, so a single target usually means a step got declared as a phase. It is a reading and never a refusal: nothing blocks a single-target index, at write time or at commit. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
+var SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION = "Run the lane checker over THIS window's own writable set and return its findings as compact numbers and names \u2014 never a digraph, never a write. Paged (`page`, `pageBudget` \u2014 same name and meaning as `recall`'s own): overflow rolls to another page, never truncates a block, and every page beyond the first ends stating how many remain and the exact call for the next one; every page re-runs the check, so it shows the state at the moment you ask rather than a frozen first-page snapshot. Scoped to your own writable set, always and with no way to widen it: a finding you could not act on is a finding `commit` will not judge you on either. Two WARNING families whose instances all repeat the same shape \u2014 time-order violations and cross-task tagged edges \u2014 fold into one count-plus-sample-addresses line each; every other report keeps one entry per block. The output splits in two. ERRORS come first: states the grammar forbids, each naming the turn it is ANCHORED at \u2014 an empty or out-of-vocabulary turn type (E3), an edge whose side tag is missing from that side's own endpoint turn (E4), and a DRAFT edge with either side still empty (E6), which names the side that is missing. A draft is a legal row to WRITE \u2014 placing an end is hindsight work \u2014 but it is not a legal row to LEAVE, and settling it is exactly your work. Commit refuses while an EDGE error (E4, E6) anchored inside your writable range remains, so repair those (retag, retract and re-add) and re-run. An error anchored OUTSIDE your range is another window's work \u2014 leave it. THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER \u2014 one rule builds both, so this preview can neither hide a row commit will refuse nor show you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is NOT in it: setting a turn's `type` is a note field no edge pass holds the pen for, so it is printed below, under the warnings, as a finding this run cannot repair. It is the first pass's debt, and a later window reaches it through its own lookback. Do not chase it and do not try to retype a turn to silence it; the call is refused. Everything after the ERRORS block is WARNINGS: nothing under that header blocks anything, so read them, act only where the material you already hold supports it, and never spend a round trip on one. Report 1: per-lane statistics (members, edge counts, who cites a member from outside \u2014 depends, used, or testimony; a lane cited only by plain use is still ADOPTED, not unused). A lane has NO state: open/closed and the single terminus they were computed from are gone. Its `coverage` line says whether the members listed are the WHOLE lane or a slice of it, with both counts \u2014 a slice is normal (your window is not the lane) and is never something to repair, but a judgment made as if the slice were the lane would be wrong. Report 2: connectivity over each lane's OWN edges \u2014 those whose two sides both name it; a provisional lane (0-1 members) is not judged. A SEVERED lane this run touched is named again at the very end, as a LANE DISPOSITION warning carrying the count and each fracture's stitch target. It does NOT block `commit` and there is nothing to file against it: write a stitch only where a truthful relation is already supported by what you are reading, and leave an honest fracture standing otherwise \u2014 a bridge invented to clear a line is worse than the fracture. Report 3: cross-lane coupling, each lane's crossings counted in three groups, no threshold and no verdict. Report 4b: structural bypass candidates \u2014 a direct edge and a longer route between the same two turns, both shown, neither marked for deletion, because which to keep turns on what each contributes and this tool cannot see that. Report 4c: time-order violations (an edge citing the future). ATTRIBUTION, the warnings most often yours: an UNATTRIBUTED CLUSTER is turns joined by edges with BOTH sides still empty \u2014 literally your own settling queue, since membership is a NODE fact and an edge only gets its two sides from you. Those same rows are ALSO listed one by one as E6 above, on purpose and not as a double count: the cluster tells you the SCALE of what is unattributed, E6 is the per-row list commit judges. LANE PROLIFERATION is a task declaring more lanes than max(1, 0.05 x its member turns). INDEX GRANULARITY names a turn whose whole convergence batch is ONE node \u2014 a convergence covers the batch that produced one phase result, so a single target usually means a step got declared as a phase. It reads STORED rows written under the retired `indexes` word and can report nothing about a row written since; it is a reading and never a refusal. All three name their numbers, all three are debt or diagnosis rather than a defect: the repair is a `create` plus settling both sides of an edge, fewer lanes, or a wider index batch \u2014 never a rewrite of the turns. Treat a WARNING as a CANDIDATE for the same supply/correct/ propose judgment every other duty above uses \u2014 never RE-RUN the check more than once (reading a later `page` of the SAME run's findings is not a re-run), and never let its output alone justify a write without the usual Memory Rubric judgment.";
 var SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION = 'Action "impression" WRITES ONE CONTAINER\'S DECISION about its impression, and it is the only way an impression is ever written. Takes `id` (the container address exactly as your advisory printed it \u2014 "E<n>/#<tag>" for a lane, "E<n>" for the task tier), `baseRevision` (the revision that advisory printed for it), `decision` ("retain" or "replace") and, on a replace, `text` \u2014 the WHOLE new impression, never a patch. CALL IT AS YOU DECIDE, one container at a time, not as one batch at the end. The call VALIDATES IN FULL and refuses HERE: an over-cap line, a bare anchor, a delivery word with no anchor on its line, a retain over a container your own edges overrode or a merge left STALE \u2014 each is refused with its violations named, and every decision you already recorded stands untouched. Repair that one and call again. A recorded decision is PENDING: nothing is written, no staleness is cleared, and no debt is discharged until your own `commit` verifies the whole set and promotes it. Deciding the same container twice keeps the LAST decision.';
 var SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION = 'IMPRESSIONS ARE CHECKED HERE, NOT WRITTEN HERE. Every container this run touched must already carry a decision, recorded one at a time with `remember(action: "impression", \u2026)` as you make it. This call verifies the duty inside its own transaction: a touched container with no decision refuses the commit BY NAME, and so does a decision whose container moved under it \u2014 its revision, or a lane\'s settled membership \u2014 in which case the current coordinates are reprinted for you to read and decide again. Nothing is written and no staleness is cleared until this call succeeds; a refusal costs no attempt.';
 var SETTLEMENT_REMEMBER_TOOL_DESCRIPTION = `MAINTAIN A CONTAINER'S IMPRESSION \u2014 the mental model a reader keeps after the chronology is forgotten. This tool has exactly ONE action in the edge pass: "impression". The lane registry \u2014 create, delete, merge \u2014 is the topic pass's own settled judgment, frozen by the transition you are working, and every one of those actions is refused here, naming why. ` + SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
-var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no disposition to file, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the seven relation words is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the seven words could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION;
+var SETTLEMENT_COMMIT_TOOL_DESCRIPTION = "Finish this window: verify your job lease is still valid, report what this run actually wrote, and mark the job durably complete. Call this once you believe the window is done \u2014 whether or not you wrote anything; every `note`/`remember` call already landed the instant it ran, so an empty-handed `commit` (nothing to propose or correct) is a normal, clean finish, not a no-op to avoid. This is the ONLY way the job itself is marked done \u2014 without it, the window is retried later even though your writes already stand. Commit REFUSES while an EDGE state the grammar forbids still anchors on a turn inside your writable set \u2014 a tagged edge whose tags are missing from an endpoint turn's own tags (E4), and a DRAFT edge with either side still empty (E6). No WORD requires a lane tag \u2014 every relation has a legal bare form and writing one is accepted \u2014 but an edge left with an empty side inside your writable set is unfinished settlement, so place both sides or retract it. The refusal lists every one with its address and the move that clears it; repair them and call `commit` again \u2014 a refusal costs you nothing and is not a failed attempt. Errors anchored OUTSIDE your writable set are another window's work and never block you. ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn in your set \u2014 not a removed-side citer's, not a window member's. Its repair is that turn's `type`, and no edge pass holds that pen (your `note` refuses the field). It is the first pass's debt; a later window meets it again through its own lookback, and the first pass's own transition gate is what normally stops one reaching you at all. `lane_check` prints it under the WARNINGS, which is the same class this gate gives it \u2014 the two surfaces run one rule. A SEVERED LANE NEVER REFUSES THIS COMMIT. A lane this run touched that is left in two or more pieces rides the SUCCESSFUL receipt as a warning with its count and its stitch target, and there is nothing you owe for it: no disposition to file, no retry, no delay. Connectivity is a quality goal, not a legal state, and two writable endpoints do not mean any of the three relation classes is true between them. A successful commit also returns this window's SHAPE NUMBERS \u2014 per worklist lane, its frozen member count and weak-component count; per lane pair, the crossings grouped by relation word \u2014 plus every homeless-motivated retraction with its cause. They are an audit of the partition, never an instruction, and there is nothing to do about them. If your job lease has been reclaimed, commit refuses and no further commit from this run will ever succeed \u2014 stop making tool calls. Also takes `report` (string, REQUIRED, max 1000 characters \u2014 refused if absent, empty, whitespace-only, or over the cap; never truncated): this window's FRICTION, not its work \u2014 never a restatement of the counts this same call already reports exactly. Name whichever of these actually applied: where this window forced a guess; a relation you wanted and the three classes could not express; a commit-gate refusal (E4/E6) you had to route around; a turn you could not read, and why. A refusal \u2014 gate or parameter \u2014 never stashes `report`; resend it on your retry. " + SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION;
 var SETTLEMENT_COMMIT_INPUT_SHAPE = {
   report: external_exports.string()
 };
@@ -56813,7 +56980,7 @@ function evaluateLaneDispositionGate(db, evaluation, runTouches, scope) {
         continue;
       }
       blocking.push(
-        `${fractureText} has no stitching edge. Stitch it (write any of the seven relations across it) if the material you are reading makes one true.`
+        `${fractureText} has no stitching edge. Stitch it (write any of the relation classes across it) if the material you are reading makes one true.`
       );
     }
   }
@@ -57421,7 +57588,7 @@ var NOTE_SETTLEMENT_UNIFIED_ALLOWED_TOOLS = [
   "mcp__mnemo__commit",
   "mcp__mnemo__lane_check"
 ];
-var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the seven relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. Tags are the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the fourteen edge fields only (the seven relations and their retract\u2026 mirrors) on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
+var UNIFIED_NOTE_TOOL_DESCRIPTION = 'WRITE a turn\'s fields \u2014 lands immediately, in this same call. BEFORE your own `finalize` has succeeded: title/content/insight, type and tags \u2014 the topic pass\'s own fields, judged by the Memory Rubric in your prompt; the three relation fields and their retract\u2026 mirrors are refused, naming the edge pass you have not reached yet. Tags are the projection: a whole-set `tags` write states the turn\'s task tag, every lane it belongs to and every `topic:` word \u2014 a lane word left out is REMOVED, a `topic:` word left out is refused (use `retireTopic` to correct one). AFTER `finalize` has succeeded: the six edge fields only (the three relation classes and their retract\u2026 mirrors) on a turn address, or `title`/`content` on this session\'s own `session` address \u2014 title/content/insight/type/tags are refused on a turn address, because that judgment is now your own settled one and `tags` especially would move a turn between lanes underneath the worklist `finalize` froze. `turn` is an "S<session>/T<prompt>" address from the writable set your prompt declares; omit a field to leave it alone. A field that already holds something needs `mode.<field>: "write"` (the full replacement value) or the edit form `{ mode: "edit", oldString, newString }`. A call composed in the SAME response as a successful `finalize`, before you have seen a new response of your own, is refused naming that \u2014 read finalize\'s result first.';
 var UNIFIED_REMEMBER_TOOL_DESCRIPTION = 'DECLARE a lane \u2014 lands immediately, in this same call. This tool belongs to the TOPIC PASS only: BEFORE your own `finalize`, action "create" or "delete". A lane is (task, ONE tag); `create` needs a canonical tag carrying no phase word (research/design/implement/fix/review/verification and their families are refused, naming the offending word). `merge` is refused in both passes \u2014 folding two lanes into one is the user\'s own explicit call, made later. AFTER `finalize` THE LANE REGISTRY IS CLOSED \u2014 create, delete and merge are all refused there: the registry is the topic pass\'s own settled judgment, frozen by your transition. A severed lane owes you nothing there \u2014 it is a WARNING on `lane_check` and on your commit receipt naming a stitch target, it blocks no commit, and there is no disposition to file for it. What this tool DOES hold after `finalize` is one action: "impression". ' + SETTLEMENT_REMEMBER_IMPRESSION_DESCRIPTION;
 var UNIFIED_FINALIZE_TOOL_DESCRIPTION = "END the topic pass and open the edge pass, IN THIS SAME RUN \u2014 lands immediately, in this same call, and runs at most once. Call it once the whole writable set is audited, every window turn carries a `topic:` word, and the final projection is written. It freezes what the edge pass may read \u2014 the writable set, the (task, lane) worklist your projection touched, each of those lanes' members, and the lane words your projection REMOVED \u2014 and records any homeless group per member. Its own result is DATA ONLY: the frozen writable set, worklist, removed-side debts and homeless groups, printed as facts \u2014 every instruction for what to do with them already lives in your prompt. It marks nothing done and grants nothing; only your own later `commit` publishes. Takes `summary` (string, REQUIRED, max 1000 characters): the lines you found, which were existing lanes and which are new, and where this window forced a guess. Takes `homeless` (optional): one entry per group of turns whose subject has no legal task to live in \u2014 `label`, `reason` and `turns` (member addresses). Never open a task or mint a lane to avoid this list. REFUSES while a turn in your writable set has an empty or out-of-vocabulary `type`, or a window turn carries no `topic:` word. A refusal costs nothing and is not a failed attempt: repair and call it again in this same run. Refused outright once you are already in the edge pass \u2014 it runs once.";
 var UNIFIED_COMMIT_TOOL_DESCRIPTION = "Finish this window's edge pass \u2014 reachable ONLY after your own `finalize` has succeeded; calling it before that refuses, naming `finalize` as what you still owe. " + SETTLEMENT_COMMIT_TOOL_DESCRIPTION;

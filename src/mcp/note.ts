@@ -10,12 +10,16 @@ import {
   recomputeTurnCitedPairs,
   retractTurnRelations,
   type AttachTurnRelationsResult,
-  type CitationRelation,
   type RecomputeTurnCitedPairsResult,
   type RelationTargetEntry,
   type RetractTurnRelationsResult,
   type TurnRelationFieldInput,
 } from "../db/citations";
+import {
+  isRelationClass,
+  retiredRelationFieldRefusal,
+  type RelationClass,
+} from "../shared/relation-class";
 import { runWriteTransaction } from "../db/database";
 import { collectEdgeSideFacts } from "../db/lane-edge-gate";
 import {
@@ -73,10 +77,8 @@ import {
   typeListsEqual,
 } from "../shared/type-vocabulary";
 import {
-  isTurnEdgeRelation,
   phasesForTypes,
   validateRelationTarget,
-  type TurnEdgeRelation,
   type TurnPhase,
 } from "../shared/turn-phase";
 
@@ -229,20 +231,13 @@ export interface NoteToolInput {
   // hindsight judgment is still the thing the measured 92.1%-adjacent-
   // predecessor result (spec D3d) says the main agent actually produces, so
   // a caller reaches for these rarely, by exception — never as habit.
-  override?: unknown;
-  narrows?: unknown;
-  extends?: unknown;
-  indexes?: unknown;
-  consume?: unknown;
-  grounds?: unknown;
-  verifies?: unknown;
-  retractOverride?: unknown;
-  retractNarrows?: unknown;
-  retractExtends?: unknown;
-  retractIndexes?: unknown;
-  retractConsume?: unknown;
-  retractGrounds?: unknown;
-  retractVerifies?: unknown;
+  // relation-vocabulary-v13 ticket 02: three CLASSES, three mirrors.
+  correct?: unknown;
+  verify?: unknown;
+  use?: unknown;
+  retractCorrect?: unknown;
+  retractVerify?: unknown;
+  retractUse?: unknown;
 
   // D5/D5a: per-field mode, required whenever the target field is currently
   // non-empty. One object, shared vocabulary across every field of both
@@ -529,30 +524,38 @@ function isRelationTargetEntry(value: unknown): value is RelationTargetEntry {
   return (
     typeof candidate.turn === "string" &&
     typeof candidate.tailTag === "string" &&
-    typeof candidate.headTag === "string"
+    typeof candidate.headTag === "string" &&
+    // relation-vocabulary-v13 ticket 02: the coverage bit's SHAPE only. Whether
+    // this class may carry one at all is the write path's judgment
+    // (`shared/relation-class.ts`'s `checkRelationCoverage`), which is where
+    // both refusals — a `correct` with no bit, a `verify`/`use` with one — are
+    // stated once for both writers.
+    (candidate.coverage === undefined ||
+      candidate.coverage === "full" ||
+      candidate.coverage === "partial")
   );
 }
 
-// `CitationRelation`, not `TurnEdgeRelation`: the retraction half of the
-// vocabulary is one word wider than the assertion half (finding P1-2), and
-// both halves are collected by this one function.
+// Keyed on the relation CLASS since relation-vocabulary-v13 ticket 02: both the
+// assertion fields and their retraction mirrors address a class, and both
+// halves are collected by this one function.
 function collectRelationFields(
-  entries: ReadonlyArray<readonly [key: string, relation: CitationRelation]>,
+  entries: ReadonlyArray<readonly [key: string, relationClass: RelationClass]>,
   input: NoteToolInput,
 ): TurnRelationFieldInput[] {
   const fields: TurnRelationFieldInput[] = [];
-  for (const [key, relation] of entries) {
+  for (const [key, relationClass] of entries) {
     const provided = (input as Record<string, unknown>)[key];
     if (provided === undefined) {
       continue;
     }
     if (!Array.isArray(provided) || provided.some((value) => !isRelationTargetEntry(value))) {
       fail(
-        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects when present.`,
+        `${key} must be an array of addresses (bare strings) or {turn, tailTag, headTag} objects (with an optional "coverage" of "full" or "partial") when present.`,
       );
     }
     if (provided.length > 0) {
-      fields.push({ relation, targets: provided as RelationTargetEntry[] });
+      fields.push({ relationClass, targets: provided as RelationTargetEntry[] });
     }
   }
   return fields;
@@ -590,7 +593,7 @@ function checkRelationTargetLegality(
   citingTurnTags: readonly string[],
   citingPhases: ReadonlySet<TurnPhase>,
 ): string | null {
-  if (!isTurnEdgeRelation(relation)) {
+  if (!isRelationClass(relation)) {
     return null;
   }
   const reference = parseBareAddressReference(raw);
@@ -669,7 +672,7 @@ function resolveRelationFields(
       const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
       const issue = checkRelationTargetLegality(
         db,
-        field.relation,
+        field.relationClass,
         raw,
         tailTag,
         headTag,
@@ -924,6 +927,14 @@ function handleTurnWrite(
       (input as Record<string, unknown>)[field] !== undefined ||
       isFieldEditMode(modeMap[field]),
   );
+  // relation-vocabulary-v13 ticket 02: BEFORE the entry gate, because a call
+  // carrying only `override: [...]` would otherwise be told "no field is
+  // present" — true of the new vocabulary and useless to a caller working from
+  // the old one. Named with its replacement so the fix is one round trip.
+  const retiredRelations = retiredRelationFieldRefusal(input as Record<string, unknown>);
+  if (retiredRelations) {
+    return parameterError(retiredRelations);
+  }
   // Ticket 02 (edge-mechanism-revision D1): an edge parameter alone is a
   // complete call. The entry gate exists to refuse a call that would do
   // NOTHING, and a pure relation or retraction call does plenty — it just
@@ -935,7 +946,7 @@ function handleTurnWrite(
   if (providedFields.length === 0 && !touchesEdges) {
     return parameterError(
       `at least one of ${TURN_MODE_FIELDS.join(", ")}, a relation field` +
-        " (override/narrows/extends/indexes/consume/grounds/verifies)," +
+        " (correct/verify/use)," +
         " or one of their retract… mirrors is required.",
     );
   }

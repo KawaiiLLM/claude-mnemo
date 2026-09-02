@@ -15,6 +15,7 @@ import {
   SETTLEMENT_LANE_ACTIONS,
   settlementMembershipWriteInputShape,
 } from "../../src/worker/note-settlement-membership-facade";
+import { RELATION_CLASSES } from "../../src/shared/relation-class";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   renderMainAgentRubricBlock,
@@ -390,8 +391,8 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // on a misreading of this same ruling. `settlementNoteInputShape` borrows
   // the identical field objects, so reading either surface's describe reads
   // the same text.
-  describe("assertion describes offer both entry forms for ALL SEVEN words", () => {
-    for (const field of EDGE_RELATIONS) {
+  describe("assertion describes offer both entry forms for ALL THREE classes", () => {
+    for (const field of RELATION_CLASSES) {
       test(`${field}'s describe offers the draft form and states the two-sided admission test`, () => {
         const description = settlementNoteInputShape[field].description ?? "";
         expect(description).toContain("both sides unsettled");
@@ -424,9 +425,9 @@ describe("no teaching surface still states the retired tag mandate", () => {
   // -------------------------------------------------------------------------
 
   describe("the settlement note description teaches the registry gate, not the mandate", () => {
-    test("all seven words take either form, and the draft form is one of them", () => {
+    test("all three classes take either form, and the draft form is one of them", () => {
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "ALL SEVEN words accept either: a bare address leaves both sides UNSETTLED",
+        "ALL THREE classes accept either: a bare address leaves both sides UNSETTLED",
       );
       // Ticket 08 said out loud that settlement is the ONLY edge writer. That
       // claim was retired by main-agent-edge-capability ticket 01: the ruling
@@ -434,7 +435,7 @@ describe("no teaching surface still states the retired tag mandate", () => {
       // guidance narrowed — so the description now states the guidance without
       // asserting an absence that is not true.
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain(
-        "the main agent's `note` carries the same seven fields but is taught not to reach for them",
+        "the main agent's `note` carries the same three fields but is taught not to reach for them",
       );
       expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).not.toContain("has no relation field at all");
     });
@@ -500,7 +501,7 @@ describe("no teaching surface still states the retired tag mandate", () => {
   });
 
   describe("retraction mirrors are unchanged by the withdrawal", () => {
-    for (const field of ["retractExtends", "retractNarrows"] as const) {
+    for (const field of ["retractUse", "retractCorrect"] as const) {
       test(`${field} still documents the bare-address form`, () => {
         const description = settlementNoteInputShape[field].description ?? "";
         // The retraction line's own words: a bare entry retracts the unsettled

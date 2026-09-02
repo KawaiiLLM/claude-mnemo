@@ -42,6 +42,7 @@ import {
   type SettlementTurnWriteInput,
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { correctEntry } from "../support/relation-entries";
 
 /**
  * The settlement turn-write facade's DECISION function,
@@ -917,14 +918,17 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // is exactly the call a from-zero rebuild has to be able to make.
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     expect(resultText(result)).toContain("1 relation");
     const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
     expect(edges).toHaveLength(1);
-    expect(edges[0]!.relation).toBe("consume");
+    // INTERIM (relation-vocabulary-v13 ticket 02, ticket 05a replaces it): a
+    // `use` write stores as `extends`, with the class in its own column.
+    expect(edges[0]!.relation).toBe("extends");
+    expect(edges[0]!.relationClass).toBe("use");
     // Settlement's attribution survives the move onto the main agent's own
     // primitive — `judged`, not `asserted`.
     expect(edges[0]!.provenance).toBe("judged");
@@ -936,10 +940,11 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const t2 = seedTurn(sessionDbId, 2);
     // T1 decision-phase, T2 delivery+decision: legal for `grounds` (no
     // restriction) and for `extends` (decision -> decision).
-    // tag-mandate ("Write gate"): the extends half must name a lane both
-    // endpoints carry; the `grounds` half stays BARE, which is also the
-    // point — the mandate falls on extends/narrows alone, and a cross-phase
-    // word may not carry a tag at all.
+    // relation-vocabulary-v13 ticket 02: the two relations are now two
+    // CLASSES (`use` and `verify`) rather than two of the seven words — the
+    // property under test is unchanged, that ONE pair may carry two rows at
+    // once. The placed half must name a lane both endpoints carry; the other
+    // stays BARE, which is also the point.
     updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
     updateTurnById(db, t2, { type: ["implement", "correction"], tags: ["lane-home", "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 2);
@@ -948,8 +953,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
       {
         turn: `S${sessionDbId}/T2`,
-        grounds: [`S${sessionDbId}/T1`],
-        extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }],
+        verify: [`S${sessionDbId}/T1`],
+        use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }],
       },
       NOW,
     );
@@ -958,7 +963,10 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const relations = getOutgoingEdges(db, { kind: "turn", id: t2 })
       .map((edge) => edge.relation)
       .sort();
-    expect(relations).toEqual(["extends", "grounds"]);
+    // INTERIM storage words (ticket 05a replaces the mapping): `use` ->
+    // `extends`, `verify` -> `verifies`. Sorted, so the pair reads
+    // deterministically.
+    expect(relations).toEqual(["extends", "verifies"]);
   });
 
   // Indexes-rescope spec (ticket 01, [S15069/T1232]): `indexes` (the renamed,
@@ -967,7 +975,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
   // T1217) covered the facade sharing note.ts's collects gate, dead-branch
   // case included; these now confirm the identical dead-branch shape SUCCEEDS
   // through the facade, since the gate itself retired.
-  test("indexes through the facade: a live settlement indexes its member", () => {
+  test("convergence through the facade: a live settlement `use`s its member", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
@@ -981,25 +989,29 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const branch = write(
       context,
-      { turn: `S${sessionDbId}/T3`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      { turn: `S${sessionDbId}/T3`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
       NOW,
     );
     expect(resultText(branch)).toContain("1 relation");
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T3`, indexes: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
     expect(resultText(result)).toContain("1 relation");
     expect(
       getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
-        (edge) => edge.relation === "indexes",
+        // INTERIM (ticket 05a): a `use` write stores as `extends`. The word
+        // `indexes` this test used to assert is DELETED from the write
+        // vocabulary outright (user ruling S15069/T2306) — convergence is no
+        // longer declared, it is read off out-degree.
+        (edge) => edge.relation === "extends" && edge.relationClass === "use",
       ),
     ).toBe(true);
   });
 
-  test("indexes through the facade: an overridden settlement (dead branch) can still index — the graph-state gate retired", () => {
+  test("convergence through the facade: a fully corrected settlement (dead branch) can still converge — the graph-state gate retired", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t3 = seedTurn(sessionDbId, 3);
@@ -1014,25 +1026,29 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const branch = write(
       baseContext(job, { reviewableTurnIds: new Set([t3]) }),
-      { turn: `S${sessionDbId}/T3`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      { turn: `S${sessionDbId}/T3`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
       NOW,
     );
     expect(resultText(branch)).toContain("1 relation");
     write(
       baseContext(job, { reviewableTurnIds: new Set([t4]) }),
-      { turn: `S${sessionDbId}/T4`, override: [`S${sessionDbId}/T3`] },
+      { turn: `S${sessionDbId}/T4`, correct: [correctEntry(`S${sessionDbId}/T3`, "full")] },
       NOW + 1,
     );
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t3]) }),
-      { turn: `S${sessionDbId}/T3`, indexes: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW + 2,
     );
 
     expect(resultText(result)).toContain("1 relation");
     expect(
       getOutgoingEdges(db, { kind: "turn", id: t3 }).some(
-        (edge) => edge.relation === "indexes",
+        // INTERIM (ticket 05a): a `use` write stores as `extends`. The word
+        // `indexes` this test used to assert is DELETED from the write
+        // vocabulary outright (user ruling S15069/T2306) — convergence is no
+        // longer declared, it is read off out-degree.
+        (edge) => edge.relation === "extends" && edge.relationClass === "use",
       ),
     ).toBe(true);
   });
@@ -1044,7 +1060,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     updateTurnById(db, t1, { type: ["implement"] });
     updateTurnById(db, t2, { type: ["implement"] });
     const job = claimWindow(sessionDbId, 1, 2);
-    const input = { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] };
+    const input = { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] };
     const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
 
     write(context, input, NOW);
@@ -1064,13 +1080,13 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     const context = baseContext(job, { reviewableTurnIds: new Set([t2]) });
     write(
       context,
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     const retracted = write(
       context,
-      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractUse: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
     expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
@@ -1080,7 +1096,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // stay distinguishable, and nothing is deleted.
     const missing = write(
       context,
-      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractUse: [`S${sessionDbId}/T1`] },
       NOW + 2,
     );
     expect(resultText(missing)).toContain("Parameter error");
@@ -1096,14 +1112,14 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const unresolved = write(
       context,
-      { turn: `S${sessionDbId}/T1`, consume: [`S${sessionDbId}/T999`] },
+      { turn: `S${sessionDbId}/T1`, use: [`S${sessionDbId}/T999`] },
       NOW,
     );
     expect(resultText(unresolved)).toContain("does not resolve");
 
     const selfLoop = write(
       context,
-      { turn: `S${sessionDbId}/T1`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T1`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
     expect(resultText(selfLoop)).toContain("an edge's two ends must be DIFFERENT turns");
@@ -1133,7 +1149,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
       const result = write(
         context,
-        { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] },
+        { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
         NOW,
       );
 
@@ -1147,7 +1163,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
         NOW + 1,
       );
@@ -1169,7 +1185,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
       const result = write(
         baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-        { turn: `S${sessionDbId}/T2`, narrows: [`S${sessionDbId}/T1`] },
+        { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "partial")] },
         NOW,
       );
 
@@ -1194,7 +1210,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
       const call = {
         turn: `S${sessionDbId}/T2`,
-        extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "fresh-lane", headTag: "fresh-lane" }],
+        use: [{ turn: `S${sessionDbId}/T1`, tailTag: "fresh-lane", headTag: "fresh-lane" }],
       };
       const refused = write(context, call, NOW);
       expect(resultText(refused)).toStartWith("Parameter error:");
@@ -1243,8 +1259,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         baseContext(job, { reviewableTurnIds: new Set([t2]) }),
         {
           turn: `S${sessionDbId}/T2`,
-          retractExtends: [`S${sessionDbId}/T1`],
-          retractNarrows: [`S${sessionDbId}/T1`],
+          retractUse: [`S${sessionDbId}/T1`],
+          retractCorrect: [`S${sessionDbId}/T1`],
         },
         NOW,
       );
@@ -1275,8 +1291,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       context,
       {
         turn: `S${sessionDbId}/T1`,
-        indexes: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
-        grounds: [`S${sessionDbId}/T1`],
+        use: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+        use: [`S${sessionDbId}/T1`],
       },
       NOW,
     );
@@ -1314,7 +1330,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const refused = write(
       context,
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
       { skipRelationsRead: true },
     );
@@ -1334,7 +1350,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     );
     const landed = write(
       context,
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW + 1,
       { skipRelationsRead: true },
     );
@@ -1365,7 +1381,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
 
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, verifies: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, verify: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -1440,7 +1456,7 @@ describe("the relations gate (peer round P1-8)", () => {
 
     const refused = write(
       context,
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] },
       NOW,
       { skipRelationsRead: true },
     );
@@ -1456,7 +1472,7 @@ describe("the relations gate (peer round P1-8)", () => {
 
     const landed = write(
       context,
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] },
       NOW,
       { skipRelationsRead: true },
     );
@@ -1484,7 +1500,7 @@ describe("the relations gate (peer round P1-8)", () => {
       resultText(
         write(
           laterContext,
-          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+          { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] },
           NOW,
           { skipRelationsRead: true },
         ),
@@ -1493,7 +1509,7 @@ describe("the relations gate (peer round P1-8)", () => {
 
     const refused = write(
       context,
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+      { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T3`, "full")] },
       NOW + 1,
       { skipRelationsRead: true },
     );
@@ -1507,7 +1523,7 @@ describe("the relations gate (peer round P1-8)", () => {
       resultText(
         write(
           context,
-          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+          { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T3`, "full")] },
           NOW + 2,
           { skipRelationsRead: true },
         ),
@@ -1524,7 +1540,7 @@ describe("the relations gate (peer round P1-8)", () => {
       resultText(
         write(
           context,
-          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+          { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] },
           NOW,
           { skipRelationsRead: true },
         ),
@@ -1535,7 +1551,7 @@ describe("the relations gate (peer round P1-8)", () => {
       resultText(
         write(
           context,
-          { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T3`] },
+          { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T3`, "full")] },
           NOW + 1,
           { skipRelationsRead: true },
         ),
@@ -1549,14 +1565,14 @@ describe("the relations gate (peer round P1-8)", () => {
     readRelationsForWrite(context, `S${sessionDbId}/T2`);
     write(
       context,
-      { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] },
       NOW,
       { skipRelationsRead: true },
     );
 
     const retracted = write(
       context,
-      { turn: `S${sessionDbId}/T2`, retractOverride: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractCorrect: [`S${sessionDbId}/T1`] },
       NOW + 1,
       { skipRelationsRead: true },
     );
@@ -1635,7 +1651,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
 
       const result = write(
         context,
-        { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] },
+        { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
         NOW,
       );
 
@@ -1650,7 +1666,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" }],
         },
         NOW,
       );
@@ -1666,7 +1682,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1682,8 +1698,12 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
-          consume: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" }],
+          // One field, two entries: the same class under two DIFFERENT lane
+          // placements is two independent claims (D2's own multi-row identity).
+          use: [
+            { turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" },
+            { turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" },
+          ],
         },
         NOW,
       );
@@ -1702,7 +1722,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
         },
         NOW,
       );
@@ -1714,7 +1734,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "Lane-A" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "", headTag: "Lane-A" }],
         },
         NOW,
       );
@@ -1730,7 +1750,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "never-declared", headTag: "" }],
         },
         NOW,
       );
@@ -1746,7 +1766,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "Lane-A", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "Lane-A", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1768,7 +1788,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [
+          use: [
             { turn: `S${sessionDbId}/T1`, tailTag: "undeclared-lane", headTag: "undeclared-lane" },
           ],
         },
@@ -1789,7 +1809,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1809,7 +1829,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1830,7 +1850,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1855,7 +1875,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
           turn: `S${sessionDbId}/T2`,
           tags: [FIXTURE_SEGMENT_TAG, "lane-b"],
           mode: { tags: "write" },
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
         },
         NOW,
       );
@@ -1880,7 +1900,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
         },
         NOW,
       );
@@ -1906,7 +1926,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          consume: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-b" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-b" }],
         },
         NOW,
       );
@@ -1926,7 +1946,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-b", headTag: "lane-b" }],
         },
         NOW,
       );
@@ -1948,7 +1968,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
       context,
       {
         turn: `S${sessionDbId}/T2`,
-        grounds: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
+        use: [{ turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" }],
       },
       NOW,
     );
@@ -1961,12 +1981,12 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
   test("a placed edge and its own draft coexist, and a retraction addresses exactly one", () => {
     const { sessionDbId, citing, context } = pair();
 
-    write(context, { turn: `S${sessionDbId}/T2`, extends: [`S${sessionDbId}/T1`] }, NOW);
+    write(context, { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] }, NOW);
     write(
       context,
       {
         turn: `S${sessionDbId}/T2`,
-        extends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
       },
       NOW + 1,
     );
@@ -1976,7 +1996,7 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
       context,
       {
         turn: `S${sessionDbId}/T2`,
-        retractExtends: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        retractUse: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
       },
       NOW + 2,
     );
@@ -2009,14 +2029,14 @@ describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
 
     const chain = write(
       context,
-      { turn: `S${sessionDbId}/T2`, extends: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
+      { turn: `S${sessionDbId}/T2`, use: [{ turn: `S${sessionDbId}/T1`, tags: ["lane-a"] }] },
       NOW,
     );
     expect(resultText(chain)).toContain("1 relation");
 
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
@@ -2037,11 +2057,11 @@ describe("grounds mid-flow warning retirement (rubric-v10 ticket 02)", () => {
     const job = claimWindow(sessionDbId, 1, 3);
     const context = baseContext(job, { reviewableTurnIds: new Set([overrider, citer]) });
 
-    write(context, { turn: `S${sessionDbId}/T2`, override: [`S${sessionDbId}/T1`] }, NOW);
+    write(context, { turn: `S${sessionDbId}/T2`, correct: [correctEntry(`S${sessionDbId}/T1`, "full")] }, NOW);
 
     const result = write(
       context,
-      { turn: `S${sessionDbId}/T3`, grounds: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T3`, use: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
@@ -2080,7 +2100,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const { sessionDbId, t2, job } = seedHiddenCitingTurn();
     // T2 is deliberately absent from reviewableTurnIds and carries NO write-gate
     // stamp on `type`, so the edge gate's own three judgments all admit.
-    const input = { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] };
+    const input = { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] };
 
     const refused = write(baseContext(job), input, NOW);
 
@@ -2107,13 +2127,13 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const { sessionDbId, t2, job } = seedHiddenCitingTurn();
     write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
     const refused = write(
       baseContext(job),
-      { turn: `S${sessionDbId}/T2`, retractConsume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, retractUse: [`S${sessionDbId}/T1`] },
       NOW + 1,
     );
 
@@ -2129,7 +2149,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     const evaluation = evaluateSettlementTurnWrite(
       db,
       baseContext(job),
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -2144,7 +2164,7 @@ describe("the reviewable-window check is unconditional (ticket 07, spec D6 渲�
     // kind: that is what lets a window connect to what came before it.
     const result = write(
       baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-      { turn: `S${sessionDbId}/T2`, consume: [`S${sessionDbId}/T1`] },
+      { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] },
       NOW,
     );
 
@@ -2365,8 +2385,8 @@ describe("session-addressed narrative writes (ticket 09)", () => {
     for (const extra of [
       { type: ["design"] },
       { tags: ["lane-home", "auth"] },
-      { verifies: ["S1/T1"] },
-      { consume: ["S1/T1"] },
+      { verify: ["S1/T1"] },
+      { use: ["S1/T1"] },
     ]) {
       const result = write(
         baseContext(job),
@@ -2979,7 +2999,7 @@ describe("staged settlement — relation-only authority on a removed-side citer"
       context,
       {
         turn: `S${sessionDbId}/T1`,
-        extends: [
+        use: [
           { turn: `S${sessionDbId}/T2`, tailTag: "lane-a", headTag: "lane-a" },
         ],
       },

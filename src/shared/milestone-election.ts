@@ -235,7 +235,23 @@ export interface MilestoneElectionResult {
   decisionTierShare: number;
 }
 
-/** The spec's "six words" — positive in-degree domain. `override`/`refutes` stay out of it (they are corrections, not endorsements), but they are no longer candidacy killers either: ticket 04 deleted the repudiation arm entirely. */
+/**
+ * The spec's "six words" — positive in-degree domain. `override`/`refutes` stay
+ * out of it (they are corrections, not endorsements), but they are no longer
+ * candidacy killers either: ticket 04 deleted the repudiation arm entirely.
+ *
+ * RELATION-VOCABULARY-V13 TICKET 02 LEFT THIS TABLE, AND EVERY OTHER WEIGHT IN
+ * THIS MODULE, EXACTLY AS FROZEN. The write vocabulary moved to three classes,
+ * and a new edge still lands in `memory_edges.relation` under one of these
+ * seven words via `shared/relation-class.ts`'s `INTERIM_LEGACY_RELATION` —
+ * correct/full as `override`, correct/partial as `narrows`, verify as
+ * `verifies`, use as `extends`. That equivalence is what keeps a three-class
+ * edge VISIBLE here with no change at this seam, and it is deliberately
+ * labelled INTERIM: ticket 05a re-keys these tables onto (class, coverage) and
+ * deletes it. Re-keying them HERE, ahead of that ticket, would have retuned the
+ * election in the same release as a vocabulary change, with no way to tell the
+ * two effects apart in production.
+ */
 const IN_DEGREE_RELATIONS: ReadonlySet<string> = new Set([
   "narrows",
   "extends",

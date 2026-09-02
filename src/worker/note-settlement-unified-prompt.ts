@@ -346,7 +346,7 @@ export function renderNoteSettlementUnifiedPrompt(
     "   `turn` budget — and identify the claim-level links wholly visible among",
     "   them; a shared topic, adjacency or state-only pairing is never a link on",
     "   its own. Write the relations you find, judged by the Memory Rubric's",
-    "   **七个关系词** entry above. PLACE EVERY EDGE AT WRITE: each relation",
+    "   **三个关系类** entry above. PLACE EVERY EDGE AT WRITE: each relation",
     "   entry is `{turn, tailTag, headTag}` in the call that writes it —",
     "   `tailTag` the lane THIS turn writes from, `headTag` the lane the cited",
     "   turn sits in, both sides or neither. A bare address writes a DRAFT, and",

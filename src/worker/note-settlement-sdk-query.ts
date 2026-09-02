@@ -266,7 +266,7 @@ const STAGE_TWO_SESSION_NOTE_FIELDS: ReadonlySet<string> = new Set([
  * settlement prompt, not here — this text states the CALL contract only.
  *
  * LANE-DECLARATION TICKET 02: the edge paragraph teaches the CURRENT gate.
- * All seven words take either entry form and NONE requires a tag ([T1548]/
+ * All three classes take either entry form and NONE requires a tag ([T1548]/
  * [T1562]) — the mandate that made `extends`/`narrows` tagged-only is
  * withdrawn, and lane tags are settlement's own instrument rather than a
  * shape the main agent owes. What the paragraph must still teach is what the
@@ -299,7 +299,7 @@ const STAGE_TWO_SESSION_NOTE_FIELDS: ReadonlySet<string> = new Set([
  * re-review round. A description that offers a parameter the handler rejects
  * spends a model turn on a rejection that reads as a bug, and the enumerated
  * teaching-surface set exists to stop exactly that. Turn-addressed is the
- * fourteen edge fields; session-addressed is the narrative, where `mode` and
+ * six edge fields; session-addressed is the narrative, where `mode` and
  * `title`/`content` are real.
  */
 export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
@@ -309,8 +309,8 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "false, judged by the Memory Rubric in the prompt. " +
   "Exactly one of `turn` (\"S<session>/T<prompt>\", from the writable set " +
   "this prompt declares) or `session` (\"S<session>\", this session). " +
-  "On `turn` the only parameters this pass may carry are THE FOURTEEN EDGE " +
-  "FIELDS — the seven relations and their seven retract… mirrors, enumerated " +
+  "On `turn` the only parameters this pass may carry are THE SIX EDGE " +
+  "FIELDS — the three relation classes and their three retract… mirrors, enumerated " +
   "below — for a turn in that writable set; omit to leave alone. " +
   "`title`, `content`, `insight`, `type`, `tags` and `mode` are REFUSED on a " +
   "turn address and the whole call writes nothing when one appears. A turn's " +
@@ -326,21 +326,27 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   // (`EDGE_WRITE_GATE_FIELD`) plus one relation-SET gate, and either verdict
   // fails the WHOLE evaluation — the direct-write engine then rolls its
   // transaction back, so the call writes nothing at all. An agent taught the
-  // old promise would read a rejection as "six of my seven fields landed" and
+  // old promise would read a rejection as "two of my three fields landed" and
   // never resend them.
   "The edge fields are ONE SET and the call is ALL-OR-NOTHING: if another " +
   "writer (the main agent's own later note, or a prior settlement attempt) " +
   "moved this turn's relations since you read them, or you never read them, " +
   "the WHOLE call is refused and NOTHING is written — re-read the turn's " +
   "`relations` and send it again. No field yields on its own. " +
-  "override/narrows/extends/indexes/consume/grounds/verifies: " +
+  "correct/verify/use: " +
   "address lists, and normally yours — the main agent's `note` carries the " +
-  "same seven fields but is taught not to reach for them, so all but a few " +
+  "same three fields but is taught not to reach for them, so all but a few " +
   "edges are ones you wrote. ASSERTION takes " +
-  "two entry forms and ALL SEVEN words accept either: a bare address leaves " +
+  "two entry forms and ALL THREE classes accept either: a bare address leaves " +
   "both sides UNSETTLED (the draft an edge starts as), a " +
   "`{turn, tailTag, headTag}` entry places each END in a lane — `tailTag` the " +
   "lane this turn writes FROM, `headTag` the lane the cited turn sits in. " +
+  "A `correct` entry ALSO carries `\"coverage\": \"full\"` or `\"partial\"` — " +
+  "FULL when no substantial part of the cited principal result may still serve " +
+  "as a PREMISE (it survives only as history), PARTIAL when a definite " +
+  "non-empty part still stands as one. A `correct` with no coverage is " +
+  "refused naming the missing bit, and a `verify` or `use` carrying one is " +
+  "refused too — only `correct` has a coverage bit. " +
   "A DRAFT — either side left empty, or both — is ACCEPTED here, but it does " +
   "not survive `commit`: every edge inside your writable set with an empty " +
   "side is error E6, and commit refuses while one remains. Place both sides " +
@@ -366,7 +372,7 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "own field list already delivers it) or the call is refused naming that " +
   "read; your own edge writes keep the set current afterwards. " +
   "RETRACTION is the other half: each relation has a retract… mirror " +
-  "(retractOverride …), same two entry forms. A bare entry deletes the " +
+  "(retractCorrect …), same two entry forms. A bare entry deletes the " +
   "UNSETTLED row and a two-sided one deletes exactly that lane placement; an " +
   "address carrying no such edge rejects the call, naming it, and nothing is " +
   "deleted. " +
@@ -506,8 +512,8 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "hold supports it, and never spend a round trip on one. Report 1: " +
   "per-lane statistics (members, edge counts, who " +
   "cites a member from outside " +
-  "— grounds, consume-class use, or testimony; a lane cited only by " +
-  "consume is still ADOPTED, not unused). A lane has NO state: open/closed " +
+  "— depends, used, or testimony; a lane cited only by " +
+  "plain use is still ADOPTED, not unused). A lane has NO state: open/closed " +
   "and the single terminus they were computed from are gone. Its `coverage` " +
   "line says whether the members listed are the WHOLE lane or a slice of it, " +
   "with both counts — a slice is normal (your window is not the lane) and is " +
@@ -536,10 +542,11 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "SCALE of what is unattributed, E6 is the per-row list commit judges. " +
   "LANE PROLIFERATION is a task " +
   "declaring more lanes than max(1, 0.05 x its member turns). INDEX " +
-  "GRANULARITY names a turn whose whole `indexes` batch is ONE node — an " +
-  "index cites the batch that produced one phase result, so a single target " +
-  "usually means a step got declared as a phase. It is a reading and never a " +
-  "refusal: nothing blocks a single-target index, at write time or at commit. " +
+  "GRANULARITY names a turn whose whole convergence batch is ONE node — a " +
+  "convergence covers the batch that produced one phase result, so a single " +
+  "target usually means a step got declared as a phase. It reads STORED rows " +
+  "written under the retired `indexes` word and can report nothing about a " +
+  "row written since; it is a reading and never a refusal. " +
   "All three name " +
   "their numbers, all three are debt or diagnosis rather than a defect: the repair is a " +
   "`create` plus settling both sides of an edge, fewer lanes, or a wider index batch — never a rewrite of the " +
@@ -656,8 +663,8 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "its count and its stitch target, and there is nothing you owe for it: no " +
   "disposition to file, no retry, no delay. Connectivity is a quality goal, " +
   "not a legal " +
-  "state, and two writable endpoints do not mean any of the seven relation " +
-  "words is true between them. " +
+  "state, and two writable endpoints do not mean any of the three relation " +
+  "classes is true between them. " +
   // Staged settlement (spec Rev 5, §Shape numbers v1): what a SUCCESSFUL
   // commit hands back, so the run knows the numbers exist and are not
   // something it must compute or restate itself.
@@ -677,7 +684,7 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "this window's FRICTION, not its work — never a restatement of the " +
   "counts this same call already reports exactly. Name whichever of these " +
   "actually applied: where this window forced a guess; a relation you " +
-  "wanted and the seven words could not express; a commit-gate refusal " +
+  "wanted and the three classes could not express; a commit-gate refusal " +
   "(E4/E6) you had to route around; a turn you could not read, and " +
   "why. A refusal — gate or parameter — never stashes `report`; resend it " +
   "on your retry. " +
@@ -1301,7 +1308,7 @@ function evaluateLaneDispositionGate(
       // a `justify`, and there is none — a fracture that blocked would now be
       // repaired by a stitch or by nothing at all.
       blocking.push(
-        `${fractureText} has no stitching edge. Stitch it (write any of the seven relations ` +
+        `${fractureText} has no stitching edge. Stitch it (write any of the relation classes ` +
           "across it) if the material you are reading makes one true.",
       );
     }
@@ -2651,12 +2658,12 @@ export const UNIFIED_NOTE_TOOL_DESCRIPTION =
   "WRITE a turn's fields — lands immediately, in this same call. BEFORE your " +
   "own `finalize` has succeeded: title/content/insight, type and tags — the " +
   "topic pass's own fields, judged by the Memory Rubric in your prompt; the " +
-  "seven relation fields and their retract… mirrors are refused, naming the " +
+  "three relation fields and their retract… mirrors are refused, naming the " +
   "edge pass you have not reached yet. Tags are the projection: a whole-set " +
   "`tags` write states the turn's task tag, every lane it belongs to and " +
   "every `topic:` word — a lane word left out is REMOVED, a `topic:` word " +
   "left out is refused (use `retireTopic` to correct one). AFTER `finalize` " +
-  "has succeeded: the fourteen edge fields only (the seven relations and " +
+  "has succeeded: the six edge fields only (the three relation classes and " +
   "their retract… mirrors) on a turn address, or `title`/`content` on this " +
   "session's own `session` address — title/content/insight/type/tags are " +
   "refused on a turn address, because that judgment is now your own settled " +

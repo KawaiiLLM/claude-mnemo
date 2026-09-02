@@ -13,6 +13,10 @@ import {
   rememberInputShape,
 } from "../../src/mcp/definitions";
 import { NOTE_TOKEN_BUDGET } from "../../src/shared/note-budget";
+import {
+  LEGACY_RELATION_CLASS,
+  RELATION_CLASSES,
+} from "../../src/shared/relation-class";
 import { EDGE_RELATIONS, TAGGABLE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   MEMORY_RUBRIC_CONCEPTS_HASH,
@@ -142,14 +146,19 @@ const MODEL_SECTIONS: readonly { section: string; half: "concepts" | "actions"; 
   { section: "segment", half: "concepts", marker: "**任务**" },
   { section: "lane", half: "concepts", marker: "**泳道**" },
   { section: "edge, and who writes it", half: "concepts", marker: "**边**" },
-  { section: "the seven relation words", half: "concepts", marker: "**七个关系词**" },
+  { section: "the three relation classes", half: "concepts", marker: "**三个关系类**" },
+  // relation-vocabulary-v13 ticket 02: the SUFFICIENCY LAW joins the concepts
+  // half — where this node's conclusion rests on earlier nodes, those must be
+  // cited. It is a WRITING law and it is descriptive here (no imperative), so
+  // it belongs beside the classes it bounds rather than in the actions half.
+  { section: "sufficient citation", half: "concepts", marker: "**充分引用**" },
   // lane-state-retirement ticket 01: the "only index moves lane state" half of
   // this line went with lane state itself. What survives is the OTHER law it
-  // carried — no relation word invalidates a node — which ticket 02 depends on.
+  // carried — no relation class invalidates a node — which ticket 02 depends on.
   {
-    section: "no relation word invalidates a node",
+    section: "no relation class invalidates a node",
     half: "concepts",
-    marker: "**七个词都不改变节点的有效性 —— 被 override 的节点依然有效。**",
+    marker: "**三个类都不改变节点的有效性 —— 被 correct 的节点依然有效。**",
   },
   { section: "the three note fields", half: "concepts", marker: "**字段**" },
   { section: "type vocabulary", half: "concepts", marker: "**type**" },
@@ -287,23 +296,13 @@ describe("section checklist — the two halves together cover every section of t
  * mapping is where the two vocabularies are reconciled ONCE, explicitly,
  * instead of a reader guessing at the seam.
  */
-const RUBRIC_WORD_TO_RELATION: Record<string, string> = {
-  verify: "verifies",
-  override: "override",
-  narrow: "narrows",
-  extend: "extends",
-  ground: "grounds",
-  consume: "consume",
-  index: "indexes",
-};
-
 describe("the relation vocabulary the rubric teaches is the gate's own", () => {
-  // Scoped to the 七个关系词 block: `type` and the three note fields use the
+  // Scoped to the 三个关系类 block: `type` and the three note fields use the
   // identical bullet shape a few paragraphs down, so an unscoped match reads
-  // the whole vocabulary of the document as relation words.
+  // the whole vocabulary of the document as relation classes.
   const relationBlock = () => {
-    const start = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**七个关系词**");
-    const end = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**七个词都不改变节点的有效性");
+    const start = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**三个关系类**");
+    const end = MEMORY_RUBRIC_CONCEPTS_TEXT.indexOf("**充分引用**");
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     return MEMORY_RUBRIC_CONCEPTS_TEXT.slice(start, end);
@@ -311,21 +310,36 @@ describe("the relation vocabulary the rubric teaches is the gate's own", () => {
   const rubricWords = () =>
     [...relationBlock().matchAll(/^- \*\*([a-z]+)\*\* ——/gm)].map((m) => m[1]!);
 
-  test("the bullet list is exhaustive against EDGE_RELATIONS, through the base-form map", () => {
-    const words = rubricWords();
-    expect(words).toHaveLength(7);
-    expect(words.map((word) => RUBRIC_WORD_TO_RELATION[word]).sort()).toEqual(
-      [...EDGE_RELATIONS].sort(),
-    );
+  // relation-vocabulary-v13 ticket 02: the rubric's bullets ARE the write
+  // vocabulary now, spelling for spelling — the v12 base-form map
+  // (`verify` -> `verifies`, `index` -> `indexes`, …) existed only because the
+  // rubric taught base verbs while the parameters carried inflections. Three
+  // classes, three parameters, one spelling each; nothing left to map.
+  test("the bullet list is exactly RELATION_CLASSES, in the precedence's own order", () => {
+    expect(rubricWords()).toEqual([...RELATION_CLASSES]);
   });
 
-  test("every word the rubric teaches is taggable at the gate", () => {
-    for (const word of rubricWords()) {
-      const relation = RUBRIC_WORD_TO_RELATION[word]!;
-      expect(
-        TAGGABLE_RELATIONS.has(relation as (typeof EDGE_RELATIONS)[number]),
-        relation,
-      ).toBe(true);
+  // The coverage bit is taught as a SUB-BULLET of `correct` and nowhere else:
+  // it is a property of that one class, and a reader that met it as a fourth
+  // top-level bullet would take it for a fourth class.
+  test("the coverage bit is taught under correct alone, with both values", () => {
+    const block = relationBlock();
+    expect(block).toContain("它带一个覆盖位");
+    expect(block).toContain("  - **full** ——");
+    expect(block).toContain("  - **partial** ——");
+    expect(rubricWords()).not.toContain("full");
+    expect(rubricWords()).not.toContain("partial");
+  });
+
+  // Every stored word still maps to one of the three, so no legacy row reads
+  // as a class the rubric never taught.
+  test("every stored relation word maps to a class the rubric teaches", () => {
+    const taught = new Set(rubricWords());
+    for (const relation of EDGE_RELATIONS) {
+      expect(taught.has(LEGACY_RELATION_CLASS[relation].relationClass), relation).toBe(true);
+      // And every one of them is still taggable at the gate — the vocabulary
+      // change touches no tag rule.
+      expect(TAGGABLE_RELATIONS.has(relation), relation).toBe(true);
     }
   });
 
@@ -356,6 +370,7 @@ describe("the relation vocabulary the rubric teaches is the gate's own", () => {
       "异相位",
       "相位配对",
       "八词",
+      "七个关系词",
       "全局否决",
       "重开",
       "invalid",
@@ -364,8 +379,8 @@ describe("the relation vocabulary the rubric teaches is the gate's own", () => {
       expect(MEMORY_RUBRIC_CONCEPTS_TEXT, retired).not.toContain(retired);
     }
     // The one thing that survives about node validity is the opposite rule:
-    // an overridden node stays valid.
-    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain("被 override 的节点依然有效");
+    // a corrected node stays valid.
+    expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain("被 correct 的节点依然有效");
   });
 });
 
@@ -597,12 +612,12 @@ describe("single-home grep guard — judgment prose lives ONLY in the Memory Rub
     }
   });
 
-  test("override/grounds/note each point at the Memory Rubric instead of restating judgment", () => {
+  test("correct/use/note each point at the Memory Rubric instead of restating judgment", () => {
     expect(MNEMO_TOOL_DESCRIPTIONS.note.toLowerCase()).toContain("memory rubric");
-    expect(settlementNoteInputShape.override.description?.toLowerCase()).toContain(
+    expect(settlementNoteInputShape.correct.description?.toLowerCase()).toContain(
       "memory rubric",
     );
-    expect(settlementNoteInputShape.grounds.description?.toLowerCase()).toContain(
+    expect(settlementNoteInputShape.use.description?.toLowerCase()).toContain(
       "memory rubric",
     );
   });

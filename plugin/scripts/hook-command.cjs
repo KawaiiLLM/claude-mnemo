@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjageg9" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjut1j0" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -676,15 +676,70 @@ var EDGE_RELATIONS = [
 ];
 var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
 var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-var RELATION_FIELD_NAME = {
-  override: "override",
-  narrows: "narrows",
-  extends: "extends",
-  indexes: "indexes",
-  consume: "consume",
-  grounds: "grounds",
-  verifies: "verifies"
+
+// src/shared/relation-class.ts
+var RELATION_CLASSES = ["correct", "verify", "use"];
+var RELATION_COVERAGES = ["full", "partial"];
+var NO_RELATION_COVERAGE = "";
+var NO_RELATION_CLASS = "";
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+var LEGACY_RELATION_CLASS = {
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
 };
+var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+  correct: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+  ),
+  verify: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+  ),
+  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+});
+var INTERIM_LEGACY_RELATION = Object.freeze([
+  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+]);
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+var RETIRED_RELATION_FIELDS = Object.freeze([
+  ["override", 'correct with `"coverage": "full"`'],
+  ["narrows", 'correct with `"coverage": "partial"`'],
+  ["extends", "use"],
+  ["consume", "use"],
+  ["grounds", "use"],
+  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+  ["verifies", "verify"],
+  ["retractOverride", "retractCorrect"],
+  ["retractNarrows", "retractCorrect"],
+  ["retractExtends", "retractUse"],
+  ["retractConsume", "retractUse"],
+  ["retractGrounds", "retractUse"],
+  ["retractIndexes", "retractUse"],
+  ["retractVerifies", "retractVerify"]
+]);
 
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
@@ -743,6 +798,8 @@ var EDGE_COLUMNS = `
   provenance,
   tail_tag AS tailTag,
   head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
 var EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
@@ -757,6 +814,11 @@ function mapEdgeRow(row) {
     // reader on one convention rather than making each test for null.
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     provenance: row.provenance,
     createdAtEpoch: row.createdAtEpoch
   };
@@ -774,8 +836,9 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     `
       INSERT INTO memory_edges (
         citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
       -- target's last two components \u2014 identity is (pair, relation, tail,
       -- head), so a DIFFERENT side combination on the same (pair, relation)
@@ -796,6 +859,11 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         -- runs RETURNING on a row the statement touched, and this write's
         -- contract is that every accepted input yields the row that now
         -- satisfies it, restatements included.
+        -- relation-vocabulary-v13 ticket 02: the two class columns are NOT
+        -- assigned here either. A restatement leaves an existing row exactly as
+        -- stored, so re-asserting a class over a legacy row does not
+        -- retroactively classify it -- classifying the existing corpus is
+        -- ticket 03's migration, which owns the reversibility story for it.
         DO UPDATE SET relation = memory_edges.relation
       RETURNING ${EDGE_COLUMNS}
     `
@@ -854,6 +922,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
     if (edge.relation !== null) {
       const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
       const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
       const row2 = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
@@ -863,6 +933,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         edge.provenance,
         tailTag,
         headTag,
+        relationClass,
+        relationCoverage,
         createdAtEpoch
       );
       dropBarePairRow.run(
@@ -909,6 +981,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
 function mapTurnRelationEdgeRow(row) {
   return {
     relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
     tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
     headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
     otherTurnId: row.otherTurnId,
@@ -919,6 +993,7 @@ function mapTurnRelationEdgeRow(row) {
 function getTurnRelationEdges(db, turnId) {
   const outbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               cited.id AS otherTurnId, cited.session_id AS otherSessionId,
               cited.prompt_number AS otherPromptNumber
@@ -934,6 +1009,7 @@ function getTurnRelationEdges(db, turnId) {
   ).all(turnId).map(mapTurnRelationEdgeRow);
   const inbound = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               citing.id AS otherTurnId, citing.session_id AS otherSessionId,
               citing.prompt_number AS otherPromptNumber
@@ -1097,18 +1173,10 @@ var CITATION_RELATIONS = [
 function isCitationRelation(value) {
   return typeof value === "string" && CITATION_RELATIONS.includes(value);
 }
-var RETRACTION_ONLY_RELATIONS = [];
-var RELATION_FIELD_ENTRIES = EDGE_RELATIONS.map(
-  (relation) => [RELATION_FIELD_NAME[relation], relation]
+var RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
+var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
+  ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
 );
-var RETRACTION_FIELD_ENTRIES = [
-  ...RELATION_FIELD_ENTRIES.map(
-    ([key, relation]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relation]
-  ),
-  ...RETRACTION_ONLY_RELATIONS.map(
-    (relation) => [`retract${relation.charAt(0).toUpperCase()}${relation.slice(1)}`, relation]
-  )
-];
 
 // src/db/impressions.ts
 function mapImpressionRow(row) {
@@ -5943,6 +6011,20 @@ function ensureLaneDispositionJustificationEvidence(db) {
     "INTEGER NOT NULL DEFAULT 0"
   );
 }
+function ensureMemoryEdgesRelationClassColumns(db) {
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_class",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_class IN ('', 'correct', 'verify', 'use'))"
+  );
+  addColumnIfMissing(
+    db,
+    "memory_edges",
+    "relation_coverage",
+    "TEXT NOT NULL DEFAULT '' CHECK (relation_coverage IN ('', 'full', 'partial') AND (relation_coverage = '') = (relation_class <> 'correct'))"
+  );
+}
 function countUnsettledEdges(db) {
   return db.query(
     "SELECT COUNT(*) AS count FROM memory_edges WHERE tail_tag = '' AND head_tag = ''"
@@ -6075,6 +6157,7 @@ function initializeSchema(db) {
   runLaneRegistryMigration(db);
   runLaneModelV12EdgeMigration(db);
   ensureMemoryEdgesRelationTurnScoped(db);
+  ensureMemoryEdgesRelationClassColumns(db);
   runSegmentOneTagMigration(db);
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
@@ -10898,10 +10981,11 @@ function formatRelationArrow(words, crossLane) {
   return `${lead}${label}${stroke}>`;
 }
 function defaultRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows") return 0;
+  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
+  if (relation === "correct(partial)") return 0;
   if (relation === "indexes") return 1;
   if (relation === "consume") return 2;
-  if (relation === "override") return 3;
+  if (relation === "override" || relation === "correct(full)") return 3;
   return 4;
 }
 function groupHopEdges(edges) {
@@ -11015,7 +11099,13 @@ function buildCandidates(rows) {
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      relation: row.relation,
+      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
+      // written under, and the stored seven-word value only for a row written
+      // before that vocabulary existed (`displayEdgeRelation`). This is the
+      // surface settlement reads its own edges back through, so a writer taught
+      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
+      // what it just wrote.
+      relation: displayEdgeRelation(row),
       tailTag: row.tailTag,
       headTag: row.headTag
     }))
@@ -14448,6 +14538,7 @@ function loadFrontierEdges(db, laneTags) {
   const placeholders = laneTags.map(() => "?").join(",");
   const rows = db.query(
     `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
               e.citing_id AS tailTurnId, e.cited_id AS headTurnId,
               e.tail_tag AS tailTag, e.head_tag AS headTag,
               tc.session_id AS tailSessionId, tc.prompt_number AS tailPromptNumber,
@@ -14471,7 +14562,17 @@ function loadFrontierEdges(db, laneTags) {
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
   ]);
   return canonicalRows.map((row) => ({
+    // `relation` stays the STORED word: it is the SCORING key here
+    // (`FRONTIER_OUT_EDGE_WEIGHTS`, the latest-override pointer), and ticket 05a
+    // owns re-keying those onto the class. What renders is `relationLabel`
+    // below — the two are kept apart on purpose, because conflating them would
+    // have made a vocabulary change silently move the frontier weights.
     relation: row.relation,
+    relationLabel: displayEdgeRelation({
+      relation: row.relation,
+      relationClass: row.relationClass ?? NO_RELATION_CLASS,
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+    }),
     tailTurnId: row.tailTurnId,
     headTurnId: row.headTurnId,
     tailTag: row.tailTag,
@@ -14944,19 +15045,26 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
-**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002
+**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002\u540C\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9,\u5B58\u5728\u5B83\u5199\u4E0B\u65F6\u5224\u65AD\u8BDA\u5B9E\u7684\u90A3\u4E2A\u6CF3\u9053\u4F4D\u7F6E\u4E0A,\u4E0D\u6309\u5019\u9009\u6CF3\u9053\u9010\u4E2A\u5F00\u884C\u3002
 
-**\u4E03\u4E2A\u5173\u7CFB\u8BCD**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3):
+**\u4E09\u4E2A\u5173\u7CFB\u7C7B**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3)\u3002\u8FB9\u7684\u4E24\u7AEF\u90FD\u662F\u8282\u70B9\u7684**\u4E3B\u7ED3\u679C** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u771F\u6B63\u7ACB\u4E0B\u7684\u7ED3\u8BBA\u6216\u4EA7\u51FA,\u4E0D\u662F\u5B83\u987A\u5E26\u63D0\u5230\u7684\u67D0\u4E2A\u7EC6\u8282;\u7EC6\u8282\u4E0D\u6323\u8FB9\u3002\u4E00\u4E2A turn \u53EF\u4EE5\u6709\u51E0\u4E2A\u5E76\u5217\u7684\u4E3B\u7ED3\u679C,\u5C31\u50CF\u5B83\u53EF\u4EE5\u5C5E\u4E8E\u51E0\u6761\u6CF3\u9053\u3002
 
-- **verify** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u9A8C\u8BC1\u3001\u652F\u6301\u3002
-- **override** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u5426\u51B3\u3001\u64A4\u56DE\u3001\u66FF\u6362\u3002
-- **narrow** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u4FEE\u6B63\u3001\u9650\u5236\u4E86\u7EC6\u8282\u3002
-- **extend** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u8981\u7ED3\u679C\u4ECD\u7136\u9002\u7528,\u672C\u8282\u70B9\u62D3\u5C55\u3001\u8865\u5145\u3002
-- **ground** \u2014\u2014 \u672C\u8282\u70B9\u7684\u5DE5\u4F5C\u4F9D\u8D56\u88AB\u5F15\u8282\u70B9\u6210\u7ACB,\u5B83\u82E5\u5012\u4E0B,\u672C\u8282\u70B9\u968F\u4E4B\u5012\u4E0B\u3002
-- **consume** \u2014\u2014 \u4F7F\u7528\u5176\u4ED6\u8282\u70B9\u7684\u4EA7\u51FA,\u4E0D\u4E3A\u5176\u6B63\u786E\u6027\u62C5\u8D23\u3002
-- **index** \u2014\u2014 \u672C\u8282\u70B9\u9636\u6BB5\u6027\u6536\u655B,\u6307\u5411\u4E00\u4E2A\u6216\u591A\u4E2A\u8282\u70B9,\u8868\u8FBE\u6C47\u805A\u3001\u7D22\u5F15\u3001\u6574\u7406\u524D\u9762\u5DE5\u4F5C\u4E2D\u6709\u6548\u7684\u90E8\u5206\u3002\u5B83\u6307\u5411\u7684\u662F\u771F\u6B63\u4FC3\u6210**\u540C\u4E00\u4E2A\u9636\u6BB5\u7ED3\u679C**\u7684\u90A3\u6279\u8282\u70B9 \u2014\u2014 \u4E00\u6B21 \`/to-spec\`\u3001\u4E00\u6B21\u53D1\u5E03\u3002\u53EA\u6307\u5411\u4E00\u4E2A\u8282\u70B9,\u8BF4\u660E\u8FD9\u4E2A\u9636\u6BB5\u5207\u5F97\u592A\u7EC6\u4E86\u3002
+- **correct** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u7ED3\u679C\u88AB\u672C\u8282\u70B9\u5426\u51B3\u3001\u64A4\u56DE\u3001\u66FF\u6362,\u6216\u88AB\u4FEE\u6B63\u3001\u9650\u7F29\u3002\u5B83\u5E26\u4E00\u4E2A\u8986\u76D6\u4F4D:
+  - **full** \u2014\u2014 \u88AB\u5F15\u4E3B\u7ED3\u679C\u6CA1\u6709\u4EFB\u4F55\u5B9E\u8D28\u90E8\u5206\u8FD8\u80FD\u4F5C\u4E3A\u540E\u7EED\u63A8\u7406\u6216\u884C\u52A8\u7684**\u524D\u63D0**,\u5B83\u53EA\u4F5C\u4E3A\u5386\u53F2\u7559\u5B58\u3002\u5386\u53F2\u4E8B\u5B9E(\u5B83\u6D3E\u53D1\u8FC7\u4EC0\u4E48\u3001\u5199\u8FC7\u54EA\u4E2A\u6587\u4EF6\u3001\u8DD1\u8FC7\u54EA\u4E2A\u6D4B\u8BD5)\u4E0D\u628A\u5B83\u6551\u56DE partial\u3002
+  - **partial** \u2014\u2014 \u4FEE\u6B63\u4E4B\u540E,\u5B83\u4ECD\u6709\u786E\u5B9A\u7684\u3001\u975E\u7A7A\u7684\u5B9E\u8D28\u90E8\u5206\u4F5C\u4E3A\u524D\u63D0\u7AD9\u5F97\u4F4F\u3002
+- **verify** \u2014\u2014 \u672C\u8282\u70B9\u81EA\u5DF1\u7684\u5DE5\u4F5C\u76F4\u63A5\u5173\u7CFB\u5230\u88AB\u5F15\u8282\u70B9\u4E3B\u7ED3\u679C\u662F\u5426\u6210\u7ACB,\u5E76\u4E14\u9A8C\u8BC1\u3001\u652F\u6301\u4E86\u5B83\u3002\u7A84:\u6563\u6587\u91CC\u5199\u7740\u300C\u786E\u8BA4\u300D\u4F46\u6307\u5411\u7684\u662F\u7EC6\u8282,\u4E0D\u6784\u6210 verify\u3002
+- **use** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u7684\u4E3B\u7ED3\u679C\u6216\u4EA7\u51FA,\u662F\u672C\u8282\u70B9\u5F62\u6210\u65B0\u7ED3\u8BBA\u6216\u65B0\u4EA7\u51FA\u7684**\u76F4\u63A5\u8F93\u5165**:\u771F\u7684\u88AB\u67E5\u9605\u3001\u91C7\u7EB3\u3001\u68C0\u9A8C\u6216\u5E76\u5165\u3002\u7956\u5148\u4E0D\u7B97 \u2014\u2014 \u53EA\u5199\u76F4\u63A5\u7528\u5230\u7684\u90A3\u4E00\u5C42\u3002
 
-**\u4E03\u4E2A\u8BCD\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB override \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
+\u5224\u5B9A\u662F\u4E00\u4E2A**\u4F18\u5148\u7EA7**,\u4E0D\u662F\u4E00\u4E2A\u5212\u5206,\u6309\u987A\u5E8F\u95EE:
+
+1. \u8FD9\u6B21\u4EA7\u51FA\u662F\u5426\u6539\u53D8\u4E86\u88AB\u5F15\u4EA7\u51FA\u7684\u63A5\u53D7\u5EA6\u3001\u53EF\u9760\u6027\u6216\u9002\u7528\u8303\u56F4?\u5426\u51B3\u6216\u9650\u7F29 = **correct**;\u786E\u8BA4\u6216\u652F\u6301 = **verify**\u3002
+2. \u90FD\u4E0D\u662F,\u800C\u88AB\u5F15\u4EA7\u51FA\u662F\u8FD9\u6B21\u65B0\u4EA7\u51FA\u7684\u76F4\u63A5\u8F93\u5165 = **use**\u3002
+
+\u6240\u4EE5 **correct \u4E0E verify \u662F use \u7684\u5B50\u96C6**,use \u662F\u4E0D\u4F5C\u771F\u503C\u65AD\u8A00\u65F6\u7684\u515C\u5E95;\u69FD\u4F4D\u5B58\u6700\u5177\u4F53\u7684\u90A3\u4E00\u7C7B\u3002\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9:\u300C\u65E2\u4FEE\u6B63\u4E86\u5B83\u53C8\u5728\u5B83\u4E0A\u9762\u7EE7\u7EED\u5EFA\u8BBE\u300D\u8BB0 correct,\u4E0D\u53E6\u5199\u4E00\u884C\u3002\u88AB\u5F15\u8282\u70B9\u82E5\u6301\u6709\u51E0\u4E2A\u5E76\u5217\u7684\u4E3B\u7ED3\u679C,\u800C\u672C\u8F6E\u5BF9\u5176\u4E2D\u4E00\u4E2A\u662F verify\u3001\u5BF9\u53E6\u4E00\u4E2A\u662F correct,**\u5360\u4E3B\u5BFC\u7684\u90A3\u4E2A\u52A8\u4F5C\u80DC\u51FA**,\u4E0D\u662F\u66F4\u5B89\u5168\u7684\u6807\u7B7E\u80DC\u51FA\u3002
+
+**\u5145\u5206\u5F15\u7528**:\u4E00\u4E2A\u8282\u70B9\u7684\u4E3B\u7ED3\u8BBA\u51E1\u662F\u5EFA\u7ACB\u5728\u66F4\u65E9\u8282\u70B9\u4E4B\u4E0A\u7684,\u90A3\u4E9B\u8282\u70B9\u90FD\u8981\u88AB\u5F15\u5230 \u2014\u2014 \u8FD9\u4E00\u8F6E\u81EA\u5DF1\u505A\u51FA\u6765\u7684\u8BC1\u636E\u4E0D\u6B20\u4EFB\u4F55\u5F15\u7528,\u5B83\u5C31\u662F\u8FD9\u4E00\u8F6E\u7684\u8D21\u732E\u3002\u8FD9\u662F**\u5199\u4F5C\u6CD5\u5219**,\u4E0D\u662F\u673A\u5668\u5224\u51B3:\u53EA\u6709\u5199\u7684\u4EBA\u77E5\u9053\u7ED3\u8BBA\u538B\u5728\u4EC0\u4E48\u4E0A\u9762\u3002\u552F\u4E00\u7684\u673A\u5668\u4EE3\u7406\u662F\u63D0\u9192\u2014\u2014\u6563\u6587\u91CC\u70B9\u4E86\u540D\u5374\u6CA1\u6709\u8FB9\u7684\u5730\u5740,\u53EA\u4F5C\u4E3A\u8B66\u544A\u51FA\u73B0,\u4ECE\u4E0D\u963B\u6B62\u5199\u5165\u3002
+
+**\u4E09\u4E2A\u7C7B\u90FD\u4E0D\u6539\u53D8\u8282\u70B9\u7684\u6709\u6548\u6027 \u2014\u2014 \u88AB correct \u7684\u8282\u70B9\u4F9D\u7136\u6709\u6548\u3002**
 
 **\u5B57\u6BB5**:\u4E00\u4E2A turn \u7684\u7B14\u8BB0\u6709\u4E09\u4E2A\u5B57\u6BB5,\u5404\u53F8\u4E00\u804C\u3002
 

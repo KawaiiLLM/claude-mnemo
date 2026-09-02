@@ -380,7 +380,7 @@ async function collectFractureSets(
         });
         const written = (await handlers.get("note")!({
           turn: `S${sessionDbId}/T3`,
-          extends: [
+          use: [
             { turn: `S${sessionDbId}/T1`, tailTag: "ghost-lane", headTag: "ghost-lane" },
           ],
         })) as { content: Array<{ text: string }> };

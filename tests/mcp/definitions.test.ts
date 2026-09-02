@@ -17,6 +17,7 @@ import {
 } from "../../src/mcp/definitions";
 import { WORKER_TOOL_RESULT_MAX_CHARS } from "../../src/mcp/handlers";
 import { CITATION_RELATIONS, RETRACTION_ONLY_RELATIONS } from "../../src/db/citations";
+import { RELATION_CLASSES } from "../../src/shared/relation-class";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../../src/db/citations";
 import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import { REMEMBER_VERBS } from "../../src/mcp/remember";
@@ -419,7 +420,7 @@ describe("tool surface", () => {
     // deleted them on a misreading of this same ruling). The description
     // still teaches only the common path — edges are settlement's normal
     // business — and must never claim the parameters are unavailable.
-    expect(note).toContain("Edges (override/narrows/extends/indexes/consume/grounds/verifies");
+    expect(note).toContain("Edges (correct/verify/use");
     expect(note).toContain("are settlement's whole business");
     expect(note).not.toContain("sending one of those parameters is refused");
     expect(note.toLowerCase()).not.toContain("refused");
@@ -541,20 +542,14 @@ describe("tool surface", () => {
       // staged-settlement ticket 01: the topic correction form.
       "retireTopic",
       "mode",
-      "override",
-      "narrows",
-      "extends",
-      "indexes",
-      "consume",
-      "grounds",
-      "verifies",
-      "retractOverride",
-      "retractNarrows",
-      "retractExtends",
-      "retractIndexes",
-      "retractConsume",
-      "retractGrounds",
-      "retractVerifies",
+      // relation-vocabulary-v13 ticket 02: three CLASSES and three mirrors, in
+      // the PRECEDENCE's own order (most specific first).
+      "correct",
+      "verify",
+      "use",
+      "retractCorrect",
+      "retractVerify",
+      "retractUse",
       "insight",
       "content",
     ]);
@@ -693,50 +688,25 @@ describe("tool surface", () => {
     ).toThrow();
   });
 
-  // Lane-model v12 ticket 02: the SEVEN-word closed set — override/narrows/
-  // extends/indexes/consume/grounds/verifies. `refutes` merged into
-  // `override` and left this surface; `collects` was renamed to `indexes`
-  // (indexes-rescope spec, ticket 01) before it.
-  // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
-  // relation parameters are declared on `noteInputShape` again — the owning
-  // shape, as before lane-model-v12 ticket 08's removal — and
-  // `settlementNoteInputShape` borrows them by object IDENTITY.
-  it("override/narrows/extends/indexes/consume/grounds/verifies are present on both write surfaces, refutes is not, and each carries a reading only", () => {
+  // RELATION-VOCABULARY-V13 TICKET 02: the THREE-class closed set —
+  // correct/verify/use. The seven words they absorb are gone from BOTH write
+  // surfaces (`override`/`narrows` -> `correct` plus its coverage bit,
+  // `verifies` -> `verify`, `extends`/`consume`/`grounds`/`indexes` -> `use`).
+  // `settlementNoteInputShape` still borrows `noteInputShape`'s field objects
+  // by object IDENTITY, so one edit reaches both writers.
+  it("correct/verify/use are present on both write surfaces, the seven retired words are not, and each carries a reading only", () => {
     const shape = settlementNoteInputShape;
-    for (const key of [
-      "override",
-      "narrows",
-      "extends",
-      "indexes",
-      "consume",
-      "grounds",
-      "verifies",
-    ] as const) {
+    for (const key of ["correct", "verify", "use"] as const) {
       expect(Object.keys(settlementNoteInputShape)).toContain(key);
       expect(Object.keys(noteInputShape)).toContain(key);
       expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
     }
-    // The merged word has no field of any kind: ticket 02 left it a retraction
-    // mirror, ticket 03's migration emptied the rows that mirror addressed and
-    // closed the table's CHECK behind them, so the mirror went too.
-    expect(Object.keys(settlementNoteInputShape)).not.toContain("refutes");
-    expect(Object.keys(settlementNoteInputShape)).not.toContain("retractRefutes");
-    expect(Object.keys(settlementNoteInputShape)).not.toContain("retractSupersedes");
-
-    // override absorbs refute's meaning, and no describe states a phase
-    // domain any more (v12 retired phase pairing from the write gate).
-    expect(shape.override.description).toContain("OVERTURNS, WITHDRAWS or REPLACES");
-    expect(shape.override.description).not.toContain("same phase");
-    expect(shape.override.description).not.toContain("decision-phase turns only");
-    expect(shape.override.description).not.toContain("decision-phase (design/discuss/correction)");
-
-    // ADR-0009's three-way split narrows further here (ticket 02 addenda):
-    // the mechanical phase requirement itself moved OFF the describe() and
-    // into the validator's own rejection message — no relation still spells
-    // out the old verbose "(research/measure)"-style parenthetical
-    // enumeration.
-    for (const key of [
+    // THE OLD WORDS ARE NOT PARAMETERS ANY MORE, on either surface, assertion
+    // or mirror. A word the tool still accepted after the rubric stopped
+    // teaching it is exactly the writer-taught-one-vocabulary/judged-by-another
+    // defect this batch exists to remove.
+    for (const retired of [
       "override",
       "narrows",
       "extends",
@@ -744,7 +714,35 @@ describe("tool surface", () => {
       "consume",
       "grounds",
       "verifies",
-    ] as const) {
+      "retractOverride",
+      "retractNarrows",
+      "retractExtends",
+      "retractIndexes",
+      "retractConsume",
+      "retractGrounds",
+      "retractVerifies",
+      "refutes",
+      "retractRefutes",
+      "retractSupersedes",
+    ]) {
+      expect(Object.keys(settlementNoteInputShape), retired).not.toContain(retired);
+      expect(Object.keys(noteInputSchema.shape), retired).not.toContain(retired);
+    }
+
+    // `correct` absorbs `override`'s and `narrows`' readings and REQUIRES the
+    // coverage bit; no describe states a phase domain (v12 retired phase
+    // pairing from the write gate).
+    expect(shape.correct.description).toContain("negates, limits or re-scopes");
+    expect(shape.correct.description).toContain('REQUIRES the coverage bit');
+    expect(shape.correct.description).toContain('"coverage": "full"');
+    expect(shape.correct.description).toContain('"coverage": "partial"');
+    expect(shape.correct.description).toContain("no coverage is refused");
+    expect(shape.correct.description).not.toContain("same phase");
+    expect(shape.correct.description).not.toContain("decision-phase turns only");
+
+    // ADR-0009's three-way split: the mechanical phase requirement lives in
+    // the validator's own rejection message, not on any describe.
+    for (const key of ["correct", "verify", "use"] as const) {
       const description = shape[key].description ?? "";
       expect(description).not.toContain("(research/measure)");
       expect(description).not.toContain("(design/discuss/correction)");
@@ -754,70 +752,35 @@ describe("tool surface", () => {
     }
   });
 
-  // Flow-relations spec: `collects`' hard graph-state check and `grounds`'
-  // mid-flow-warning/self-citation behaviour are the two relations whose
-  // reading is genuinely new (no seven-word predecessor covered either),
-  // and their describe()s are the only place a caller learns the mechanism
-  // exists at all before hitting a rejection or a receipt warning.
-  //
-  // Indexes-rescope spec ticket 04 rewrites both readings. `indexes` (ticket
-  // 01's rename of `collects`) states SAME-PHASE AGGREGATION and, just as
-  // importantly, states the retirement: its old own-branch/terminus check is
-  // gone from the write path (law 2), so a describe still promising a
-  // rejection that no longer fires would teach a caller to avoid legal calls.
-  // `grounds` gains the canonical route (law 7) — the one place a caller
-  // writing an implementation note learns the edge may not be theirs to write
-  // at all.
-  it("indexes states convergence with no graph-state check; grounds states its reach, the canonical route, and refuses a self target", () => {
+  // The precedence's own three facts, one per class, each pinned so a
+  // mutation that drops one drives this red: USE is DIRECT input only
+  // (ancestors excluded), VERIFY is narrow, and only `correct` has a bit.
+  it("use excludes ancestors, verify is narrow, and neither takes a coverage bit", () => {
     const shape = settlementNoteInputShape;
-    expect(shape.indexes.description).toContain("the nodes this turn converges on");
-    expect(shape.indexes.description).toContain("a release's shipped artifacts");
-    // "terminus" left this sentence with lane state (lane-state-retirement
-    // ticket 01): a lane has no state, so there is no terminus to condition
-    // on. The membership half of the promise is what survives.
-    expect(shape.indexes.description).toContain("No membership condition");
-    expect(shape.indexes.description).not.toContain("terminus");
-    expect(shape.indexes.description).toContain("An indexed target is not also consumed");
-    // The retired collects-era promises must be gone from the surface, not
-    // merely reworded around.
-    expect(shape.indexes.description).not.toContain("branch's settlement");
-    expect(shape.indexes.description).not.toContain("already belongs to that same branch");
-    // consume carries the other half of the same dedup — the extends half
-    // unconditional, the indexes half narrowed to untagged (T1345 ruling),
-    // with the tagged coexistence stated positively.
-    expect(shape.consume.description).toContain(
-      "never written beside an extends on the same pair, and never unsettled beside an indexes",
-    );
-    expect(shape.consume.description).toContain(
-      "a LANE-PLACED consume beside a lane-placed indexes is legal",
-    );
-
-    expect(shape.grounds.description).not.toContain("cross-phase only");
-    // rubric-v10 ticket 02: the flow-relations era's mid-flow warning
-    // retires entirely — no flow derivation runs on the write path any
-    // more, so the describe must not promise a warning that no longer fires.
-    expect(shape.grounds.description).not.toContain("mid-flow target still stores");
-    expect(shape.grounds.description).not.toContain("flow's settlement");
-    expect(shape.grounds.description).toContain("absorbs the retired grounded-on/encodes");
-    expect(shape.grounds.description).toContain("if it were false");
-    expect(shape.grounds.description).toContain(
-      "One route to the decision: when a SEPARATE delivery turn wrote the spec, THAT turn carries the grounds",
-    );
-    expect(shape.grounds.description).toContain(
-      "with design and spec in one turn, each artifact grounds directly",
-    );
-    // Lane-model v12 ticket 04: the self-citation permission is DELETED, so
-    // `grounds` no longer carries a two-condition carve-out for it. Pinned as
-    // an absence where the three verbatim pins used to sit, plus the flat
-    // statement that replaced them, so a future edit cannot quietly restore
-    // the old reading.
-    expect(shape.grounds.description).toContain(
-      "a self target is refused, for this word as for every other",
-    );
-    expect(shape.grounds.description).not.toContain("delivery-phase word");
-    expect(shape.grounds.description).not.toContain("CURRENT terminus of a lane it declared");
-    expect(shape.grounds.description).not.toContain("no longer qualifies");
+    expect(shape.use.description).toContain("DIRECT input");
+    expect(shape.use.description).toContain("Ancestors are excluded");
+    expect(shape.use.description).toContain("No `coverage` — refused if sent");
+    expect(shape.verify.description).toContain("narrow");
+    expect(shape.verify.description).toContain("DETAIL of the cited turn is not this class");
+    expect(shape.verify.description).toContain("is `correct`");
+    expect(shape.verify.description).toContain("No `coverage` — refused if sent");
   });
+
+  // A class-level retraction is what keeps a row written under the RETIRED
+  // seven-word vocabulary deletable — the E2 deadlock (a stored word with no
+  // deletion path) is what the mirrors exist for.
+  it("retractCorrect states it deletes whichever coverage bit the row carries, and a retired-vocabulary row stays deletable", () => {
+    const shape = settlementNoteInputShape;
+    expect(shape.retractCorrect.description).toContain("whichever coverage bit it carries");
+    expect(shape.retractCorrect.description).toContain("No `coverage` here");
+  });
+
+  // The `indexes`/`grounds`/`consume` describe pins STOOD HERE and are DELETED
+  // with their parameters (relation-vocabulary-v13 ticket 02). Every reading
+  // they pinned either moved into `use`'s own describe (a direct input, with
+  // ancestors excluded) or died with the word: `indexes` is deleted outright
+  // (user ruling S15069/T2306) and the untagged-consume/indexes dedup rule went
+  // with the two fields it related.
 
   // The note tool's own description names the eight-word vocabulary and the
   // mechanical checks the call actually makes. Ticket 04: `collects` is gone
@@ -825,9 +788,16 @@ describe("tool surface", () => {
   // self-citation gate is now the only graph-state rejection left to name.
   it("the note description names indexes, not collects, and advertises no retired flow-membership check", () => {
     const note = MNEMO_TOOL_DESCRIPTIONS.note;
-    expect(note).toContain(
-      "override/narrows/extends/indexes/consume/grounds/verifies",
-    );
+    expect(note).toContain("correct/verify/use");
+    for (const retired of [
+      "override/narrows",
+      "indexes",
+      "consume",
+      "grounds",
+      "verifies",
+    ]) {
+      expect(note, retired).not.toContain(retired);
+    }
     expect(note).not.toContain("refutes");
     expect(note).not.toContain("collects");
     expect(note).not.toContain("flow-membership check");
@@ -847,16 +817,17 @@ describe("tool surface", () => {
     expect(note).not.toContain("phase");
   });
 
-  // Lane-model v12 ticket 02 replaces the retired
-  // "verifies/refutes require an evidence-phase source" pin: the requirement
-  // is gone from the describe, and `verifies` instead routes a contrary
-  // result to `override`.
-  it("verifies states no evidence-phase requirement, and routes a contrary result to override", () => {
-    const description = settlementNoteInputShape.verifies.description ?? "";
+  // Lane-model v12 ticket 02 retired the "evidence-phase source" requirement;
+  // relation-vocabulary-v13 ticket 02 renamed the word. What survives is the
+  // ROUTING fact — a check that came out AGAINST the cited result is a
+  // correction, not a verification — which is the one thing a writer gets
+  // wrong without it.
+  it("verify states no evidence-phase requirement, and routes a contrary result to correct", () => {
+    const description = settlementNoteInputShape.verify.description ?? "";
     expect(description).not.toContain("evidence-phase source");
     expect(description).not.toContain("evidence-phase");
-    expect(description).toContain("No type requirement on either end");
-    expect(description).toContain("is an override, not this word");
+    expect(description).toContain("A check that came out AGAINST the cited result");
+    expect(description).toContain("is `correct`");
   });
 
   // [S15069/T939] mid-flight amendment: schema enums and prompt vocabulary
@@ -865,12 +836,12 @@ describe("tool surface", () => {
   // `mcp/note.ts`'s `RELATION_FIELD_ENTRIES` (the field-name -> relation
   // wiring) covers exactly `EDGE_RELATIONS`, in the same currency, and that
   // every one of its parameter names is a real key on `noteInputSchema`.
-  it("RELATION_FIELD_ENTRIES covers EDGE_RELATIONS exactly, and every field name is a real schema parameter", () => {
+  it("RELATION_FIELD_ENTRIES covers RELATION_CLASSES exactly, and every field name is a real schema parameter", () => {
     const relations = RELATION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
-    expect(relations).toEqual([...EDGE_RELATIONS].sort());
+    expect(relations).toEqual([...RELATION_CLASSES].sort());
 
     const fieldNames = RELATION_FIELD_ENTRIES.map(([key]) => key);
-    expect(fieldNames.length).toBe(EDGE_RELATIONS.length);
+    expect(fieldNames.length).toBe(RELATION_CLASSES.length);
     for (const key of fieldNames) {
       // main-agent-edge-capability ticket 01: RESTORED to `note`'s own
       // schema — both surfaces carry it now.
@@ -896,7 +867,7 @@ describe("tool surface", () => {
   // union is what a future frozen word would re-enter through.
   it("RETRACTION_FIELD_ENTRIES mirrors the relation fields one for one, plus the retraction-only words", () => {
     const relations = RETRACTION_FIELD_ENTRIES.map(([, relation]) => relation).sort();
-    expect(relations).toEqual([...EDGE_RELATIONS, ...RETRACTION_ONLY_RELATIONS].sort());
+    expect(relations).toEqual([...RELATION_CLASSES].sort());
 
     const pairs = RELATION_FIELD_ENTRIES.map(([key, relation]) => [relation, key] as const);
     for (const [key, relation] of RETRACTION_FIELD_ENTRIES) {
@@ -931,7 +902,13 @@ describe("tool surface", () => {
 
     for (const relation of RETRACTION_ONLY_RELATIONS) {
       // No relation field, on either write surface's wiring…
-      expect(RELATION_FIELD_ENTRIES.some(([, r]) => r === relation)).toBe(false);
+      // Widened: since relation-vocabulary-v13 ticket 02 the entry list is
+      // keyed on CLASSES and this list on STORAGE words, so the two have no
+      // overlapping type — the ASSERTION (no retraction-only word is
+      // assertable) is still exactly the one this test is about.
+      expect(
+        RELATION_FIELD_ENTRIES.some(([, r]) => (r as string) === (relation as string)),
+      ).toBe(false);
       // …and no assertable parameter on either schema. `noteInputShape` keeps
       // `supersedes` as frozen documentation, but `noteInputSchema` omits it,
       // so a caller sending it is a parse error on both surfaces.
@@ -1400,20 +1377,12 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     // `insight` above, reversing lane-model-v12 ticket 08's one-release
     // inversion (declared on settlement's shape, main agent had none).
     for (const key of [
-      "override",
-      "narrows",
-      "extends",
-      "indexes",
-      "consume",
-      "grounds",
-      "verifies",
-      "retractOverride",
-      "retractNarrows",
-      "retractExtends",
-      "retractIndexes",
-      "retractConsume",
-      "retractGrounds",
-      "retractVerifies",
+      "correct",
+      "verify",
+      "use",
+      "retractCorrect",
+      "retractVerify",
+      "retractUse",
     ] as const) {
       expect(key in settlementNoteInputShape, key).toBe(true);
       expect(key in noteInputShape, key).toBe(true);
