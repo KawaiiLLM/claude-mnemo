@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT } from "../../src/db/schema";
+
 /**
  * Put `memory_edges` back into its PRE-v12 shape: `tags` and no
  * `tail_tag`/`head_tag`, plus the `memory_edge_tags` index that era kept
@@ -35,6 +37,14 @@ import type { Database } from "bun:sqlite";
  * thing a "what the old shape was" fixture must not do.
  *
  * Idempotent: a table that is already one-sided is left untouched.
+ *
+ * THE v13 CLASS BACKFILL RECEIPT IS CLEARED with the shape. A pre-v12 table
+ * carries a WORD and no class, which is by definition "not yet swept"; leaving
+ * the receipt behind would make the main-agent-edges cutover read every one of
+ * these rows as WORDLESS and delete it (the cutover's own guard refuses to run
+ * at all when the receipt is absent, for exactly that reason). Clearing it lets
+ * the chain classify them again on the next open, which is what an upgrade
+ * from this shape really does.
  */
 export function downgradeToPreV12EdgeShape(db: Database): void {
   const columns = db
@@ -48,6 +58,9 @@ export function downgradeToPreV12EdgeShape(db: Database): void {
   // Same suspension every rebuild in db/schema.ts uses: `memory_edge_tags`
   // references `memory_edges(id)` with ON DELETE CASCADE, and the DROP below
   // would otherwise take its rows with it.
+  db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(
+    MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT,
+  );
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec(`
@@ -92,7 +105,22 @@ export function downgradeToPreV12EdgeShape(db: Database): void {
            relation, provenance, tags, created_at_epoch
          )
          SELECT id, citing_kind, citing_id, cited_kind, cited_id,
-                relation, provenance,
+                -- The word this row would have carried. The main-agent-edges
+                -- cutover DROPPED memory_edges.relation, so the pre-v12
+                -- shape's word column can no longer be copied across: it is
+                -- reconstructed from the class pair by inverting the v13
+                -- backfill (db/schema.ts's frozen
+                -- MEMORY_EDGES_LEGACY_WORD_CLASS). Lossy in the direction the
+                -- backfill was many-to-one: every use comes back as grounds,
+                -- which is all the old column can say about a row whose
+                -- distinguishing word is gone.
+                CASE relation_class
+                  WHEN 'correct' THEN CASE relation_coverage WHEN 'full' THEN 'override' ELSE 'narrows' END
+                  WHEN 'verify' THEN 'verifies'
+                  WHEN 'use' THEN 'grounds'
+                  ELSE NULL
+                END,
+                provenance,
                 CASE WHEN tail_tag <> '' AND tail_tag = head_tag
                      THEN json_array(tail_tag) ELSE '[]' END,
                 created_at_epoch

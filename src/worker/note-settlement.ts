@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
 import { resolveEraCutoff } from "../db/era";
+import { runMainAgentEdgesCutover } from "../db/schema";
 import {
   advanceNoteSettlementCursor,
   claimNextNoteSettlementJob,
@@ -360,6 +361,13 @@ export function createNoteSettlementScheduler(
       }
       let job: NoteSettlementJob | null = null;
       try {
+        // main-agent-edges spec D9: while the cutover is deferred behind a
+        // live claim, the claim path below refuses every job. This is the
+        // worker's own retry — a column probe when the cutover has run, one
+        // reap-and-check transaction while it is waiting — so the window
+        // closes as soon as the claim set drains, without waiting for the
+        // next hook or MCP open to walk `initializeSchema`.
+        runMainAgentEdgesCutover(db, now(), nowMs());
         job = claimNextNoteSettlementJob(db, sessionDbId, now(), nowMs(), {
           ...claimOptions,
           excludeJobIds: attempted,

@@ -15,6 +15,7 @@ import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The lane checker CLI (rubric-v10 ticket 06). `runLaneCheckCli` is the
@@ -82,9 +83,9 @@ function seedFixtureDatabase(): { sessionId: number; segmentId: number } {
   writeMemoryEdges(
     db,
     [
-      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["ownership"]) },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
-      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, relation: "indexes", provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("extends"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t1 }, ...wordEdgeClass("indexes"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
+      { citing: { kind: "turn", id: t3 }, cited: { kind: "turn", id: t2 }, ...wordEdgeClass("indexes"), provenance: "asserted", ...deriveSideTags(["ownership"]) },
     ],
     NOW,
   );

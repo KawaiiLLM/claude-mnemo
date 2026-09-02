@@ -8,6 +8,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { buildTurnRelationTreeLines, RELATION_TREE_BRANCH_CAP } from "../../src/mcp/relations-view";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Fork-tree spec (ticket 12): `buildTurnRelationTreeLines` renders the viewed
@@ -85,7 +86,7 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
         {
           citing: { kind: "turn", id: citingId },
           cited: { kind: "turn", id: citedId },
-          relation: relation as never,
+          ...wordEdgeClass(relation),
           provenance: "asserted",
           ...sides,
         },
@@ -134,7 +135,7 @@ describe("recall relations tree (fork-tree spec, ticket 12)", () => {
     const root = turn(1);
     const a = turn(2);
     const b = turn(3);
-    // Main chain: root -extends-> a -extends-> b.
+    // Main chain: root -use-> a -use-> b.
     edge(root, a, "extends");
     edge(a, b, "extends");
     // Second out-edge from root straight to b — b is already on the main

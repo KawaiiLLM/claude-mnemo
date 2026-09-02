@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -38,6 +42,16 @@ const PRE_SELF_REFERENCE_MEMORY_EDGES_DDL = `
     WHERE relation IS NULL;
 `;
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges self-reference migration (relation-matrix spec, ticket 05)", () => {
   let db: Database;
   let sessionId: number;
@@ -48,7 +62,7 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     return db
       .query<Record<string, unknown>, []>(
         `SELECT citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch
-         FROM memory_edges
+         FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}
          ORDER BY citing_kind, citing_id, cited_kind, cited_id, relation`,
       )
       .all();
@@ -58,7 +72,8 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     return (
       db
         .query<{ sql: string | null }, []>(
-          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
         )
         .get()?.sql ?? ""
     );
@@ -139,7 +154,15 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
   });
 
   test("carries every row across unchanged, column for column (data lossless)", () => {
-    const before = allEdges(db);
+    // LIVE before, archive after: the archive does not exist until the cutover
+    // runs, and it IS this table one chain later.
+    const before = db
+      .query<Record<string, unknown>, []>(
+        `SELECT citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch
+         FROM memory_edges
+         ORDER BY citing_kind, citing_id, cited_kind, cited_id, relation`,
+      )
+      .all();
     expect(before).toHaveLength(6);
 
     initializeSchema(db);
@@ -199,8 +222,17 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
     // (the narrow CHECK no longer admits it) — 'grounds' is its replacement,
     // and this test is only about the self-loop CHECK's own arm, not which
     // word carries it.
+    // The post-cutover table has no `relation` column, so the probe states the
+    // self row in the CLASS vocabulary; the CHECK arm under test
+    // (`citing_id <> cited_id`) is the same one.
     expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "grounds", "asserted", 160),
+      db
+        .query<unknown, [number, number]>(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'use', 'asserted', 160)`,
+        )
+        .run(turnIds[0]!, turnIds[0]!),
     ).toThrow(/CHECK constraint failed/);
     expect(
       db
@@ -252,10 +284,13 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
   test("the indexes survive the rebuild attached to the NEW table", () => {
     initializeSchema(db);
 
+    // Both indexes key on the dropped `relation` column, so the cutover
+    // replaced them with its side index; that THIS rebuild reattached them is
+    // read from the DDL archive.
     const indexes = db
       .query<{ name: string; tblName: string }, []>(
-        `SELECT name, tbl_name AS tblName FROM sqlite_master
-         WHERE type = 'index' AND name LIKE 'idx_memory_edges%'
+        `SELECT name, tbl_name AS tblName FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+         WHERE kind = 'index' AND name LIKE 'idx_memory_edges%'
          ORDER BY name`,
       )
       .all();
@@ -317,9 +352,9 @@ describe("memory_edges self-reference migration (relation-matrix spec, ticket 05
 
     db.query(
       `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance,
           tail_tag, head_tag, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'grounds', 'asserted', 'lane-a', 'lane-b', 400)`,
+       VALUES ('turn', ?, 'turn', ?, 'use', 'asserted', 'lane-a', 'lane-b', 400)`,
     ).run(turnIds[0]!, turnIds[1]!);
     const before = db
       .query<{ id: number; tailTag: string; headTag: string }, []>(

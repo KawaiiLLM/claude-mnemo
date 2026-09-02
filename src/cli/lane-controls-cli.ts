@@ -326,7 +326,7 @@ export function controlSideAttribution(
     context: [
       undeclared + " undeclared-lane, " + (violations.length - undeclared) + " subset (E4)",
       "over " + settled + " settled edge(s) (both sides naming a lane)",
-      "an endpoint whose stored tags are unparseable yields no subset verdict for its side",
+      "every endpoint's tags are a JSON array of strings, so every side gets a verdict",
     ],
     ...cap(findings, findingLimit),
   };

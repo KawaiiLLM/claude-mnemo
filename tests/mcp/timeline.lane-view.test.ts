@@ -19,6 +19,7 @@ import {
   timelineQueryOutcome,
 } from "../../src/mcp/timeline";
 import { LARGE_LANE_COUNT, seedManyDeclaredLanes } from "../support/large-corpus";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The lane ROUTE: addressing (`E<n>/L*`, `E<n>/L<n>`, `E<n>/#<tag>`),
@@ -94,7 +95,7 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation: relation as never,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags(tags),
       },
@@ -346,7 +347,7 @@ describe("timelineQuery end-to-end wiring", () => {
 
     const listOutput = timelineQuery(db, { id: `E${segment.id}/L*`, view: "lane" });
     expect(listOutput).toContain(`E${segment.id}/#wired`);
-    expect(listOutput).toContain(`S${sessionId}/T2 extends -> T1`);
+    expect(listOutput).toContain(`S${sessionId}/T2 use -> T1`);
 
     const singleOutput = timelineQuery(db, { id: `E${segment.id}/L1` });
     // Same lane, same rendered lines, whether reached via the list or the
@@ -371,7 +372,7 @@ describe("timelineQuery end-to-end wiring", () => {
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["bare-view-lane"]),
         },

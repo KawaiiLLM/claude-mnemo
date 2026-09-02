@@ -11,6 +11,7 @@ import {
   selectLandingTurnIds,
 } from "../../src/db/basis-reachability-load";
 import { evaluatePhaseConnectivity } from "../../src/shared/phase-connectivity";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 const NOW = 1_800_000_000;
 
@@ -67,7 +68,7 @@ function tagged(
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         tailTag: tag,
         headTag: tag,
@@ -137,7 +138,7 @@ describe("loadBasisReachabilityClosure — commit-valid, cross-lane/task, out-of
         {
           citing: { kind: "turn", id: landing },
           cited: { kind: "turn", id: basis },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: "some-lane",
           headTag: "",

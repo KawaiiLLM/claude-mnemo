@@ -122,7 +122,7 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
   const draft = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },
     cited: { kind: "turn" as const, id: cited },
-    relation: "extends" as const,
+    relationClass: "use" as const,
     provenance: "asserted" as const,
     ...deriveSideTags([]),
   });

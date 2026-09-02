@@ -78,6 +78,7 @@ import {
   SETTLEMENT_ERA_CUTOFF_EPOCH,
 } from "../support/settlement-config";
 import { acquireBusyToken, createWorkerServerState } from "../../src/worker/server";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The settlement call itself, tested at the worker seam: a fake window in a
@@ -736,14 +737,11 @@ describe("settlement dispatch — staged writes and commit (ticket 05: review, p
     // The judged relation (spec C7's pre-state gate).
     const judged = getOutgoingEdges(db, { kind: "turn", id: fixture.turnIds[2]! });
     // INTERIM storage word (relation-vocabulary-v13 ticket 02, replaced by
-    // ticket 05a): a `use` write lands under `extends`, with the class stored
-    // beside it.
+    // The class is the whole of what the row stores: the interim `extends`
+    // spelling left with the word column at the main-agent-edges cutover.
     expect(
       judged.some(
-        (edge) =>
-          edge.relation === "extends" &&
-          edge.relationClass === "use" &&
-          edge.provenance === "judged",
+        (edge) => edge.relationClass === "use" && edge.provenance === "judged",
       ),
     ).toBe(true);
 
@@ -1454,7 +1452,7 @@ describe("the dispatch declares one immutable writable set (tag-mandate ticket 0
         {
           citing: { kind: "turn", id: t4 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags([]),
         },

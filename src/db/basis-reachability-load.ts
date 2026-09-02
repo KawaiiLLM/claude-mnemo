@@ -1,6 +1,11 @@
 import type { Database } from "bun:sqlite";
 
-import { relationClassBearingSql } from "../shared/relation-class";
+import {
+  displayEdgeRelation,
+  relationClassBearingSql,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import { liveTurnSql } from "./turn-liveness";
 import type { PhaseConnectivityGraph, PhaseConnectivityOutEdge } from "../shared/phase-connectivity";
 
@@ -101,7 +106,8 @@ function loadTypesFor(db: Database, turnIds: readonly number[]): Map<number, str
 interface OutEdgeRow {
   citingId: number;
   citedId: number;
-  relation: string;
+  relationClass: string;
+  relationCoverage: string;
 }
 
 /**
@@ -127,7 +133,8 @@ function loadOutEdgesFrom(db: Database, turnIds: readonly number[]): Map<number,
   const idPlaceholders = turnIds.map(() => "?").join(",");
   const rows = db
     .query<OutEdgeRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
@@ -141,11 +148,16 @@ function loadOutEdgesFrom(db: Database, turnIds: readonly number[]): Map<number,
     result.set(id, []);
   }
   for (const row of rows) {
+    // `relation` on the graph's edge is a display LABEL — the class token.
+    const relation = displayEdgeRelation({
+      relationClass: row.relationClass as RelationClassValue,
+      relationCoverage: row.relationCoverage as RelationCoverageValue,
+    });
     const bucket = result.get(row.citingId);
     if (bucket === undefined) {
-      result.set(row.citingId, [{ citedId: row.citedId, relation: row.relation }]);
+      result.set(row.citingId, [{ citedId: row.citedId, relation }]);
     } else {
-      bucket.push({ citedId: row.citedId, relation: row.relation });
+      bucket.push({ citedId: row.citedId, relation });
     }
   }
   return result;

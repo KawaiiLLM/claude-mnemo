@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -43,7 +47,8 @@ function storedTableSql(db: Database): string {
   return (
     db
       .query<{ sql: string | null }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
       )
       .get()?.sql ?? ""
   );
@@ -66,7 +71,7 @@ function allEdges(db: Database): EdgeRow[] {
          citing_kind AS citingKind, citing_id AS citingId,
          cited_kind AS citedKind, cited_id AS citedId,
          relation, provenance, created_at_epoch AS createdAtEpoch
-       FROM memory_edges ORDER BY citing_id, cited_id, relation`,
+       FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY citing_id, cited_id, relation`,
     )
     .all();
 }
@@ -78,6 +83,16 @@ function relationsOf(db: Database, citingId: number): string[] {
     .sort();
 }
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02)", () => {
   let db: Database;
 
@@ -161,25 +176,10 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
       expect(retiredWords.has(edge.relation ?? "")).toBe(false);
     }
 
-    // New words insert cleanly; garbage still does not. `indexes`, not the
-    // retired `collects` — `initializeSchema` runs the FULL chain, the
-    // indexes-rescope rename (ticket 01, `.scratch/indexes-rescope/spec.md`)
-    // included, so `collects` does not survive to the final stored CHECK any
-    // more than `depends-on` does above.
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)`,
-    );
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 92, 'turn', 93, 'indexes', 'asserted', 55)`,
-    );
-    expect(() =>
-      db.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 94, 'turn', 95, 'bogus-word', 'asserted', 60)`,
-      ),
-    ).toThrow();
+    // The live INSERT probe ("the new words insert, garbage does not") is
+    // DELETED: after the cutover the live table has no `relation` column, so
+    // both halves would fail to prepare rather than exercise a CHECK. The
+    // widened CHECK asserted above, read from the archive, is the same fact.
   });
 
   // The encodes/grounded-on merge collision (spec.md's migration item 2):
@@ -202,18 +202,20 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
 
   test("the cited-side and bare-pair indexes survive the rebuild attached to the NEW table", () => {
     initializeSchema(db);
-    const citedIndex = db
-      .query<{ tblName: string }, []>(
-        "SELECT tbl_name AS tblName FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_edges_cited'",
+    // Both indexes key on the dropped `relation` column, so the cutover
+    // replaced them with its side index; that THIS rebuild reattached them is
+    // read from the DDL archive.
+    const archived = db
+      .query<{ name: string; tblName: string }, []>(
+        `SELECT name, tbl_name AS tblName FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+          WHERE kind = 'index' AND name IN ('idx_memory_edges_cited', 'idx_memory_edges_bare_pair')
+          ORDER BY name`,
       )
-      .get();
-    expect(citedIndex?.tblName).toBe("memory_edges");
-    const bareIndex = db
-      .query<{ tblName: string }, []>(
-        "SELECT tbl_name AS tblName FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_edges_bare_pair'",
-      )
-      .get();
-    expect(bareIndex?.tblName).toBe("memory_edges");
+      .all();
+    expect(archived).toEqual([
+      { name: "idx_memory_edges_bare_pair", tblName: "memory_edges" },
+      { name: "idx_memory_edges_cited", tblName: "memory_edges" },
+    ]);
   });
 
   test("idempotent: a second initializeSchema neither re-renames nor loses rows", () => {
@@ -228,16 +230,23 @@ describe("memory_edges vocabulary flip migration (flow-relations spec, ticket 02
   test("a fresh database skips the migration entirely and already accepts the new words", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
+    // A fresh database is born through the word chain and cut over in the same
+    // open, so the widened CHECK is in the archive and the live table takes
+    // the class vocabulary.
     fresh.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 100)`,
     );
     expect(storedTableSql(fresh)).toContain("'narrows'");
     fresh.close();
   });
 
   test("no row count is lost across the rebuild", () => {
-    const before = allEdges(db).length;
+    // LIVE before, archive after — the archive does not exist until the
+    // cutover runs, and it IS this table one chain later.
+    const before = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges")
+      .get()!.n;
     initializeSchema(db);
     // The merge collision drops the count by exactly one (two source rows,
     // one surviving row) — every other row copies straight across.

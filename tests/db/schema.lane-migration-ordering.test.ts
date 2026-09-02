@@ -141,9 +141,9 @@ describe("lane migration ordering (v12 ticket 01): upgrade path", () => {
     edgeId = db
       .query<{ id: number }, [number, number, number]>(
         `INSERT INTO memory_edges (
-           citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance,
            tail_tag, head_tag, created_at_epoch
-         ) VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', 'write-gate', 'write-gate', ?)
+         ) VALUES ('turn', ?, 'turn', ?, 'use', 'asserted', 'write-gate', 'write-gate', ?)
          RETURNING id`,
       )
       .get(turnIds[1]!, turnIds[0]!, 100)!.id;
@@ -432,9 +432,9 @@ describe("lane migration ordering (v12 ticket 01): the not-applicable path", () 
     // reads", which is false about the very table M0 reads.
     db.exec(
       `INSERT INTO memory_edges (
-         citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance,
          tail_tag, head_tag, created_at_epoch
-       ) VALUES ('turn', 9001, 'turn', 9002, 'extends', 'asserted', 'orphan-lane', 'orphan-lane', 100)`,
+       ) VALUES ('turn', 9001, 'turn', 9002, 'use', 'asserted', 'orphan-lane', 'orphan-lane', 100)`,
     );
 
     runRegistryMigrationOnPreV12Shape(db, 200);

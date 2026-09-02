@@ -11,6 +11,8 @@ import {
   mergeSegments,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 import {
   checkRelationsGate,
   COMPACT_REPAIR_WRITER,
@@ -103,7 +105,7 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "extends" as never,
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: sides.tailTag ?? "",
           headTag: sides.headTag ?? "",
@@ -114,28 +116,30 @@ describe("every mutator of a turn's outgoing relation rows stamps (spec D0)", ()
   }
 
   /**
-   * A LEGACY SECOND ROW on a pair, written PAST the write path.
-   *
-   * main-agent-edges D5 made the pair the whole of a row's identity, so
-   * `writeMemoryEdges` cannot mint a second row for one pair under any side
-   * arguments. Production still holds 109 such pairs until ticket 01's cutover
-   * folds them, and the lane merge's COLLISION arm exists for exactly that
-   * stock — so the fixture that needs one states it in SQL.
+   * A LEGACY SECOND ROW on a pair, written PAST the write path — and, since
+   * the main-agent-edges cutover, past the SCHEMA too: the rebuilt
+   * `memory_edges` is UNIQUE on `(citing, cited)`, so the shape exists only on
+   * a database whose migration is still deferred behind D9's claim fence. The
+   * fixture therefore puts the table back into the pre-cutover shape first
+   * (`downgradeToPreCutoverShape`, idempotent) and seeds the word column the
+   * old identity key needs. That is the ONLY state in which the lane merge's
+   * COLLISION arm can fire, and it is the state this case is about.
    */
   function legacyEdge(
     citing: number,
     cited: number,
     sides: { tailTag?: string; headTag?: string } = {},
   ): number {
-    return db
-      .query<{ id: number }, [number, number, string, string]>(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, '', '', ${NOW})
-         RETURNING id`,
-      )
-      .get(citing, cited, sides.tailTag ?? "", sides.headTag ?? "")!.id;
+    downgradeToPreCutoverShape(db);
+    return seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation: "extends",
+      relationClass: "use",
+      tailTag: sides.tailTag ?? "",
+      headTag: sides.headTag ?? "",
+      createdAtEpoch: NOW,
+    });
   }
 
   /** The grant D0 measures against: this run SAW the set, at this sequence. */

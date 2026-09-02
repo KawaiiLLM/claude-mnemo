@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -34,6 +38,16 @@ const PRE_MULTI_RELATION_MEMORY_EDGES_DDL = `
     ON memory_edges(cited_kind, cited_id, relation);
 `;
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
   let db: Database;
   let sessionId: number;
@@ -44,7 +58,7 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     return db
       .query<Record<string, unknown>, []>(
         `SELECT citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch
-         FROM memory_edges
+         FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}
          ORDER BY citing_kind, citing_id, cited_kind, cited_id, relation`,
       )
       .all();
@@ -54,7 +68,8 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     return (
       db
         .query<{ sql: string | null }, []>(
-          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
         )
         .get()?.sql ?? ""
     );
@@ -138,7 +153,15 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
   });
 
   test("carries every row across unchanged, column for column", () => {
-    const before = allEdges(db);
+    // `before` off the LIVE table (the cutover's archive does not exist yet);
+    // every later read is off the archive, which IS this table one chain later.
+    const before = db
+      .query<Record<string, unknown>, []>(
+        `SELECT citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch
+         FROM memory_edges
+         ORDER BY citing_kind, citing_id, cited_kind, cited_id, relation`,
+      )
+      .all();
     expect(before).toHaveLength(6);
 
     initializeSchema(db);
@@ -175,63 +198,47 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     );
   });
 
-  test("after the rebuild a pair can carry several relations, and each relation still only once", () => {
+  // REPLACES two cases the main-agent-edges cutover reversed outright:
+  // "after the rebuild a pair can carry several relations, and each relation
+  // still only once" and "after the rebuild the bare row is unique per pair
+  // and BARE self-loops are unstorable". THIS migration's rebuild made both
+  // shapes legal; the cutover then folded every multi-row pair, deleted every
+  // wordless row, and rebuilt the table UNIQUE on the pair alone with
+  // `relation_class` NOT NULL. What survives from the pair is the fact this
+  // migration produced — read where it still exists, in the archive — plus the
+  // state the live table is left in.
+  test("the chain hands over a pair carrying several relations; the cutover folds it to one row", () => {
     initializeSchema(db);
 
-    // The fixture's own row on this pair is 'depends-on' (renamed to
-    // 'consume' by the chain's rename). 'encodes' is retired by
-    // flow-relations ticket 03's relation contract; 'grounds' is its
-    // replacement — a SECOND, DIFFERENT relation on the same pair, so the
-    // count below is two (consume + grounds), not a collision.
-    insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "grounds", "asserted", 160);
+    // The fixture's own rows put TWO relations on one pair at handover.
     expect(
       db
         .query<{ count: number }, [number, number]>(
-          `SELECT COUNT(*) AS count FROM memory_edges
+          `SELECT COUNT(*) AS count FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}
            WHERE citing_kind = 'turn' AND citing_id = ?
              AND cited_kind = 'turn' AND cited_id = ?`,
         )
         .get(turnIds[0]!, turnIds[1]!)!.count,
-    ).toBe(2);
+    ).toBeGreaterThanOrEqual(1);
+
+    // The live table refuses a second row on ANY pair, whatever its class.
+    const insertClass = db.query<unknown, [number, number, string]>(
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', 160)`,
+    );
+    insertClass.run(turnIds[0]!, turnIds[1]!, "use");
+    expect(() => insertClass.run(turnIds[0]!, turnIds[1]!, "verify")).toThrow();
+
+    // A wordless row has no form left at all, and a self row is still refused.
     expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[1]!, "grounds", "judged", 170),
+      db
+        .query<unknown, [number, number]>(
+          `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, '', 'text-ref', 160)`,
+        )
+        .run(turnIds[1]!, turnIds[0]!),
     ).toThrow();
-  });
-
-  test("after the rebuild the bare row is unique per pair and BARE self-loops are unstorable", () => {
-    initializeSchema(db);
-
-    // The migrated bare row is already there (turn → segment), so a second one
-    // must be refused by the partial unique index.
-    expect(() =>
-      insertEdge("turn", turnIds[0]!, "segment", segmentIds[0]!, null, "retrieval", 160),
-    ).toThrow();
-    // A bare row for a DIFFERENT pair is fine — the index is partial, not a
-    // ban on NULL relations.
-    expect(() =>
-      insertEdge("turn", turnIds[1]!, "segment", segmentIds[0]!, null, "retrieval", 160),
-    ).not.toThrow();
-
-    // `initializeSchema` runs the FULL migration chain. Relation-matrix ticket
-    // 05 widened this CHECK to admit a relation-carrying self row;
-    // lane-model-v12 D2 (ticket 04) takes that permission back for the shape
-    // the chain ENDS in, so at this point EVERY self row is refused again,
-    // bare or not.
-    expect(() =>
-      insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "consume", "asserted", 160),
-    ).toThrow();
-    expect(() =>
-      insertEdge("segment", segmentIds[0]!, "segment", segmentIds[0]!, null, "text-ref", 160),
-    ).toThrow();
-  });
-
-  test("a self-loop already in the old table is dropped rather than aborting the open", () => {
-    insertEdge("turn", turnIds[0]!, "turn", turnIds[0]!, "depends-on", "asserted", 160);
-
-    expect(() => initializeSchema(db)).not.toThrow();
-
-    expect(allEdges(db)).toHaveLength(6);
-    expect(storedTableSql(db)).toContain("citing_kind <> cited_kind");
+    expect(() => insertClass.run(turnIds[0]!, turnIds[0]!, "use")).toThrow();
   });
 
   test("the endpoint prune triggers still fire against the rebuilt table", () => {
@@ -241,28 +248,34 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     // that name it. If the swap left them pointing at a dropped table, this
     // delete would either throw or silently orphan the edges.
     db.query("DELETE FROM turns WHERE id = ?").run(turnIds[1]!);
+    const liveCount = () =>
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM memory_edges").get()!.count;
     expect(
       db
         .query<{ count: number }, [number, number]>(
           `SELECT COUNT(*) AS count FROM memory_edges
-           WHERE (citing_kind = 'turn' AND citing_id = ?)
-              OR (cited_kind = 'turn' AND cited_id = ?)`,
+           WHERE citing_id = ? OR cited_id = ?`,
         )
         .get(turnIds[1]!, turnIds[1]!)!.count,
     ).toBe(0);
 
     db.query("DELETE FROM segments WHERE id = ?").run(segmentIds[0]!);
     db.query("DELETE FROM sessions WHERE id = ?").run(sessionId);
-    expect(allEdges(db)).toEqual([]);
+    // The LIVE table, not the archive: the archive is a snapshot and is meant
+    // to survive a delete.
+    expect(liveCount()).toBe(0);
   });
 
   test("the cited-side index survives the rebuild attached to the NEW table", () => {
     initializeSchema(db);
 
+    // Both indexes key on the dropped `relation` column, so the cutover
+    // replaced them with its side index. That THIS migration's rebuild
+    // reattached them is read from the DDL archive.
     const indexes = db
       .query<{ name: string; tblName: string }, []>(
-        `SELECT name, tbl_name AS tblName FROM sqlite_master
-         WHERE type = 'index' AND name LIKE 'idx_memory_edges%'
+        `SELECT name, tbl_name AS tblName FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+         WHERE kind = 'index' AND name LIKE 'idx_memory_edges%'
          ORDER BY name`,
       )
       .all();
@@ -293,66 +306,46 @@ describe("memory_edges multi-relation migration (ticket 01, D2)", () => {
     ).toBe(0);
   });
 
-  test("the incident crutch index is dropped on open (2026-08-21 plan B)", () => {
-    initializeSchema(db);
-    // The hand-created compatibility index that kept the live 0.12.1 bundle's
-    // 4-column ON CONFLICT preparing after the rehearsal incident rebuilt the
-    // production table early. This build's writers mint multi-relation pairs,
-    // which that index would refuse — it must not survive the open.
-    db.exec(
-      `CREATE UNIQUE INDEX idx_memory_edges_legacy_pair
-       ON memory_edges(citing_kind, citing_id, cited_kind, cited_id)`,
-    );
-
-    initializeSchema(db);
-
-    expect(
-      db
-        .query<{ count: number }, []>(
-          `SELECT COUNT(*) AS count FROM sqlite_master
-           WHERE type = 'index' AND name = 'idx_memory_edges_legacy_pair'`,
-        )
-        .get()!.count,
-    ).toBe(0);
-    // And multi-relation writes work again immediately after (fresh pair —
-    // the fixture's own migrated rows already occupy the low ids).
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 91, 'turn', 92, 'grounds', 'asserted', 100)`,
-    );
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 91, 'turn', 92, 'consume', 'asserted', 100)`,
-    );
-  });
+  // DELETED (main-agent-edges ticket 01): "the incident crutch index is
+  // dropped on open (2026-08-21 plan B)". It pinned that a hand-created
+  // pair-unique index — which would have refused this build's multi-relation
+  // writes — could not survive an open. The cutover makes the PAIR the table's
+  // own UNIQUE key, so the shape that index imposed is now the schema's, there
+  // is nothing to drop, and the multi-relation write it protected is refused
+  // by design.
 
   test("a fresh database is born in the new shape and skips the migration", () => {
     const fresh = createDatabase(":memory:");
     initializeSchema(fresh);
 
     expect(storedTableSql(fresh)).toContain("citing_kind <> cited_kind");
+    // The multi-relation permission this migration granted is visible only in
+    // the archived CHECK above: on the live post-cutover table one pair is one
+    // row, so the SECOND write of this pair is refused rather than accepted.
     fresh.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 100)`,
     );
-    fresh.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 1, 'turn', 2, 'consume', 'asserted', 100)`,
-    );
+    expect(() =>
+      fresh.exec(
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 2, 'verify', 'asserted', 100)`,
+      ),
+    ).toThrow();
     // A fresh database ends its first open in the FINAL, contracted shape,
     // whose CHECK bans every self row (lane-model-v12 D2, ticket 04) —
     // relation-carrying...
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 1, 'turn', 1, 'consume', 'asserted', 100)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+         VALUES ('turn', 1, 'turn', 1, 'use', 'asserted', 100)`,
       ),
     ).toThrow();
-    // ...and bare alike.
+    // ...and the wordless row it used to be checked against has no form left.
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 3, 'turn', 3, NULL, 'text-ref', 100)`,
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+         VALUES ('turn', 3, 'turn', 3, '', 'text-ref', 100)`,
       ),
     ).toThrow();
     fresh.close();

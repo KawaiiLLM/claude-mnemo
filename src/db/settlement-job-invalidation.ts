@@ -245,52 +245,76 @@ export function invalidateOverlappingSettlementJobs(
     return [];
   }
 
-  const hasStageColumns = hasColumn(db, "note_settlement_jobs", "stage");
-  const readJob = db.query<
-    { id: number; status: string; stage: string | null; claimGeneration: number },
-    [number]
-  >(
-    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
-            claim_generation AS claimGeneration
-       FROM note_settlement_jobs WHERE id = ?`,
-  );
-  // `stage`, `transition_seq` and `stage1_metrics` are added additively by
-  // `ensureNoteSettlementStageSchema`; a database that has not reached it holds
-  // no staged job at all, so the status/generation half of the reset is the
-  // whole of it there.
-  const resetStatement = db.query<unknown, [number, number]>(
-    `UPDATE note_settlement_jobs
-        SET status = 'pending',
-            claimed_at_epoch = NULL,
-            claim_generation = claim_generation + 1,
-            ${hasStageColumns ? "stage = 'topics', transition_seq = NULL, stage1_metrics = NULL," : ""}
-            updated_at_epoch = ?
-      WHERE id = ?
-        AND status IN ('pending', 'claimed', 'failed')`,
-  );
-
   const invalidated: InvalidatedSettlementJob[] = [];
   for (const jobId of [...candidates].sort((a, b) => a - b)) {
-    const job = readJob.get(jobId);
-    if (
-      !job ||
-      (job.status !== "pending" && job.status !== "claimed" && job.status !== "failed")
-    ) {
-      // `done` and `abandoned` are terminal — see the module header.
-      continue;
+    const reset = resetNoteSettlementJobToStageOne(db, jobId, options.nowEpoch);
+    if (reset !== null) {
+      invalidated.push(reset);
     }
-    if (resetStatement.run(options.nowEpoch, jobId).changes === 0) {
-      continue;
-    }
-    clearSettlementJobTransitionScratch(db, jobId);
-    invalidated.push({
-      jobId,
-      previousStatus: job.status,
-      previousStage: job.stage ?? "topics",
-      claimGeneration: job.claimGeneration + 1,
-    });
   }
   return invalidated;
+}
+
+/**
+ * THE RESET, for one job: status `pending`, generation bumped, stage back to
+ * `topics` with the transition marker and stage-1 metrics cleared, and every
+ * piece of transition scratch deleted (`clearSettlementJobTransitionScratch`).
+ * `done` and `abandoned` are terminal and answer `null`.
+ *
+ * Factored out of the overlap walk above so the cutover fence (`db/schema.ts`,
+ * main-agent-edges spec D9 / R10-8: "pending `stage='edges'` jobs reset before
+ * migration") performs exactly this reset and not a second copy of it.
+ *
+ * `stage`, `transition_seq` and `stage1_metrics` are added additively by
+ * `ensureNoteSettlementStageSchema`; a database that has not reached it holds
+ * no staged job at all, so the status/generation half of the reset is the
+ * whole of it there.
+ */
+export function resetNoteSettlementJobToStageOne(
+  db: Database,
+  jobId: number,
+  nowEpoch: number,
+): InvalidatedSettlementJob | null {
+  const hasStageColumns = hasColumn(db, "note_settlement_jobs", "stage");
+  const job = db
+    .query<
+      { id: number; status: string; stage: string | null; claimGeneration: number },
+      [number]
+    >(
+      `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
+              claim_generation AS claimGeneration
+         FROM note_settlement_jobs WHERE id = ?`,
+    )
+    .get(jobId);
+  if (
+    !job ||
+    (job.status !== "pending" && job.status !== "claimed" && job.status !== "failed")
+  ) {
+    // `done` and `abandoned` are terminal — see the module header.
+    return null;
+  }
+  const changes = db
+    .query<unknown, [number, number]>(
+      `UPDATE note_settlement_jobs
+          SET status = 'pending',
+              claimed_at_epoch = NULL,
+              claim_generation = claim_generation + 1,
+              ${hasStageColumns ? "stage = 'topics', transition_seq = NULL, stage1_metrics = NULL," : ""}
+              updated_at_epoch = ?
+        WHERE id = ?
+          AND status IN ('pending', 'claimed', 'failed')`,
+    )
+    .run(nowEpoch, jobId).changes;
+  if (changes === 0) {
+    return null;
+  }
+  clearSettlementJobTransitionScratch(db, jobId);
+  return {
+    jobId,
+    previousStatus: job.status,
+    previousStage: job.stage ?? "topics",
+    claimGeneration: job.claimGeneration + 1,
+  };
 }
 
 /**

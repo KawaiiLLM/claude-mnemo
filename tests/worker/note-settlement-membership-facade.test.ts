@@ -25,6 +25,7 @@ import {
 } from "../../src/worker/note-settlement-membership-facade";
 import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The settlement LANE facade's DECISION function,
@@ -373,7 +374,7 @@ describe("create (lane tier) / delete — settlement's half of the lane registry
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "judged",
           ...deriveSideTags(["write-gate"]),
         },
@@ -670,7 +671,7 @@ describe("renderSettlementMembershipWriteReceipt", () => {
             {
               citingAddress: "S1/T2",
               citedAddress: "S1/T1",
-              relation: "extends",
+              ...wordEdgeClass("extends"),
               tailTag: "lane-b",
               headTag: "lane-b",
               keptEdgeId: 10,

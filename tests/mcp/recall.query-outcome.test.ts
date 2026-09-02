@@ -9,6 +9,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { RECALL_PARAMETER_ERROR_PREFIX, recallQueryOutcome } from "../../src/mcp/recall";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Ticket 16 scope addition (peer review finding P2): `recall`'s console
@@ -118,7 +119,7 @@ describe("recallQueryOutcome", () => {
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["mylane"]),
         },

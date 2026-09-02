@@ -15,6 +15,7 @@ import {
   renderTimeline,
   timelineQuery,
 } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Milestone-election spec, ticket 03: `selectMilestoneTurns` (S-view) and
@@ -262,7 +263,7 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
         {
           citing: { kind: "turn", id: overrider },
           cited: { kind: "turn", id: victim },
-          relation: "override",
+          ...wordEdgeClass("override"),
           provenance: "asserted",
         },
       ],
@@ -304,7 +305,7 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
         {
           citing: { kind: "turn", id: citer },
           cited: { kind: "turn", id: reversed },
-          relation: "verifies",
+          ...wordEdgeClass("verifies"),
           provenance: "asserted",
         },
       ],
@@ -341,7 +342,7 @@ describe("election is provably grade-free and structural (behavioral, ticket 03)
         {
           citing: { kind: "turn", id: citer },
           cited: { kind: "turn", id: reversed },
-          relation: "verifies",
+          ...wordEdgeClass("verifies"),
           provenance: "asserted",
         },
       ],
@@ -423,14 +424,14 @@ describe("R1 adapter wiring (pre-release repair)", () => {
         {
           citing: { kind: "turn", id: declarer },
           cited: { kind: "turn", id: anchor },
-          relation: "indexes",
+          ...wordEdgeClass("indexes"),
           provenance: "asserted",
           ...deriveSideTags(["x"]),
         },
         {
           citing: { kind: "turn", id: externalRedeclarer },
           cited: { kind: "turn", id: anchor },
-          relation: "indexes",
+          ...wordEdgeClass("indexes"),
           provenance: "asserted",
           ...deriveSideTags(["x"]),
         },

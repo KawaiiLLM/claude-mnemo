@@ -47,6 +47,7 @@ import {
 } from "../../src/worker/note-settlement-impression-teaching";
 import { renderSettlementImpressionAdvisoryBlock } from "../../src/worker/note-settlement-impressions";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * TICKET 05 (ownership-and-note-cadence spec, "settlement demolition"): what
@@ -579,7 +580,7 @@ describe("ticket 06 — the writable set is declared, window first, in addresses
         {
           citing: { kind: "turn", id: t9 },
           cited: { kind: "turn", id: outside },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags([]),
         },

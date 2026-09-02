@@ -303,6 +303,12 @@ export type LaneSideOutcome = "declared" | "derived" | "ambiguous" | "none" | "i
 export interface LaneEdgeInput {
   citingId: number;
   citedId: number;
+  /**
+   * The edge's class TOKEN (`correct(full)`, `correct(partial)`, `verify`,
+   * `use` — `shared/relation-class.ts`'s `formatRelationClass`), a display
+   * label used for renders, sorts and dedupe keys. Never a storage word: the
+   * seven-word `relation` column left at the main-agent-edges cutover.
+   */
   relation: string;
   /**
    * The lane this side ATTRIBUTES to (main-agent-edges D2), `''` for a side

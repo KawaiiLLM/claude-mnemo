@@ -417,10 +417,10 @@ function computeAnchorInvalidations(
   // One scan per anchor, partitioned in memory, where it used to run the
   // lookup twice.
   const relationLookup = db.query<
-    { citingId: number; relation: string | null; relationClass: string | null; relationCoverage: string | null },
+    { citingId: number; relationClass: string | null; relationCoverage: string | null },
     [number]
   >(
-    `SELECT citing_id AS citingId, relation AS relation,
+    `SELECT citing_id AS citingId,
             relation_class AS relationClass, relation_coverage AS relationCoverage
        FROM memory_edges
       WHERE cited_kind = 'turn' AND cited_id = ?
@@ -441,7 +441,6 @@ function computeAnchorInvalidations(
         continue;
       }
       const resolved = edgeRelationClass({
-        relation: edge.relation,
         relationClass: (edge.relationClass ?? "") as never,
         relationCoverage: (edge.relationCoverage ?? "") as never,
       });

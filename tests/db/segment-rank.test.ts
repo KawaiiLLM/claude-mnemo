@@ -17,6 +17,7 @@ import {
   getSegment,
 } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Spec D8. Every assertion here is a FULL ordering, not a spot check: the point
@@ -65,7 +66,7 @@ describe("segment member derived rank (spec D8)", () => {
       citerIds.map((citingId) => ({
         citing: { kind: "turn" as const, id: citingId },
         cited: { kind: "turn" as const, id: turnId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "judged" as const,
       })),
       ERA,
@@ -236,9 +237,9 @@ describe("segment member derived rank (spec D8)", () => {
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "retrieval" },
-        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "judged" },
-        { citing: { kind: "turn", id: citerB }, cited: { kind: "turn", id: cited }, relation: "verifies", provenance: "judged" },
+        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, ...wordEdgeClass("consume"), provenance: "retrieval" },
+        { citing: { kind: "turn", id: citerA }, cited: { kind: "turn", id: cited }, ...wordEdgeClass("consume"), provenance: "judged" },
+        { citing: { kind: "turn", id: citerB }, cited: { kind: "turn", id: cited }, ...wordEdgeClass("verifies"), provenance: "judged" },
       ],
       ERA,
     );
@@ -260,13 +261,13 @@ describe("segment member derived rank (spec D8)", () => {
         {
           citing: { kind: "turn", id: citerA },
           cited: { kind: "turn", id: cited },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "judged",
         },
         {
           citing: { kind: "turn", id: citerB },
           cited: { kind: "turn", id: cited },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "judged",
         },
       ],
@@ -495,9 +496,9 @@ describe("segment spine and orphan anchors (spec D11)", () => {
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: cited }, relation: "consume", provenance: "judged" },
-        { citing: { kind: "turn", id: corrector }, cited: { kind: "turn", id: victim }, relation: "narrows", provenance: "judged" },
-        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: cited }, ...wordEdgeClass("consume"), provenance: "judged" },
+        { citing: { kind: "turn", id: corrector }, cited: { kind: "turn", id: victim }, ...wordEdgeClass("narrows"), provenance: "judged" },
+        { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: skipped }, ...wordEdgeClass("consume"), provenance: "judged" },
       ],
       CUTOFF,
     );

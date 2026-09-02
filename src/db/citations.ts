@@ -18,16 +18,16 @@ import {
   type RetractEdgeInput,
   type WriteEdgeInput,
 } from "./memory-edges";
-import { EDGE_RELATIONS, type TurnEdgeRelation } from "../shared/turn-phase";
 import {
   checkRelationCoverage,
   edgeRelationClass,
-  interimLegacyRelation,
+  isRelationClass,
   isRelationCoverage,
-  LEGACY_RELATIONS_BY_CLASS,
   NO_RELATION_COVERAGE,
   RELATION_CLASSES,
+  relationClassBearingSql,
   type RelationClass,
+  type RelationClassValue,
   type RelationCoverageValue,
 } from "../shared/relation-class";
 import {
@@ -36,6 +36,7 @@ import {
   validateReferences,
 } from "./references";
 import { loadDeclaredLaneTags, loadSegmentTagIndex } from "./turn-tag-gate";
+import { readTurnTags } from "./turn-tags";
 import { stampTurnRelationsRevision } from "./write-gate";
 import type { TurnRecord } from "./turns";
 import { liveTurnSql } from "./turn-liveness";
@@ -52,101 +53,17 @@ import { liveTurnSql } from "./turn-liveness";
  * forms stay in prose for human readers and remain the only signal for turns
  * extracted before the edge table existed.
  */
-// Flow-relations spec, ticket 03 (the "contract half" — `.scratch/flow-
-// relations/spec.md`'s migration item 3): narrowed to the eight-word
-// vocabulary + `supersedes`, matching `schema.ts`'s now-narrow
-// `memory_edges` CHECK (`MEMORY_EDGES_CONTRACT_RELATION_WORDS`). Ticket 02
-// (the "expand half") widened this to old∪new for one release so a
-// still-in-flight rename could not be rejected by a CHECK narrowed out from
-// under it; that window is over — the seven retired words (evidence-for/
-// evidence-against/depends-on/refines/encodes/grounded-on, plus `override`
-// which never moved) are gone from BOTH the DB CHECK and this constant, kept
-// in lockstep on purpose: a value this constant still accepted but the CHECK
-// no longer does would let `writeMemoryEdges`' `isCitationRelation` gate pass
-// a row through to an uncaught SQLite CHECK-constraint exception instead of
-// a clean `invalid-relation` rejection (this is the live write-path gate,
-// not a storage-layer historical record — contrast schema.ts's own
-// migration-internal remaps, which resolve every retired word to its
-// current replacement before it ever reaches this gate, precisely so they
-// never need to hand this constant an old word to recognize).
-// `supersedes` and `refutes` used to sit below as frozen-readable: words no
-// write could request but stored rows still carried, so the read path had to
-// recognise them. Lane-model v12 ticket 03 ended that state — M-B rewrites
-// every such row onto `override` and M-D takes both words out of the table's
-// own CHECK — so the storage vocabulary equals `shared/turn-phase.ts`'s
-// `EDGE_RELATIONS`. It is still spelled out here rather than imported, so this
-// storage-layer module keeps its zero runtime dependency on that constant; the
-// guard test that used to pin the DIFFERENCE between the two now pins their
-// EQUALITY.
-//
-// RELATION-VOCABULARY-V13 TICKET 02: this is the STORAGE vocabulary and no
-// longer the WRITE vocabulary. A write asks for one of three CLASSES
-// (`shared/relation-class.ts`) and lands under this list's interim equivalent,
-// so nothing here moves — which is exactly the point: the `memory_edges` CHECK,
-// the row identity key and every reader still keyed on these seven words are
-// untouched by the vocabulary change, and ticket 03's migration of the existing
-// corpus stays additive because their stored word is never rewritten.
-export const CITATION_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies",
-] as const;
-
-export type CitationRelation = (typeof CITATION_RELATIONS)[number];
-
-export function isCitationRelation(value: unknown): value is CitationRelation {
-  return (
-    typeof value === "string" &&
-    (CITATION_RELATIONS as readonly string[]).includes(value)
-  );
-}
-
-/**
- * RETRACTION-ONLY words (peer round T1466, finding P1-2): storable and
- * therefore RETRACTABLE, never assertable. Exactly `CITATION_RELATIONS` minus
- * `shared/turn-phase.ts`'s `EDGE_RELATIONS` — **empty since lane-model v12
- * ticket 03**, and empty is a meaningful value here, not a placeholder.
- *
- * WHY THE SET EXISTED, and why nothing is lost by its being empty. It was a
- * fix for a DEADLOCK: `supersedes` (later `refutes`) was frozen out of the
- * write vocabulary while stored rows carrying it still stood; E2 (a relation
- * word outside the write vocabulary) anchors at the citing turn, and the
- * settlement commit gate refuses while any E2 anchors inside the writable
- * set. With no way to delete such a row, a window owning one could never
- * commit — a permanently failing job, the terminal-state trap. The retraction
- * MIRRORS therefore extended to those words while the assertion fields never
- * did: both write surfaces derive their `retract…` parameters from
- * `EDGE_RELATIONS` ∪ this list, and their relation parameters from
- * `EDGE_RELATIONS` alone.
- *
- * Ticket 03's migration is what discharged it. M-B rewrites every stored row
- * onto `override`, and M-D removes both words from `memory_edges`' CHECK — so
- * no such row exists and none can be created, on any database `initializeSchema`
- * has opened. A word left in this list past that point is a `retract…`
- * parameter the tool keeps TEACHING and no call can ever act on, which is the
- * stale-teacher failure this project has been bitten by before.
- *
- * The list stays (rather than the machinery being inlined) because the DECISION
- * it encodes is still live: adding a word here re-opens a deletion path, adding
- * one to `EDGE_RELATIONS` re-opens a WRITE path, and those remain different
- * decisions. Any future word frozen out of the vocabulary with rows still
- * standing belongs here for exactly as long as those rows do.
- *
- * RELATION-VOCABULARY-V13 TICKET 02 CHECKED THIS AGAIN AND IT STAYS EMPTY.
- * The three-class write surface no longer offers `consume`/`grounds`/`indexes`,
- * which would ordinarily strand their stored rows in exactly the E2 deadlock
- * described above — a row nothing can delete. It does not, because retraction
- * moved to the CLASS level: `retractUse` resolves through
- * `shared/relation-class.ts`'s `LEGACY_RELATIONS_BY_CLASS` to every stored word
- * that means `use`, so all seven remain deletable through the three mirrors.
- * That resolution IS the fix; if it is ever narrowed back to one word per
- * mirror, the four words it covers belong in this list the same day.
- */
-export const RETRACTION_ONLY_RELATIONS: readonly CitationRelation[] = [];
+// `CITATION_RELATIONS` / `isCitationRelation` / `RETRACTION_ONLY_RELATIONS`
+// ARE DELETED (main-agent-edges spec D1, ticket 01 — the cutover). They were
+// the seven-word STORAGE vocabulary of the `relation` column and the
+// (empty since lane-model v12) list of words retractable but not assertable;
+// the column is gone, an edge's relation IS its class
+// (`shared/relation-class.ts`), and retraction addresses the PAIR with the
+// class as an optional precondition (`retractTurnRelations` below) — so there
+// is no stored word left for either list to name. The E2 deadlock the
+// retraction-only list existed for (a storable word with no deletion path)
+// cannot recur: the table's CHECK admits only the three classes, and every
+// class has its `retract…` mirror.
 
 /**
  * The THREE named relation PARAMETERS, field name -> the CLASS it means —
@@ -323,22 +240,8 @@ export function formatRetractionReceipt(counts: {
 export interface TurnCitationEdge {
   citingTurnId: number;
   citedTurnId: number;
-  /**
-   * Null = a bare, unattributed citation — a real, storable state that the
-   * generic readers below (`getTurnCitations`, `getSessionEffectiveCitations`)
-   * must surface, not filter out. Only relation-SPECIFIC logic (e.g. the
-   * `supersedes` branch in `mcp/timeline.ts`) may narrow on this field.
-   *
-   * Retired history: C5 (write-mode-edit-semantics era) read `relation` as an
-   * attribute of the pair, not part of its identity — at most one relation
-   * per (citing, cited) pair. edge-mechanism-revision ticket 01's D2 (multi-
-   * relation) superseded that: `relation` is now part of the row's identity,
-   * and the same pair may carry several relation rows at once (a bare,
-   * relation-NULL row still capped to one per pair by a partial unique
-   * index) — see this file's own edge-write path and the retraction mirrors
-   * in `mcp/note.ts`.
-   */
-  relation: CitationRelation | null;
+  /** The stored class. Every row these readers return carries one (`relationClassBearingSql`). */
+  relationClass: RelationClassValue;
   createdAtEpoch: number;
 }
 
@@ -766,7 +669,7 @@ function citedPairKey(citing: CitingNode, cited: EdgeNode): string {
 function storedRelationPairs(db: Database, citing: CitingNode): Set<string> {
   return new Set(
     getOutgoingEdges(db, citing)
-      .filter((edge) => edge.relation !== null)
+      .filter((edge) => isRelationClass(edge.relationClass))
       .map((edge) => citedPairKey(citing, edge.cited)),
   );
 }
@@ -787,7 +690,7 @@ function countLogicalOutgoingEdges(db: Database, citing: CitingNode): number {
 function countLogicalIncomingEdges(db: Database, cited: EdgeNode): number {
   return new Set(
     getIncomingEdges(db, cited)
-      .filter((edge) => edge.relation !== null)
+      .filter((edge) => isRelationClass(edge.relationClass))
       .map((edge) => pairKey({ citing: edge.citing, cited })),
   ).size;
 }
@@ -1032,12 +935,6 @@ export function attachTurnRelations(
   const inputs: WriteEdgeInput[] = [...claims.values()].map((claim) => ({
     citing,
     cited: claim.cited,
-    // relation-vocabulary-v13 ticket 02, THE INTERIM EQUIVALENCE'S ONE CALL
-    // SITE (main-agent-edges ticket 02 deletes it with the column): the class
-    // plus its bit resolves to the seven-word value the `relation` column
-    // carries, so the table's CHECK and every reader still keyed on those
-    // words see a new edge exactly as they saw its old-vocabulary counterpart.
-    relation: interimLegacyRelation(claim.relationClass, claim.coverage),
     provenance,
     tailTag: claim.tailTag,
     headTag: claim.headTag,
@@ -1069,10 +966,7 @@ export function attachTurnRelations(
       written: [],
       restated: [],
       rejected: storageRejected.map((entry) => ({
-        // The CLASS the caller asked for, not the interim storage word it
-        // resolved to: the message goes back to a writer that has never been
-        // taught the seven words.
-        relation: (entry.input.relationClass || "use") as RelationClass,
+        relation: entry.input.relationClass,
         raw: `${entry.input.cited.kind} ${entry.input.cited.id}`,
         reason: "segment-not-a-relation-node" as const,
       })),
@@ -1174,7 +1068,7 @@ export function retractTurnRelations(
 
   const stored = new Map<string, MemoryEdge>();
   for (const edge of getOutgoingEdges(db, citing)) {
-    if (edge.relation === null) {
+    if (!isRelationClass(edge.relationClass)) {
       continue;
     }
     const key = citedPairKey(citing, edge.cited);
@@ -1214,8 +1108,7 @@ export function retractTurnRelations(
         continue;
       }
       if (field.relationClass !== null) {
-        // The CAS. Read through `edgeRelationClass` so a row stored under one
-        // of the seven words answers the same question a v13 row does.
+        // The CAS, on the stored class.
         const current = edgeRelationClass(edge);
         if (current === null || current.relationClass !== field.relationClass) {
           rejected.push({
@@ -1351,13 +1244,7 @@ function endpointLaneTags(db: Database, turnId: number): Set<string> {
   const row = db
     .query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?")
     .get(turnId);
-  let tags: unknown;
-  try {
-    tags = row?.tags == null ? [] : JSON.parse(row.tags);
-  } catch {
-    tags = [];
-  }
-  const own = Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+  const own = readTurnTags(row?.tags ?? null);
   const segmentTags = loadSegmentTagIndex(db);
   let segmentId: number | null = null;
   for (const tag of own) {
@@ -1555,15 +1442,16 @@ export function getTurnCitations(
       `SELECT
          e.citing_id AS citingTurnId,
          e.cited_id AS citedTurnId,
-         e.relation,
+         e.relation_class AS relationClass,
          e.created_at_epoch AS createdAtEpoch
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id
        JOIN turns cited ON cited.id = e.cited_id
        WHERE e.citing_kind = 'turn' AND e.citing_id = ?
          AND e.cited_kind = 'turn'
+         AND ${relationClassBearingSql("e")}
          AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
-       ORDER BY e.cited_id ASC, e.relation ASC`,
+       ORDER BY e.cited_id ASC, e.id ASC`,
     )
     .all(citingTurnId);
 }
@@ -1711,14 +1599,15 @@ export function getSessionEffectiveCitations(
       `SELECT
          e.citing_id AS citingTurnId,
          e.cited_id AS citedTurnId,
-         e.relation,
+         e.relation_class AS relationClass,
          e.created_at_epoch AS createdAtEpoch
        FROM memory_edges e
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
+         AND ${relationClassBearingSql("e")}
          AND ${liveTurnSql("citing")} AND ${liveTurnSql("cited")}
-       ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`,
+       ORDER BY e.citing_id ASC, e.cited_id ASC, e.id ASC`,
     )
     .all(sessionId, sessionId);
   for (const edge of edgeRows) {

@@ -38,9 +38,9 @@ describe("normalizeIncidentAttribution", () => {
     const row = db
       .query<{ id: number }, [number, number, string, string]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, 'use', '', 400)
+         VALUES ('turn', ?, 'turn', ?, 'asserted', ?, ?, 'use', '', 400)
          RETURNING id`,
       )
       .get(citingId, citedId, tailTag, headTag)!;
@@ -282,9 +282,9 @@ describe("lane lifecycle verbs go through the seam", () => {
     db
       .query<{ id: number }, [number, number, string, string]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, 'use', '', 400)
+         VALUES ('turn', ?, 'turn', ?, 'asserted', ?, ?, 'use', '', 400)
          RETURNING id`,
       )
       .get(citingId, citedId, tailTag, headTag)!.id;

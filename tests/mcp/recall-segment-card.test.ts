@@ -26,6 +26,7 @@ import {
 } from "../../src/mcp/segment-card";
 import { estimateTokens } from "../../src/utils/token-estimate";
 import { LARGE_WORKING_STATE_ROW_COUNT, seedLargeWorkingStateField } from "../support/large-corpus";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Ticket 03 — the segment card, the turn field-set switch, `E<n>/T<m>`
@@ -735,7 +736,7 @@ describe("recall(id=\"E<n>\") segment card", () => {
         {
           citing: { kind: "turn", id: t3Id },
           cited: { kind: "turn", id: t1Id },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           ...deriveSideTags(["seg-tag"]),
         },

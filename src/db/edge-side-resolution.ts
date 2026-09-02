@@ -48,6 +48,8 @@
 
 import type { Database } from "bun:sqlite";
 
+import { readTurnTags } from "./turn-tags";
+
 /** A lane's machine identity: the owning task plus one canonical tag. Never a bare word — see the module header. */
 export interface QualifiedLane {
   segmentId: number;
@@ -264,14 +266,7 @@ export function loadEndpointLaneFacts(
 }
 
 /** The stored-tags parse, tolerant exactly where the cutover has not yet normalised: a non-array or unparseable column is no tags, never a throw in a read path. */
+/** THE ONE PARSER (`db/turn-tags.ts`): a malformed value throws by name; the storage trigger refuses it, so there is nothing to coerce. */
 function parseStoredTags(raw: string | null): string[] {
-  if (raw === null) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
-  } catch {
-    return [];
-  }
+  return readTurnTags(raw);
 }

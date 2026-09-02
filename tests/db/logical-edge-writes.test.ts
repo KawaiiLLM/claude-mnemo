@@ -25,6 +25,7 @@ import {
   stampTurnRelationsRevision,
 } from "../../src/db/write-gate";
 import { edgeRelationClass } from "../../src/shared/relation-class";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 /**
  * MAIN-AGENT-EDGES ticket 03 — D4 + D5 + the read-once 00 addendum.
@@ -275,7 +276,7 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: null as never,
+          relationClass: null as never,
           provenance: "text-ref",
         },
       ],
@@ -284,7 +285,7 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
 
     expect(result.written).toEqual([]);
     expect(result.rejected).toHaveLength(1);
-    expect(result.rejected[0]!.reason).toBe("bare-row-retired");
+    expect(result.rejected[0]!.reason).toBe("invalid-relation");
     expect(outgoing(citing)).toHaveLength(0);
   });
 
@@ -414,7 +415,6 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
       const after = outgoing(citing);
       expect(after).toHaveLength(1);
       expect(after[0]!.id).toBe(before.id);
-      expect(after[0]!.relation).toBe(before.relation);
       expect(after[0]!.relationClass).toBe(before.relationClass);
       expect(after[0]!.relationCoverage).toBe(before.relationCoverage);
       expect(after[0]!.provenance).toBe(before.provenance);
@@ -698,13 +698,11 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
 
     // Two physical rows for one pair, written past the write path exactly as a
     // pre-cutover database holds them.
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', '', '', 'use', '', ${NOW}),
-              ('turn', ?, 'turn', ?, 'verifies', 'judged', '', '', 'verify', '', ${NOW})`,
-    ).run(citing, cited, citing, cited);
+    // PRE-CUTOVER shape (idempotent): the rebuilt table is UNIQUE on the pair,
+    // so a multi-row pair exists only while D9's fence defers the migration.
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "consume", relationClass: "use", provenance: "judged", createdAtEpoch: NOW });
+    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "verifies", relationClass: "verify", provenance: "judged", createdAtEpoch: NOW });
     expect(outgoing(citing)).toHaveLength(2);
 
     // 19 further distinct pairs -> 20 logical edges. One more must refuse.
@@ -730,13 +728,9 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
     // matching D9's fold, so it has to be a test, not a comment.
     const citing = seedTurn(1);
     const cited = seedTurn(2);
-    db.query(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', '', '', 'use', '', ${NOW}),
-              ('turn', ?, 'turn', ?, 'extends', 'judged', '', '', 'use', '', ${NOW})`,
-    ).run(citing, cited, citing, cited);
+    downgradeToPreCutoverShape(db);
+    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "consume", relationClass: "use", provenance: "judged", createdAtEpoch: NOW });
+    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "extends", relationClass: "use", provenance: "judged", createdAtEpoch: NOW });
     const rows = outgoing(citing);
     expect(rows).toHaveLength(2);
     const lowest = Math.min(...rows.map((row) => row.id));
@@ -781,11 +775,14 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
     test("a WORDLESS row does not count — a turn holding only those is still fresh", () => {
       const citing = seedTurn(1);
       const cited = seedTurn(2);
-      db.query(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', ${NOW})`,
-      ).run(citing, cited);
+      downgradeToPreCutoverShape(db);
+      seedPreCutoverEdge(db, {
+        citingId: citing,
+        citedId: cited,
+        relation: null,
+        provenance: "text-ref",
+        createdAtEpoch: NOW,
+      });
 
       expect(checkRelationsGate(db, "session:7", citing, address(citing))).toEqual({ ok: true });
     });

@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
 import { initializeSchema } from "../../src/db/schema";
 
 /**
@@ -47,7 +51,8 @@ function storedTableSql(db: Database): string {
   return (
     db
       .query<{ sql: string | null }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
       )
       .get()?.sql ?? ""
   );
@@ -70,11 +75,21 @@ function allEdges(db: Database): EdgeRow[] {
          citing_kind AS citingKind, citing_id AS citingId,
          cited_kind AS citedKind, cited_id AS citedId,
          relation, provenance, created_at_epoch AS createdAtEpoch
-       FROM memory_edges ORDER BY citing_id, cited_id, relation`,
+       FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY citing_id, cited_id, relation`,
     )
     .all();
 }
 
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
+ */
 describe("memory_edges relation contract migration (flow-relations spec, ticket 03)", () => {
   let db: Database;
 
@@ -136,19 +151,10 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
       { citingKind: "turn", citingId: 15, citedKind: "turn", citedId: 16, relation: null, provenance: "text-ref", createdAtEpoch: 800 },
     ]);
 
-    // New words insert cleanly; a retired word is now cleanly refused. Explicit
-    // column list (rubric-v10 ticket 01): the post-migration table carries
-    // `id`/`tags` too, which default cleanly when omitted from the list.
-    db.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 90, 'turn', 91, 'narrows', 'asserted', 50)`,
-    );
-    expect(() =>
-      db.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', 92, 'turn', 93, 'depends-on', 'asserted', 55)`,
-      ),
-    ).toThrow();
+    // The live INSERT probe ("a new word inserts, a retired one is refused")
+    // is DELETED: after the cutover the live table has no `relation` column,
+    // so both halves would fail to prepare rather than exercise a CHECK. The
+    // archived CHECK asserted above is the same fact, read where it survives.
   });
 
   /**
@@ -200,7 +206,14 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
       "INSERT INTO memory_edges VALUES ('turn', 24, 'turn', 25, 'grounded-on', 'asserted', 1050)",
     );
 
-    expect(storedTableSql(db)).toContain("'narrows'");
+    // Read LIVE: the fixture's own table, before any archive exists.
+    expect(
+      db
+        .query<{ sql: string | null }, []>(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+        )
+        .get()?.sql ?? "",
+    ).toContain("'narrows'");
 
     initializeSchema(db);
 
@@ -256,13 +269,15 @@ describe("memory_edges relation contract migration (flow-relations spec, ticket 
     initializeSchema(fresh);
 
     expect(storedTableSql(fresh)).not.toContain("'depends-on'");
+    // The live table speaks classes, not words: the narrow this migration
+    // produced is archived, and what a writer meets is the class CHECK.
     fresh.exec(
-      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', 1, 'turn', 2, 'grounds', 'asserted', 100)`,
+      `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+       VALUES ('turn', 1, 'turn', 2, 'use', 'asserted', 100)`,
     );
     expect(() =>
       fresh.exec(
-        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+        `INSERT INTO memory_edges (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
          VALUES ('turn', 3, 'turn', 4, 'encodes', 'asserted', 100)`,
       ),
     ).toThrow();

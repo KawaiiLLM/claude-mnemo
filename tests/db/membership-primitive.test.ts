@@ -648,9 +648,13 @@ describe("the membership primitive", () => {
         .map((file) => file.slice(root.length + 1))
         .sort();
       // `db/segments.ts` holds the primitive and is the only module that may
-      // write these rows; `db/schema.ts` only DECLARES the table and its
-      // trigger, which is why it does not appear here.
-      expect(writers).toEqual(["src/db/segments.ts"]);
+      // write these rows AT RUNTIME. `db/schema.ts` joins it as a MIGRATION
+      // writer with the main-agent-edges cutover (ticket 01): transform 1
+      // reconciles the membership of every turn whose tags it normalised, and
+      // the rollback restores those rows from the receipt archive. Neither is
+      // a runtime path, and neither may grow one — a THIRD name here is the
+      // regression this case is for.
+      expect(writers).toEqual(["src/db/schema.ts", "src/db/segments.ts"]);
     });
   });
 });

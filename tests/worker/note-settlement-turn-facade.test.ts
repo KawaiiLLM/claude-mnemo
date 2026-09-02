@@ -43,6 +43,10 @@ import {
 } from "../../src/worker/note-settlement-turn-facade";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 import { correctEntry } from "../support/relation-entries";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { fixtureRelationClass } from "../support/lane-edge-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
+import { displayEdgeRelation } from "../../src/shared/relation-class";
 
 /**
  * The settlement turn-write facade's DECISION function,
@@ -934,7 +938,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(edges).toHaveLength(1);
     // INTERIM (relation-vocabulary-v13 ticket 02, ticket 05a replaces it): a
     // `use` write stores as `extends`, with the class in its own column.
-    expect(edges[0]!.relation).toBe("extends");
+    expect(displayEdgeRelation(edges[0]!)).toBe("use");
     expect(edges[0]!.relationClass).toBe("use");
     // Settlement's attribution survives the move onto the main agent's own
     // primitive — `judged`, not `asserted`.
@@ -983,7 +987,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // INTERIM storage words (ticket 05a replaces the mapping): `verify` ->
     // `verifies`. The stored class is the specific one, whichever order the
     // fields were processed in.
-    expect(edges[0]!.relation).toBe("verifies");
+    expect(displayEdgeRelation(edges[0]!)).toBe("verify");
     expect(edges[0]!.relationClass).toBe("verify");
   });
 
@@ -1027,7 +1031,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         // `indexes` this test used to assert is DELETED from the write
         // vocabulary outright (user ruling S15069/T2306) — convergence is no
         // longer declared, it is read off out-degree.
-        (edge) => edge.relation === "extends" && edge.relationClass === "use",
+        (edge) => edge.relationClass === "use",
       ),
     ).toBe(true);
   });
@@ -1070,7 +1074,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         // `indexes` this test used to assert is DELETED from the write
         // vocabulary outright (user ruling S15069/T2306) — convergence is no
         // longer declared, it is read off out-degree.
-        (edge) => edge.relation === "extends" && edge.relationClass === "use",
+        (edge) => edge.relationClass === "use",
       ),
     ).toBe(true);
   });
@@ -1283,18 +1287,27 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       // is pre-cutover STOCK — 109 of them in production, readers untouched —
       // so the fixture reaches under the write path to build one, which is the
       // only level that still can.
+      // On the PRE-CUTOVER shape (idempotent): the rebuilt table is UNIQUE on
+      // the pair, so the two-row pair exists only while D9's fence defers the
+      // migration — which is the one state these readers still meet it in.
       const seedLegacyRow = (relation: string) => {
-        db.query<unknown, [number, number, string, number]>(
-          `INSERT INTO memory_edges (
-             citing_kind, citing_id, cited_kind, cited_id,
-             relation, provenance, tail_tag, head_tag,
-             relation_class, relation_coverage, created_at_epoch
-           ) VALUES ('turn', ?, 'turn', ?, ?, 'judged', '', '', '', '', ?)`,
-        ).run(t2, t1, relation, NOW - 500);
+        downgradeToPreCutoverShape(db!);
+        seedPreCutoverEdge(db!, {
+          citingId: t2,
+          citedId: t1,
+          relation,
+          ...fixtureRelationClass({ relation }),
+          provenance: "judged",
+          createdAtEpoch: NOW - 500,
+        });
       };
+      // CLAIM FIRST: `downgradeToPreCutoverShape` (inside `seedLegacyRow`)
+      // puts the database back into the state D9's fence describes, and a
+      // worker refuses to claim new settlement work while the cutover is
+      // deferred — which is the fence doing exactly its job.
+      const job = claimWindow(sessionDbId, 1, 2);
       seedLegacyRow("extends");
       seedLegacyRow("narrows");
-      const job = claimWindow(sessionDbId, 1, 2);
 
       // The weaker mirror is refused: the pair's materialized class is
       // `correct`, and a `use` retraction is acting on a reading that is no
@@ -1446,8 +1459,8 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(resultText(result)).toContain("Landed 1 relation(s).");
     expect(resultText(result)).not.toContain("-phase");
     expect(
-      getOutgoingEdges(db, { kind: "turn", id: t2 }).map((edge) => edge.relation),
-    ).toEqual(["verifies"]);
+      getOutgoingEdges(db, { kind: "turn", id: t2 }).map(displayEdgeRelation),
+    ).toEqual(["verify"]);
   });
 });
 
@@ -1498,7 +1511,7 @@ describe("the relations gate (peer round P1-8)", () => {
     return db
       .query<{ c: number }, [number]>(
         `SELECT COUNT(*) AS c FROM memory_edges
-         WHERE citing_kind = 'turn' AND citing_id = ? AND relation IS NOT NULL`,
+         WHERE citing_kind = 'turn' AND citing_id = ?`,
       )
       .get(citingId)!.c;
   }
@@ -1517,7 +1530,7 @@ describe("the relations gate (peer round P1-8)", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: third },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "judged",
           relationClass: "use",
         },

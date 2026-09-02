@@ -227,9 +227,9 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         {
           key: LANE_KEY,
           groups: [
-            { relations: ["verifies", "override", "narrows", "extends"], count: 2 },
-            { relations: ["grounds"], count: 0 },
-            { relations: ["consume", "indexes"], count: 5 },
+            { relations: ["verify", "correct(full)", "correct(partial)", "use"], count: 2 },
+            { relations: ["use"], count: 0 },
+            { relations: ["use"], count: 5 },
           ],
         },
       ],
@@ -238,7 +238,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const text = renderLaneCheckerReports(result);
     expect(text).toContain("## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)");
     expect(text).toContain(
-      "Lane E42:{ownership} - cross-lane edges: verifies/override/narrows/extends=2  grounds=0  consume/indexes=5",
+      "Lane E42:{ownership} - cross-lane edges: verify/correct(full)/correct(partial)/use=2  use=0  use=5",
     );
     // NO verdict word anywhere on the line — the ticket forbids inventing a
     // threshold, and a rendered adjective would be one.
@@ -256,7 +256,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           segment: "42",
           citingId: 7,
           citedId: 2,
-          relations: ["consume", "grounds"],
+          relations: ["use"],
           alternativePath: [7, 5, 2],
         },
       ],
@@ -265,7 +265,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const text = renderLaneCheckerReports(result);
     expect(text).toContain("Report 4b");
     expect(text).toContain("1 candidate(s)");
-    expect(text).toContain("  T7 -> T2 (consume,grounds) -- also joined by T7 -> T5 -> T2");
+    expect(text).toContain("  T7 -> T2 (use) -- also joined by T7 -> T5 -> T2");
   });
 
   test("report 4b caps its list for display and states the TRUE total", () => {
@@ -273,7 +273,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       segment: "42",
       citingId: 100 + index,
       citedId: 1,
-      relations: ["consume"],
+      relations: ["use"],
       alternativePath: [100 + index, 50, 1],
     }));
     const text = renderLaneCheckerReports({ ...emptyResult(), bypassCandidates: many });
@@ -293,12 +293,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
   test("report 4c lists a time-order violation verbatim (citing, cited, relation, tags)", () => {
     const result: LaneCheckerResult = {
       ...emptyResult(),
-      timeOrderViolations: [{ citingId: 3, citedId: 9, relation: "extends", tags: ["ownership"] }],
+      timeOrderViolations: [{ citingId: 3, citedId: 9, relation: "use", tags: ["ownership"] }],
     };
 
     const text = renderLaneCheckerReports(result);
     expect(text).toContain("Report 4c");
-    expect(text).toContain("T3 -> T9 (extends {ownership})");
+    expect(text).toContain("T3 -> T9 (use {ownership})");
   });
 
   test("report 4c prints an explicit empty marker when there are no violations", () => {
@@ -372,7 +372,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           anchorId: 31,
           citingId: 31,
           citedId: 30,
-          relation: "narrows",
+          relation: "correct(partial)",
           tags: ["a", "b"],
           missing: [
             { tag: "b", endpoint: "cited" },
@@ -389,7 +389,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");
     expect(text).toContain("[E3] anchor T11 -- T11 type: [bugfix] (outside vocabulary: bugfix)");
     expect(text).toContain(
-      '[E4] anchor T31 -- T31 --narrows--> T30 {a,b}: "b" missing from the cited turn\'s tags; ' +
+      '[E4] anchor T31 -- T31 --correct(partial)--> T30 {a,b}: "b" missing from the cited turn\'s tags; ' +
         '"b" missing from the citing turn\'s tags',
     );
     // The errors block LEADS: a reader (and the commit-gate-facing agent)
@@ -410,7 +410,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           anchorId: 41,
           citingId: 41,
           citedId: 40,
-          relation: "consume",
+          relation: "use",
           tags: [],
           unsettledSides: ["tail", "head"],
         },
@@ -419,7 +419,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           anchorId: 43,
           citingId: 43,
           citedId: 42,
-          relation: "extends",
+          relation: "use",
           tags: ["ownership"],
           unsettledSides: ["head"],
         },
@@ -428,7 +428,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
           anchorId: 45,
           citingId: 45,
           citedId: 44,
-          relation: "grounds",
+          relation: "use",
           tags: ["ownership"],
           unsettledSides: ["tail"],
         },
@@ -437,15 +437,15 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const text = renderLaneCheckerReports(withDrafts);
     expect(text).toContain("3 error(s)");
     expect(text).toContain(
-      "  [E6] anchor T41 -- T41 --consume--> T40: DRAFT edge -- neither side names a lane",
+      "  [E6] anchor T41 -- T41 --use--> T40: DRAFT edge -- neither side names a lane",
     );
     // The HALF-settled shapes name the open side AND the lane the other side
     // already holds, which is usually the repair value.
     expect(text).toContain(
-      "  [E6] anchor T43 -- T43 --extends--> T42: DRAFT edge -- the head side names no lane (the tail side is {ownership})",
+      "  [E6] anchor T43 -- T43 --use--> T42: DRAFT edge -- the head side names no lane (the tail side is {ownership})",
     );
     expect(text).toContain(
-      "  [E6] anchor T45 -- T45 --grounds--> T44: DRAFT edge -- the tail side names no lane (the head side is {ownership})",
+      "  [E6] anchor T45 -- T45 --use--> T44: DRAFT edge -- the tail side names no lane (the head side is {ownership})",
     );
     // Rank, not just presence: every E6 line sits above the WARNINGS split.
     expect(text.indexOf("[E6]")).toBeLessThan(text.indexOf("## WARNINGS"));
@@ -519,7 +519,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         anchorId: 5,
         citingId: 5,
         citedId: 4,
-        relation: "extends",
+        relation: "use",
         tags: ["z"],
         missing: [{ tag: "z", endpoint: "cited" }],
       },
@@ -528,7 +528,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
         anchorId: 7,
         citingId: 7,
         citedId: 9,
-        relation: "narrows",
+        relation: "correct(partial)",
         tags: ["a"],
         missing: [{ tag: "a", endpoint: "cited" }],
       },
@@ -545,12 +545,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       // side (id 4, never in the map) keeps the bare fallback — proving this
       // is a per-id lookup, not a blanket string substitution.
       expect(text).toContain(
-        "[E4] anchor S15069/T332 -- S15069/T332 --extends--> T4 {z}:",
+        "[E4] anchor S15069/T332 -- S15069/T332 --use--> T4 {z}:",
       );
       // The E4 line's CITING side (id 7, same as the anchor) resolves too;
       // its CITED counterpart (id 9, not in the map) stays bare.
       expect(text).toContain(
-        "[E4] anchor S15069/T401 -- S15069/T401 --narrows--> T9 {a}:",
+        "[E4] anchor S15069/T401 -- S15069/T401 --correct(partial)--> T9 {a}:",
       );
       // Pin: no bare `T<dbid>`-shaped reference survives for an id the map
       // actually resolved — ids 5 and 7 never appear as `T5`/`T7` anywhere.
@@ -565,7 +565,7 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       const text = renderLaneCheckerReports({ ...emptyResult(), errors }, partial);
       expect(text).toContain("[E4] anchor S15069/T332 --");
       expect(text).toContain("[E4] anchor T7 --");
-      expect(text).toContain("--narrows--> T9");
+      expect(text).toContain("--correct(partial)--> T9");
 
       // A turn with no `order` contributes no entry at all.
       expect(buildLaneAnchorAddresses([{ id: 5, type: ["design"] }]).size).toBe(0);
@@ -770,7 +770,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           anchorId: 1,
           citingId: 1,
           citedId: 2,
-          relation: "extends",
+          relation: "use",
           tags: ["a"],
           missing: [{ tag: "a", endpoint: "cited" }],
         },
@@ -811,7 +811,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
           anchorId: 1,
           citingId: 1,
           citedId: 2,
-          relation: "extends",
+          relation: "use",
           tags: Array.from({ length: 20 }, (_, index) => "a-very-long-lane-tag-" + index),
           missing: Array.from({ length: 20 }, (_, index) => ({
             tag: "a-very-long-lane-tag-" + index,

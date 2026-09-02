@@ -68,9 +68,9 @@ describe("the derived-side closure — PRE recorded at the mutation, closed at f
     db
       .query<{ id: number }, [number, number, string, string, number]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', ?, ?, 'use', '', ?)
+         VALUES ('turn', ?, 'turn', ?, 'judged', ?, ?, 'use', '', ?)
          RETURNING id`,
       )
       .get(citingId, citedId, tailTag, headTag, NOW)!.id;
@@ -296,9 +296,9 @@ describe("invalidateOverlappingSettlementJobs — the live-job branch in front o
     db
       .query<{ id: number }, [number, number]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', '', '', 'use', '', 1)
+         VALUES ('turn', ?, 'turn', ?, 'judged', '', '', 'use', '', 1)
          RETURNING id`,
       )
       .get(citingId, citedId)!.id;

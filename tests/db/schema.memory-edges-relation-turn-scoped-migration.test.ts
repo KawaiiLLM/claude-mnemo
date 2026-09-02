@@ -3,6 +3,10 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+} from "../../src/db/main-agent-edges-cutover";
+import {
   ensureMemoryEdgesRelationTurnScoped,
   initializeSchema,
   MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT,
@@ -31,6 +35,16 @@ import { createSegment } from "../../src/db/segments";
  * that produces it, or it stops describing that shape the day the generator
  * moves) so each test can seed the rows the CURRENT CHECK would otherwise
  * refuse at INSERT time.
+ */
+/**
+ * main-agent-edges ticket 01: `initializeSchema` now ENDS with the cutover,
+ * which rebuilds `memory_edges` without the `relation` column and with one row
+ * per pair. The legacy chain under test still runs on this fixture, in the same
+ * open, right before it — and the cutover ARCHIVES the table exactly as the
+ * chain left it (`main_agent_edges_cutover_ddl_archive` /
+ * `main_agent_edges_cutover_edge_archive`). The two accessors below therefore
+ * read the chain's result out of the archive rather than out of the live table,
+ * which is the same state a rollback would restore.
  */
 describe("container-unification D10 — the relation graph is turn→turn", () => {
   let db: Database;
@@ -114,7 +128,17 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
            relation_class, relation_coverage, created_at_epoch
          )
          SELECT id, citing_kind, citing_id, cited_kind, cited_id,
-                relation, provenance, tail_tag, head_tag,
+                -- The main-agent-edges cutover DROPPED memory_edges.relation,
+                -- so the word this fixture's shape needs is reconstructed from
+                -- the class pair, inverting the v13 backfill. Lossy in the
+                -- direction that backfill was many-to-one.
+                CASE relation_class
+                  WHEN 'correct' THEN CASE relation_coverage WHEN 'full' THEN 'override' ELSE 'narrows' END
+                  WHEN 'verify' THEN 'verifies'
+                  WHEN 'use' THEN 'grounds'
+                  ELSE NULL
+                END,
+                provenance, tail_tag, head_tag,
                 relation_class, relation_coverage, created_at_epoch
          FROM memory_edges`,
       ).run();
@@ -186,6 +210,41 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
       )
       .all();
 
+  /**
+   * The same rows, read out of the cutover's receipt archive. Every test in
+   * this file that drives the migration DIRECTLY (`toPending` + the ensure
+   * call) leaves the live table in the widened-back shape and reads `edges()`;
+   * the two that go back through `initializeSchema` end past the cutover,
+   * where the word column is gone, and read this instead.
+   */
+  const archivedEdges = (): Array<{
+    citingKind: string;
+    citingId: number;
+    citedKind: string;
+    citedId: number;
+    relation: string | null;
+    provenance: string;
+  }> =>
+    db
+      .query<
+        {
+          citingKind: string;
+          citingId: number;
+          citedKind: string;
+          citedId: number;
+          relation: string | null;
+          provenance: string;
+        },
+        []
+      >(
+        `SELECT citing_kind AS citingKind, citing_id AS citingId,
+                cited_kind AS citedKind, cited_id AS citedId,
+                relation, provenance
+         FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}
+         ORDER BY citing_kind, citing_id, cited_kind, cited_id, relation`,
+      )
+      .all();
+
   const receipt = (): MemoryEdgesRelationTurnScopedReceipt =>
     JSON.parse(
       db
@@ -202,6 +261,15 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
       )
       .get()!.sql;
 
+  /** The DDL as the chain handed it to the cutover — see `archivedEdges`. */
+  const archivedDdl = (): string =>
+    db
+      .query<{ sql: string }, []>(
+        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
+      )
+      .get()!.sql;
+
   test("beforeEach's ordinary initializeSchema already settles the phase", () => {
     expect(
       db
@@ -210,7 +278,7 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
         )
         .get(MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT)!.n,
     ).toBe(1);
-    expect(storedDdl()).toContain(
+    expect(archivedDdl()).toContain(
       "CHECK (relation IS NULL OR (citing_kind = 'turn' AND cited_kind = 'turn'))",
     );
   });
@@ -280,8 +348,13 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
    * insert instead.
    */
   test("narrows the CHECK: a relation-carrying non-turn→turn insert is refused; a bare one still succeeds", () => {
+    // Drive the migration directly: `beforeEach`'s `initializeSchema` ends
+    // PAST the cutover, whose table has no `relation` column at all, so every
+    // probe below would fail to prepare instead of meeting THIS ticket's CHECK.
+    toPending(db);
     const turnA = addTurn(1);
     const segmentA = addSegment("chapter one");
+    ensureMemoryEdgesRelationTurnScoped(db, 3000);
 
     expect(() =>
       insertEdge("turn", turnA, "segment", segmentA, "consume", "asserted", 3000),
@@ -412,8 +485,10 @@ describe("container-unification D10 — the relation graph is turn→turn", () =
     initializeSchema(db);
     initializeSchema(db);
 
-    expect(edges()).toEqual(after);
-    expect(storedDdl()).toContain(
+    // Past the cutover the live table has no word column; the archive is the
+    // state this migration produced, and the reopen must not have moved it.
+    expect(archivedEdges()).toEqual(after);
+    expect(archivedDdl()).toContain(
       "CHECK (relation IS NULL OR (citing_kind = 'turn' AND cited_kind = 'turn'))",
     );
   });

@@ -69,7 +69,7 @@ function indexEdge(db: Database, citerId: number, citedId: number): void {
       {
         citing: { kind: "turn", id: citerId },
         cited: { kind: "turn", id: citedId },
-        relation: "indexes",
+        relationClass: "use",
         provenance: "judged",
       },
     ],
@@ -167,11 +167,14 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     // brackets — all three shift row cost, and all three re-measured
     // empirically against this real fixture, not hand-derived: the window
     // where K=24 plateaus at 23 seated rows (demotedCount > 0) while K=25
-    // clears straight to all 25 (demotedCount 0) is 646-676 under
-    // staged-settlement ticket 11's pricing (was 663-692 under whitespace-
-    // runs-price-as-one-token ticket 14, 728-750 under edge-atom ticket 11
-    // alone).
-    const budget = 660;
+    // clears straight to all 25 (demotedCount 0) is 566-596 under
+    // main-agent-edges ticket 01's pricing — the `↳` arrow carries a CLASS
+    // TOKEN now (`-use->`) where it carried a storage word, which is cheaper
+    // per address (was 646-676 under staged-settlement ticket 11, 663-692
+    // under whitespace-runs-price-as-one-token ticket 14, 728-750 under
+    // edge-atom ticket 11 alone). Re-measured empirically against this real
+    // fixture each time, never hand-derived.
+    const budget = 580;
     const seg24 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg24.id, [f1, f3, long_, d, ...ris], ERA);
     const view24 = buildSegmentTimelineView(db, { segmentId: seg24.id, view: "milestones", pageBudget: budget });
@@ -200,14 +203,15 @@ describe("selectSegmentMilestonesByEdgeSignals fitter (milestone-row-slimming ti
     const seg25 = createSegment(db, { title: TITLE, nowEpoch: ERA });
     addSegmentMembers(db, seg25.id, [f1, f2, f3, long_, d, ...ris], ERA);
 
-    // A budget below EVERY K in the probe's reach (K=24's true cost is 505,
-    // K=25's is 474 under staged-settlement ticket 11's pricing (USER RULING
-    // S15069/T2016: unbracketed row addresses) — was 518/488 under
-    // whitespace-runs-price-as-one-token ticket 14, 582/553 under edge-atom
-    // ticket 11 alone — both measured in criterion 1/2's own fixture family)
-    // — low enough that neither the bare search's bestK+1 nor its
-    // bestK+2/+3 probes can fit.
-    const budget = 640;
+    // A budget below EVERY K in the probe's reach. RE-MEASURED at
+    // main-agent-edges ticket 01: the `↳` arrow carries a CLASS TOKEN now
+    // (`-use->`) where it carried a storage word, so every address is cheaper
+    // and the whole window moved down — 565 is the highest budget at which
+    // neither K=24 nor K=25 is adopted (was 640 under staged-settlement
+    // ticket 11's pricing, 518/488 under whitespace-runs-price-as-one-token
+    // ticket 14, 582/553 under edge-atom ticket 11 alone). Measured against
+    // this fixture, never hand-derived.
+    const budget = 550;
     const view = buildSegmentTimelineView(db, { segmentId: seg25.id, view: "milestones", pageBudget: budget });
     expect(view.keptMilestones.length).toBeLessThan(24); // neither 24 nor 25 got adopted.
     expect(view.demotedCount).toBeGreaterThan(0);

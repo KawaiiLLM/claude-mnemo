@@ -8,6 +8,7 @@ import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * rubric-v10 ticket 04 (flow-era read-side retirement). Tickets 01/02 already
@@ -135,7 +136,7 @@ describe("timeline renders the retired flow scenario as plain edges only", () =>
         {
           citing: { kind: "turn", id: citingId },
           cited: { kind: "turn", id: citedId },
-          relation,
+          ...wordEdgeClass(relation),
           provenance: "asserted",
         },
       ],

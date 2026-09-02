@@ -25,6 +25,7 @@ import type { RecallTurnField } from "../../src/mcp/memory-filter";
 import { recallMemory, recallMemoryDelivery } from "../../src/mcp/recall";
 import { settlementTurnWriteInputSchema } from "../../src/worker/note-settlement-turn-facade";
 import { estimateTokens } from "../../src/utils/token-estimate";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * SETTLEMENT-READ-ONCE TICKET 01 — ONE READ CONTRACT (spec D1 + D2).
@@ -463,7 +464,7 @@ describe("per turn, per field: complete | bounded | cut | dropped (spec D2)", ()
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "extends" as never,
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: "",
           headTag: "",

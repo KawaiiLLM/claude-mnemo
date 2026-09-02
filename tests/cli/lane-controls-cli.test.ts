@@ -22,6 +22,7 @@ import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * THE ATTRIBUTION CONTROL (lane-model-v12 ticket 13; C1/C3/C4 retired by
@@ -70,25 +71,24 @@ interface Fixture {
  *   T9 [eb, ownership, handoff]
  *
  * Edges (the whole of what every expected number below is counted from):
- *   E1 T2 --extends--> T1   (ownership, ownership)   clean
- *   E2 T3 --indexes--> T1   (ownership, ownership)   clean
- *   E3 T3 --indexes--> T2   (ownership, ownership)   clean
- *   E4 T4 --grounds--> T1   ('', '')                 both sides unsettled — out of C2's domain
- *   E5 T4 --consume--> T2   (ownership, '')          one side unsettled — out of C2's domain
- *   E6 T2 --narrows--> T1   (drafting, ownership)    C2: tail tag never DECLARED.
+ *   E1 T2 --use--> T1   (ownership, ownership)   clean
+ *   E2 T3 --use--> T1   (ownership, ownership)   clean
+ *   E3 T3 --use--> T2   (ownership, ownership)   clean
+ *   E4 T4 --use--> T1   ('', '')                 both sides unsettled — out of C2's domain
+ *   E5 T4 --use--> T2   (ownership, '')          one side unsettled — out of C2's domain
+ *   E6 T2 --correct(partial)--> T1   (drafting, ownership)    C2: tail tag never DECLARED.
  *       Shares its PAIR with E1, so main-agent-edges D1 makes it unwritable
  *       through `writeMemoryEdges`; it is inserted at the storage layer as the
  *       legacy multi-row stock it is -- see the note beside the insert.
- *   E7 T6 --grounds--> T1   (ownership, ownership)   C2: tail tag not ON T6
- *   E8 T7 --grounds--> T4   ('', '')                 both sides unsettled — out of C2's domain
- *   E9 T9 --extends--> T8   (ownership, ownership)   clean, in segment B
- *   E10 T10 --grounds--> T1 (ownership, ownership)   T10's stored tags are
- *       UNPARSEABLE -> no subset verdict for the tail (ignorance never
- *       manufactures an error)
- *   E11 T11 --extends--> T1 (ownership, ownership)   T11 is SKIPPED -> law 8
+ *   E7 T6 --use--> T1   (ownership, ownership)   C2: tail tag not ON T6
+ *   E8 T7 --use--> T4   ('', '')                 both sides unsettled — out of C2's domain
+ *   E9 T9 --use--> T8   (ownership, ownership)   clean, in segment B
+ *   E10 T10 --use--> T1 (ownership, ownership)   clean (T10 used to carry
+ *       UNPARSEABLE tags; the cutover made that value unstorable)
+ *   E11 T11 --use--> T1 (ownership, ownership)   T11 is SKIPPED -> law 8
  *       keeps the whole row out of every control, and keeps T11 from becoming
  *       lane A's latest member (which would reopen the lane)
- *   E12 T9 --consume--> T1   (handoff, ownership)     CROSS-SEGMENT and
+ *   E12 T9 --use--> T1   (handoff, ownership)     CROSS-SEGMENT and
  *       CROSS-LANE, and clean: `handoff` is declared in B (where the CITING
  *       turn lives) and `ownership` in A (where the CITED one does). It is the
  *       row that can tell a per-side check from a swapped one -- `handoff` is
@@ -136,16 +136,13 @@ function seedFixture(): Fixture {
     T9: insertTurn(9, ["eb", "ownership", "handoff"]),
   };
 
-  // T10's `tags` is valid JSON but NOT an array — storable (the column has no
-  // `json_valid` CHECK) and unreadable, which `parseTurnTags` maps to "not
-  // loaded", i.e. no subset verdict for this turn's side of any edge.
-  turns.T10 = db
-    .query<{ id: number }, [number, number, string]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response,
-                          tool_call_count, created_at_epoch, type, tags)
-       VALUES (?, ?, 'active', 'p', 'r', 1, ?, '["design"]', '{"not":"an array"}') RETURNING id`,
-    )
-    .get(sessionId, 10, NOW + 10)!.id;
+  // T10 used to carry a `tags` value that was valid JSON but NOT an array —
+  // storable then, unreadable, and mapped by the loader to "no verdict". The
+  // main-agent-edges cutover normalised every such value away and put a
+  // trigger over the column, so the state cannot be reached at all; T10 is an
+  // ordinarily-tagged member and its edge is clean, which keeps C2's measured
+  // count where it was. The refusal itself is pinned below.
+  turns.T10 = insertTurn(10, ["ea", "ownership"]);
   // T11 is SKIPPED (law 8, `db/turn-liveness.ts`): dormant, so it is neither a
   // node nor an edge endpoint anywhere, and it carries `ownership` precisely so
   // that admitting it would visibly reopen lane A.
@@ -189,7 +186,7 @@ function seedFixture(): Fixture {
   ) => ({
     citing: { kind: "turn" as const, id: citing },
     cited: { kind: "turn" as const, id: cited },
-    relation,
+    ...wordEdgeClass(relation),
     provenance: "asserted" as const,
     tailTag,
     headTag,
@@ -213,42 +210,13 @@ function seedFixture(): Fixture {
     NOW,
   );
 
-  // E6, AND WHY IT IS THE ONE ROW THIS FIXTURE INSERTS BY HAND.
-  //
-  // `T2 --narrows--> T1` shares its PAIR with E1 (`T2 --extends--> T1`), and
-  // main-agent-edges D1 retired that shape as a WRITE: a pair holds one row, so
-  // `writeMemoryEdges` no longer inserts a second one — it compares the classes
-  // (`narrows` is `correct`, `extends` is `use`), finds the incoming claim
-  // strictly stronger, and PROMOTES E1's row in place, keeping E1's own two
-  // side tags. The `drafting` tail that is E6's entire reason for existing
-  // never reaches storage, and the C2 count this fixture is built to make
-  // hand-countable drops by one.
-  //
-  // The row is still legal STOCK, though, and that is the point worth keeping:
-  // a pre-cutover database holds many such pairs, the readers are untouched,
-  // and D4's caps count a legacy multi-row pair once precisely because it
-  // exists. This fixture is a deliberately imperfect database, so it keeps
-  // carrying one — inserted at the storage layer, the only level that can still
-  // produce the shape, with the side-tag index rows `writeMemoryEdges` would
-  // have written beside it.
-  const e6RowId = db
-    .query<{ id: number }, [number, number, number]>(
-      `INSERT INTO memory_edges (
-         citing_kind, citing_id, cited_kind, cited_id,
-         relation, provenance, tail_tag, head_tag,
-         relation_class, relation_coverage, created_at_epoch
-       ) VALUES ('turn', ?, 'turn', ?, 'narrows', 'asserted', 'drafting', 'ownership', '', '', ?)
-       RETURNING id`,
-    )
-    .get(turns.T2!, turns.T1!, NOW)!.id;
-  for (const [side, tag] of [
-    ["tail", "drafting"],
-    ["head", "ownership"],
-  ] as const) {
-    db.query<unknown, [number, string, string]>(
-      `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
-    ).run(e6RowId, side, tag);
-  }
+  // E6 IS DELETED (main-agent-edges ticket 01). It was `T2 --correct(partial)--> T1`,
+  // a SECOND physical row on E1's pair, hand-inserted because
+  // `writeMemoryEdges` would have promoted E1 in place instead of minting it.
+  // The cutover folded that stock and rebuilt `memory_edges` UNIQUE on
+  // `(citing, cited)`, so no database a control can be run against holds the
+  // shape any more. Its `drafting` tail was the fixture's only DECLARATION
+  // violation of that kind; C2's hand-counted total drops with it.
 
   db.close();
 
@@ -326,19 +294,23 @@ describe("the control quantity", () => {
     seedFixture();
     const c2 = control(report(), "C2");
 
-    // E6's tail names `drafting`, which segment A never declared; E7's tail
-    // names `ownership`, which T6 does not carry. The unsettled/half-settled
-    // rows (E4, E5, E8) carry no assignment and are out of this control's
-    // domain entirely.
-    expect(c2.measured).toBe(2);
-    expect(c2.context.join(" | ")).toContain("1 undeclared-lane, 1 subset (E4)");
-    expect(c2.context.join(" | ")).toContain("over 8 settled edge(s)");
-    expect(c2.findings.map((finding) => finding.note).join(" | ")).toContain(
-      "is not DECLARED in that endpoint's own segment",
-    );
+    // E7's tail names `ownership`, which T6 does not carry. The
+    // unsettled/half-settled rows (E4, E5, E8) carry no assignment and are out
+    // of this control's domain entirely. (The UNDECLARED-lane half was E6, a
+    // second row on E1's pair; the cutover's pair-UNIQUE rebuild removed the
+    // shape, so the count is one and the undeclared bucket is empty.)
+    expect(c2.measured).toBe(1);
+    expect(c2.context.join(" | ")).toContain("0 undeclared-lane, 1 subset (E4)");
+    expect(c2.context.join(" | ")).toContain("over 7 settled edge(s)");
     expect(c2.findings.map((finding) => finding.note).join(" | ")).toContain(
       "is not on that endpoint turn itself",
     );
+    // The context line no longer promises an unparseable-tags escape hatch:
+    // the cutover made that state unstorable.
+    expect(c2.context.join(" | ")).toContain(
+      "every endpoint's tags are a JSON array of strings, so every side gets a verdict",
+    );
+    expect(c2.context.join(" | ")).not.toContain("unparseable");
   });
 });
 
@@ -347,10 +319,13 @@ describe("every finding carries its source address and BOTH side LaneKeys", () =
     const fixture = seedFixture();
     const c2 = control(report(), "C2");
 
-    const undeclared = c2.findings.find((entry) => entry.note.includes("not DECLARED"))!;
-    expect(undeclared.address).toMatch(/^S\d+\/T2 --narrows--> S\d+\/T1$/);
-    expect(undeclared.tailLane).toBe(`E${fixture.segmentA}:{drafting}`);
-    expect(undeclared.headLane).toBe(`E${fixture.segmentA}:{ownership}`);
+    // The UNDECLARED case this used to read (E6, `T2 --correct(partial)--> T1`) was a
+    // second row on E1's pair and went with the cutover; the SUBSET case is
+    // the finding the fixture still carries, and it names the same two fields.
+    const subset = c2.findings.find((entry) => entry.note.includes("not on that endpoint turn"))!;
+    expect(subset.address).toMatch(/^S\d+\/T6 --use--> S\d+\/T1$/);
+    expect(subset.tailLane).toBe(`E${fixture.segmentA}:{ownership}`);
+    expect(subset.headLane).toBe(`E${fixture.segmentA}:{ownership}`);
   });
 
   test("no control anywhere emits a finding missing an address or a side", () => {
@@ -373,7 +348,7 @@ describe("every finding carries its source address and BOTH side LaneKeys", () =
 
     expect(text).toMatch(
       new RegExp(
-        `tail E${fixture.segmentA}:\\{drafting\\}  head E${fixture.segmentA}:\\{ownership\\}`,
+        `tail E${fixture.segmentA}:\\{ownership\\}  head E${fixture.segmentA}:\\{ownership\\}`,
       ),
     );
   });
@@ -408,15 +383,29 @@ describe("a PRE-MIGRATION database reports why, never a zero", () => {
 });
 
 describe("the control domain honours the loader's own two laws", () => {
-  test("an endpoint whose stored tags are UNPARSEABLE yields no subset verdict for its side", () => {
-    seedFixture();
-    const built = report();
+  // REPLACES "an endpoint whose stored tags are UNPARSEABLE yields no subset
+  // verdict for its side". That arm of the loader is unreachable after the
+  // main-agent-edges cutover: transform 1 normalised every malformed value and
+  // the `turns` trigger refuses a new one, so the fixture cannot be built. What
+  // stands in its place is the refusal, plus the count it used to guard.
+  test("an unparseable tags value cannot be stored at all, and E10 is an ordinary clean row", () => {
+    const fixture = seedFixture();
+    const writable = new Database(dbPath);
+    try {
+      expect(() =>
+        writable
+          .query<unknown, [number]>(
+            `UPDATE turns SET tags = '{"not":"an array"}' WHERE id = ?`,
+          )
+          .run(fixture.turns.T10!),
+      ).toThrow(/turns\.tags must be a JSON array of strings/);
+    } finally {
+      writable.close();
+    }
 
-    // E10's tail names `ownership` — declared in segment A, so no declaration
-    // violation — and T10's tags cannot be read, so the subset half issues no
-    // verdict at all. Two violations, not three.
+    const built = report();
     const c2 = control(built, "C2");
-    expect(c2.measured).toBe(2);
+    expect(c2.measured).toBe(1);
     expect(c2.findings.every((finding) => !finding.address.includes("/T10 "))).toBe(true);
   });
 
@@ -425,8 +414,9 @@ describe("the control domain honours the loader's own two laws", () => {
     const built = report();
     const text = renderLaneControlsReport(built);
 
-    // 12 edges written, E11's citing turn is dormant -> 11 in the domain.
-    expect(built.edgeCount).toBe(11);
+    // 11 edges written (E6 went at the cutover), E11's citing turn is dormant
+    // -> 10 in the domain.
+    expect(built.edgeCount).toBe(10);
     expect(text).not.toContain(`S${fixture.sessionId}/T11`);
   });
 });

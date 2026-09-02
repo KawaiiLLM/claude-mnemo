@@ -330,9 +330,9 @@ describe("capture repairs", () => {
     function seedCitations(turnId: number, neighbourId: number): void {
       db.query(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', 700),
-                ('turn', ?, 'turn', ?, 'verifies', 'judged', 701)`,
+           (citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, 'use', 'judged', 700),
+                ('turn', ?, 'turn', ?, 'verify', 'judged', 701)`,
       ).run(turnId, neighbourId, neighbourId, turnId);
     }
 

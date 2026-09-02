@@ -12,7 +12,6 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
 import { DEFAULT_SEGMENT, laneToken } from "../../src/shared/lane-interpretation";
-import { interimLegacyRelation } from "../../src/shared/relation-class";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 import {
   createConsoleReader,
@@ -43,6 +42,7 @@ import {
   type ConsoleRequestContext,
 } from "../../src/worker/console-api";
 import { laneEdge, resolveLaneEdges } from "../support/lane-edge-fixtures";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The `/api/console/*` route handlers (memory-console spec API Contract;
@@ -847,7 +847,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
         { id: 1, type: ["design"], order: [0, 1], segment: "E1" },
         { id: 2, type: ["implement"], order: [0, 2], segment: "E1" },
       ],
-      edges: [{ citingId: 2, citedId: 1, relation: "indexes", tags: ["focus"] }],
+      edges: [{ citingId: 2, citedId: 1, relation: "use", ...wordEdgeClass("indexes"), tags: ["focus"] }],
       result: {
         ...emptyLaneCheckRun().result,
         lanes: [
@@ -1011,7 +1011,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
           {
             citingId: 2,
             citedId: 1,
-            relation: "override",
+            relation: "correct(full)", ...wordEdgeClass("override"),
             relationClass: "correct",
             relationCoverage: "full",
             tags: ["focus"],
@@ -1019,7 +1019,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
           {
             citingId: 2,
             citedId: 1,
-            relation: "extends",
+            relation: "use", ...wordEdgeClass("extends"),
             relationClass: "use",
             relationCoverage: "",
             tags: [],
@@ -1027,7 +1027,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
           {
             citingId: 3,
             citedId: 1,
-            relation: "verifies",
+            relation: "verify", ...wordEdgeClass("verifies"),
             relationClass: "verify",
             relationCoverage: "",
             tags: [],
@@ -1080,7 +1080,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
           {
             citingId: 2,
             citedId: 1,
-            relation: "verifies",
+            relation: "verify", ...wordEdgeClass("verifies"),
             relationClass: "verify",
             relationCoverage: "",
             tailTag: "focus",
@@ -1166,11 +1166,11 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
         { id: 20, type: ["correction"], order: [0, 20], segment: "E1" },
       ],
       edges: [
-        { citingId: 10, citedId: 1, relation: "indexes", tags: ["a"] },
-        { citingId: 10, citedId: 2, relation: "indexes", tags: ["b"] },
-        { citingId: 10, citedId: 3, relation: "indexes", tags: ["c"] },
-        { citingId: 20, citedId: 10, relation: "override", tags: ["a"] },
-        { citingId: 20, citedId: 10, relation: "indexes", tags: ["a"] },
+        { citingId: 10, citedId: 1, relation: "use", ...wordEdgeClass("indexes"), tags: ["a"] },
+        { citingId: 10, citedId: 2, relation: "use", ...wordEdgeClass("indexes"), tags: ["b"] },
+        { citingId: 10, citedId: 3, relation: "use", ...wordEdgeClass("indexes"), tags: ["c"] },
+        { citingId: 20, citedId: 10, relation: "correct(full)", ...wordEdgeClass("override"), tags: ["a"] },
+        { citingId: 20, citedId: 10, relation: "use", ...wordEdgeClass("indexes"), tags: ["a"] },
       ],
       result: {
         ...emptyLaneCheckRun().result,
@@ -1277,7 +1277,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     return Array.from({ length: n }, (_, i) => ({
       citingId: (i % turnCount) + 1,
       citedId: ((i + 1) % turnCount) + 1,
-      relation: "consume",
+      relation: "use", ...wordEdgeClass("consume"),
       tags: [] as string[],
     }));
   }
@@ -1355,7 +1355,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     const edges: { citingId: number; citedId: number; relation: string; tags: string[] }[] = [];
     for (let citing = 2; citing <= turnCount; citing += 1) {
       for (let cited = 1; cited < citing; cited += 1) {
-        edges.push({ citingId: citing, citedId: cited, relation: "consume", tags: [] });
+        edges.push({ citingId: citing, citedId: cited, relation: "use", ...wordEdgeClass("consume"), tags: [] });
       }
     }
     expect(edges.length).toBeGreaterThan(GRAPH_EDGE_MAX);
@@ -1411,13 +1411,13 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     const realEdges = Array.from({ length: 500 }, (_, i) => ({
       citingId: REAL_BASE + (i % 5),
       citedId: REAL_BASE + ((i + 1) % 5),
-      relation: "consume",
+      relation: "use", ...wordEdgeClass("consume"),
       tags: [] as string[],
     }));
     const fillerEdges = Array.from({ length: 10_005 }, (_, i) => ({
       citingId: i + 1,
       citedId: i + 2,
-      relation: "consume",
+      relation: "use", ...wordEdgeClass("consume"),
       tags: [] as string[],
     }));
     const edges = [...fillerEdges, ...realEdges];
@@ -1458,7 +1458,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     const ringEdges = Array.from({ length: 500 }, (_, i) => ({
       citingId: (i % 5) + 1,
       citedId: ((i + 1) % 5) + 1,
-      relation: "extends",
+      relation: "use", ...wordEdgeClass("extends"),
       relationClass: "use" as const,
       relationCoverage: "" as const,
       tags: [] as string[],
@@ -1466,7 +1466,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     const selfEdge = {
       citingId: 5,
       citedId: 5,
-      relation: "override",
+      relation: "correct(full)", ...wordEdgeClass("override"),
       relationClass: "correct" as const,
       relationCoverage: "full" as const,
       tags: [] as string[],
@@ -1757,7 +1757,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     // citingId=1 is the OLDEST turn — exactly the one the newest-first trim
     // now drops (the reverse of this test's pre-ticket-03 shape, where the
     // oldest-first trim dropped the NEWEST turn, WIDEN_NODE_MAX+1, instead).
-    const danglingEdge = { citingId: 1, citedId: WIDEN_NODE_MAX + 1, relation: "consume", tags: [] as string[] };
+    const danglingEdge = { citingId: 1, citedId: WIDEN_NODE_MAX + 1, relation: "use", ...wordEdgeClass("consume"), tags: [] as string[] };
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       getSessionMaxPromptNumber: () => 1,
@@ -1905,7 +1905,11 @@ describe("single-source pin — T900-1001 fixture", () => {
       fixture.edges.map((edge) => ({
         citing: { kind: "turn", id: edge.citingId },
         cited: { kind: "turn", id: edge.citedId },
-        relation: edge.relation as never,
+        // lane-model-v12 ticket 03 merged `refutes` into `override` and rewrote the
+        // stored rows; this fixture is a snapshot taken BEFORE that migration, so it
+        // is applied here, exactly as `tests/shared/lane-checker.test.ts` applies it
+        // to the same corpus.
+        ...wordEdgeClass(edge.relation === "refutes" ? "override" : edge.relation),
         provenance: "asserted",
         ...deriveSideTags(edge.tags),
       })),
@@ -2358,7 +2362,6 @@ describe("GET /api/console/graph — three classes, both coverages, all five att
         {
           citing: { kind: "turn", id: 2 },
           cited: { kind: "turn", id: 1 },
-          relation: interimLegacyRelation("correct", "full"),
           relationClass: "correct",
           relationCoverage: "full",
           provenance: "asserted",
@@ -2370,7 +2373,6 @@ describe("GET /api/console/graph — three classes, both coverages, all five att
         {
           citing: { kind: "turn", id: 5 },
           cited: { kind: "turn", id: 3 },
-          relation: interimLegacyRelation("correct", "partial"),
           relationClass: "correct",
           relationCoverage: "partial",
           provenance: "asserted",
@@ -2383,7 +2385,6 @@ describe("GET /api/console/graph — three classes, both coverages, all five att
         {
           citing: { kind: "turn", id: 6 },
           cited: { kind: "turn", id: 4 },
-          relation: interimLegacyRelation("verify", ""),
           relationClass: "verify",
           relationCoverage: "",
           provenance: "asserted",
@@ -2394,7 +2395,6 @@ describe("GET /api/console/graph — three classes, both coverages, all five att
         {
           citing: { kind: "turn", id: 4 },
           cited: { kind: "turn", id: 1 },
-          relation: interimLegacyRelation("use", ""),
           relationClass: "use",
           relationCoverage: "",
           provenance: "asserted",

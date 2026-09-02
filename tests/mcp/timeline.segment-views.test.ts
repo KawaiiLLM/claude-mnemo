@@ -13,6 +13,7 @@ import {
   renderSegmentTimeline,
   timelineQuery,
 } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * `timeline(id="E<n>")` addressing a segment directly, in both views, plus
@@ -183,7 +184,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             citing: { kind: "turn", id: t2 },
             cited: { kind: "turn", id: t1 },
-            relation: "override",
+            ...wordEdgeClass("override"),
             provenance: "judged",
           },
         ],
@@ -200,7 +201,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       expect(output).not.toContain("user prompt text");
       // `↳` carries antecedent ADDRESSES now (spec 金样例 `↳ T811, T812`) —
       // never a `+N 前件` count, and never a titled sub-row.
-      expect(output).toContain("            ↳ -override-> T1");
+      expect(output).toContain("            ↳ -correct(full)-> T1");
       expect(output).not.toContain("前件");
 
       // No flag either: `⚑` marked an outgoing `supersedes`, a word that no
@@ -270,13 +271,13 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             citing: { kind: "turn", id: overrider },
             cited: { kind: "turn", id: overridden },
-            relation: "override",
+            ...wordEdgeClass("override"),
             provenance: "judged",
           },
           {
             citing: { kind: "turn", id: encoder },
             cited: { kind: "turn", id: overridden },
-            relation: "grounds",
+            ...wordEdgeClass("grounds"),
             provenance: "judged",
           },
         ],
@@ -313,9 +314,9 @@ describe("timeline(id=\"E<n>\") segment views", () => {
       writeMemoryEdges(
         db,
         [
-          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: strong }, relation: "grounds", provenance: "judged" },
-          { citing: { kind: "turn", id: c2 }, cited: { kind: "turn", id: strong }, relation: "verifies", provenance: "judged" },
-          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: weak }, relation: "grounds", provenance: "judged" },
+          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: strong }, ...wordEdgeClass("grounds"), provenance: "judged" },
+          { citing: { kind: "turn", id: c2 }, cited: { kind: "turn", id: strong }, ...wordEdgeClass("verifies"), provenance: "judged" },
+          { citing: { kind: "turn", id: c1 }, cited: { kind: "turn", id: weak }, ...wordEdgeClass("grounds"), provenance: "judged" },
         ],
         CUTOFF,
       );
@@ -422,7 +423,7 @@ describe("timeline(id=\"E<n>\") segment views", () => {
           {
             citing: { kind: "turn", id: encoder },
             cited: { kind: "turn", id: rewound },
-            relation: "grounds",
+            ...wordEdgeClass("grounds"),
             provenance: "judged",
           },
         ],
@@ -663,8 +664,8 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, relation: "consume", provenance: "judged" },
-        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, relation: "consume", provenance: "judged" },
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t811 }, ...wordEdgeClass("consume"), provenance: "judged" },
+        { citing: { kind: "turn", id: t821 }, cited: { kind: "turn", id: t812 }, ...wordEdgeClass("consume"), provenance: "judged" },
       ],
       t821Epoch,
     );
@@ -684,7 +685,7 @@ describe("golden sample (ticket 05, .scratch/view-render-repair/05-timeline-one-
         `[E${segment.id}] title`,
         `    S${sessionA}`,
         "        T821 08-17 ⚖️ title",
-        "            ↳ -consume-> T811, -consume-> T812",
+        "            ↳ -use-> T811, -use-> T812",
         "        T822 08-17 ⚖️ title",
         `    S${sessionB}`,
         "        T21 08-18 ⚖️ title",

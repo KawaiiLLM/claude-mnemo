@@ -16,7 +16,6 @@ import {
 } from "../db/citations";
 import {
   isRelationClass,
-  retiredRelationFieldRefusal,
   type RelationClass,
 } from "../shared/relation-class";
 import { runWriteTransaction } from "../db/database";
@@ -937,14 +936,6 @@ function handleTurnWrite(
       (input as Record<string, unknown>)[field] !== undefined ||
       isFieldEditMode(modeMap[field]),
   );
-  // relation-vocabulary-v13 ticket 02: BEFORE the entry gate, because a call
-  // carrying only `override: [...]` would otherwise be told "no field is
-  // present" — true of the new vocabulary and useless to a caller working from
-  // the old one. Named with its replacement so the fix is one round trip.
-  const retiredRelations = retiredRelationFieldRefusal(input as Record<string, unknown>);
-  if (retiredRelations) {
-    return parameterError(retiredRelations);
-  }
   // Ticket 02 (edge-mechanism-revision D1): an edge parameter alone is a
   // complete call. The entry gate exists to refuse a call that would do
   // NOTHING, and a pure relation or retraction call does plenty — it just

@@ -23,6 +23,8 @@ import {
   resolveTranscriptPath,
 } from "../../src/shared/paths";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeToPreCutoverShape } from "../support/pre-cutover-edge-shape";
 
 describe("initializeSchema", () => {
   let db: Database;
@@ -1094,7 +1096,10 @@ describe("initializeSchema", () => {
       )
       .all()
       .map((row) => row.name);
-    expect(indexNames).toContain("idx_memory_edges_cited");
+    // The cutover replaced `idx_memory_edges_cited` (keyed on the dropped
+    // `relation` column) with a node-keyed one.
+    expect(indexNames).toContain("idx_memory_edges_cited_node");
+    expect(indexNames).not.toContain("idx_memory_edges_cited");
 
     const columns = db
       .query<{ name: string }, []>("PRAGMA table_info(turns)")
@@ -1178,16 +1183,19 @@ describe("initializeSchema", () => {
         // The legacy row survived the retirement, relation intact — it was
         // already legal in the new four-value vocabulary.
         const edge = migrated
-          .query<{ relation: string | null }, [number, number]>(
-            `SELECT relation FROM memory_edges
+          .query<{ relationClass: string; relationCoverage: string }, [number, number]>(
+            `SELECT relation_class AS relationClass, relation_coverage AS relationCoverage
+             FROM memory_edges
              WHERE citing_kind = 'turn' AND citing_id = ?
                AND cited_kind = 'turn' AND cited_id = ?`,
           )
           .get(citerId, citedId);
-        // lane-model-v12 ticket 03: the legacy fold remaps `supersedes` onto
-        // `override` on the way in — the narrowed CHECK the fold lands into no
-        // longer admits the old word (`remapLegacyRelation`).
-        expect(edge?.relation).toBe("override");
+        // lane-model-v12 ticket 03 remapped `supersedes` onto `override` on
+        // the way in; the v13 backfill then classified it and the
+        // main-agent-edges cutover dropped the word column, so the class pair
+        // is what the folded row says about itself.
+        expect(edge?.relationClass).toBe("correct");
+        expect(edge?.relationCoverage).toBe("full");
 
         // End to end after the retirement: the folded-in edge and the prose
         // name the same pair, so the union resolves to one id backed by one
@@ -1200,7 +1208,7 @@ describe("initializeSchema", () => {
             {
               citingTurnId: citerId,
               citedTurnId: citedId,
-              relation: "override",
+              relationClass: "correct",
               createdAtEpoch: 4,
             },
           ],
@@ -1768,7 +1776,7 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         {
           citing: { kind: "turn", id: discoveryId },
           cited: { kind: "turn", id: compactId },
-          relation: "consume",
+          ...wordEdgeClass("consume"),
           provenance: "asserted",
         },
       ],
@@ -2487,10 +2495,13 @@ describe("topic: words survive a schema reopen (staged-settlement ticket 01)", (
       completedAtEpoch: null,
     }).id;
 
-    // `tags` has no CHECK constraint, so raw SQL can store non-JSON text. The
-    // migration that used to guard against it is gone; every OTHER bulk
-    // rewriter of this column carries the same guard, and this test is what
-    // keeps the whole init chain honest about it.
+    // A malformed `tags` value can no longer be written on a CURRENT database
+    // (the main-agent-edges cutover's trigger refuses it), but a database
+    // opened for the FIRST time by this build can still be carrying one — that
+    // is exactly the stock transform 1 normalises. The fixture therefore puts
+    // the column back into its pre-cutover shape, writes the bad value, and
+    // then asserts the open survives it.
+    downgradeToPreCutoverShape(db);
     const malformedId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
@@ -2514,7 +2525,10 @@ describe("topic: words survive a schema reopen (staged-settlement ticket 01)", (
           "SELECT tags FROM turns WHERE id = ?",
         )
         .get(malformedId)!.tags,
-    ).toBe("{not valid json");
+      // NORMALISED, not preserved: transform 1 rewrites an unreadable value to
+      // `'[]'` and the trigger then keeps it that way. The pre-cutover
+      // expectation was "left alone"; the invariant replaced it.
+    ).toBe("[]");
     expect(tagsOf(db, wellFormedId)).toEqual(["topic:reopen"]);
 
     db.close();

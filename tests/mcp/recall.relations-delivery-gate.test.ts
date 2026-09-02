@@ -11,6 +11,7 @@ import {
   stampTurnRelationsRevision,
 } from "../../src/db/write-gate";
 import { recallMemory } from "../../src/mcp/recall";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Settlement-read-once ticket 00, spec D0 — DELIVERED, NOT DELIVERED WHOLE
@@ -84,7 +85,7 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "extends" as never,
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             tailTag: "",
             headTag: "",

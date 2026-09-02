@@ -166,9 +166,9 @@ function seedOutgoingRelation(db: Database, citingTurnId: number, citedTurnId: n
   db.query<unknown, [number, number, number]>(
     `INSERT INTO memory_edges (
        citing_kind, citing_id, cited_kind, cited_id,
-       relation, provenance, tail_tag, head_tag,
+       provenance, tail_tag, head_tag,
        relation_class, relation_coverage, created_at_epoch
-     ) VALUES ('turn', ?, 'turn', ?, 'consume', 'asserted', '', '', 'use', '', ?)`,
+     ) VALUES ('turn', ?, 'turn', ?, 'asserted', '', '', 'use', '', ?)`,
   ).run(citingTurnId, citedTurnId, NOW - 5_000);
 }
 

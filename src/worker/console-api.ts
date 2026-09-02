@@ -1639,11 +1639,8 @@ export function handleGraphRoute(
   };
   const edgesPayload: ConsoleGraphEdge[] = sortEdgesForDisplay(
     run.edges.map((edge) => {
-      // `edgeRelationClass` is the ONE accessor (shared/relation-class.ts): a
-      // row with the stored class answers from it, a pre-v13 row answers
-      // through the legacy word table, and this route never spells either.
+      // `edgeRelationClass` is the ONE accessor (shared/relation-class.ts).
       const resolved = edgeRelationClass({
-        relation: edge.relation,
         relationClass: edge.relationClass ?? NO_RELATION_CLASS,
         relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE,
       });

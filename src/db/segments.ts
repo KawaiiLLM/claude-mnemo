@@ -22,7 +22,13 @@ import {
   type TagNamespaceHolder,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
-import { relationClassBearingSql } from "../shared/relation-class";
+import { readTurnTags } from "./turn-tags";
+import {
+  displayEdgeRelation,
+  relationClassBearingSql,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import { ANONYMOUS_WRITER, stampField } from "./write-gate";
 import { eraVisibleMemberSqlClause } from "../segment-era";
 import {
@@ -270,7 +276,7 @@ function mapSegmentRow(row: SegmentRow | null): SegmentRecord | null {
     ? {
         ...row,
         type: parseStringArray(row.type) as MemoryType[],
-        tags: parseStringArray(row.tags),
+        tags: readTurnTags(row.tags),
       }
     : null;
 }
@@ -769,7 +775,7 @@ export function checkSegmentMembershipTagGate(
   const violations: SegmentMembershipGateViolation[] = [];
   for (const turnId of turnIds) {
     const row = byId.get(turnId);
-    const turnTags = new Set(row ? parseMemberFacetArray(row.tags) : []);
+    const turnTags = new Set(row ? readTurnTags(row.tags) : []);
     const missingTags = segmentTags.filter((tag) => !turnTags.has(tag));
     if (missingTags.length > 0) {
       violations.push({
@@ -1340,16 +1346,7 @@ export function writeMembershipTags(
   const changedTurnIds: number[] = [];
   const membership: Array<{ turnId: number; segmentId: number | null }> = [];
   for (const write of writes) {
-    const raw = readTags.get(write.turnId)?.tags ?? "[]";
-    let stored: string[];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      stored = Array.isArray(parsed)
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : [];
-    } catch {
-      stored = [];
-    }
+    const stored = readTurnTags(readTags.get(write.turnId)?.tags ?? null);
     const next = [...write.tags];
     const moved =
       next.length !== stored.length || next.some((value, at) => value !== stored[at]);
@@ -1653,6 +1650,7 @@ export function addSegmentMembers(
 export interface MembershipLaneStranding {
   citingTurnId: number;
   citedTurnId: number;
+  /** The class token — a label for the refusal text. */
   relation: string;
   tag: string;
   /** Which endpoint loses its declaration. */
@@ -1664,7 +1662,8 @@ export interface MembershipLaneStranding {
 interface IncidentTaggedEdgeRow {
   citingId: number;
   citedId: number;
-  relation: string;
+  relationClass: RelationClassValue;
+  relationCoverage: RelationCoverageValue;
   /** `memory_edges.tail_tag` — the CITING side's lane, `''` unsettled. */
   tailTag: string;
   /** `memory_edges.head_tag` — the CITED side's lane, `''` unsettled. */
@@ -1708,7 +1707,8 @@ export function findMembershipLaneStrandings(
   const placeholders = ids.map(() => "?").join(",");
   const edges = db
     .query<IncidentTaggedEdgeRow, number[]>(
-      `SELECT citing_id AS citingId, cited_id AS citedId, relation,
+      `SELECT citing_id AS citingId, cited_id AS citedId,
+              relation_class AS relationClass, relation_coverage AS relationCoverage,
               tail_tag AS tailTag, head_tag AS headTag
          FROM memory_edges
         WHERE citing_kind = 'turn' AND cited_kind = 'turn'
@@ -1781,7 +1781,7 @@ export function findMembershipLaneStrandings(
       strandings.push({
         citingTurnId: edge.citingId,
         citedTurnId: edge.citedId,
-        relation: edge.relation,
+        relation: displayEdgeRelation(edge),
         tag: side.tag,
         endpoint: side.endpoint,
         segmentIdAfter: after,
@@ -2323,16 +2323,7 @@ export function clearSegmentMembers(db: Database, segmentId: number, nowEpoch: n
   );
   const writes: MembershipTagWrite[] = [];
   for (const turnId of memberTurnIds) {
-    const raw = readTags.get(turnId)?.tags ?? "[]";
-    let stored: string[];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      stored = Array.isArray(parsed)
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : [];
-    } catch {
-      stored = [];
-    }
+    const stored = readTurnTags(readTags.get(turnId)?.tags ?? null);
     writes.push({
       turnId,
       tags: ownTag !== null ? stored.filter((value) => value !== ownTag) : stored,
@@ -2773,16 +2764,7 @@ export function mergeSegments(
     );
     const writes: MembershipTagWrite[] = [];
     for (const turnId of memberTurnIds) {
-      const raw = readTags.get(turnId)?.tags ?? "[]";
-      let stored: string[];
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        stored = Array.isArray(parsed)
-          ? parsed.filter((value): value is string => typeof value === "string")
-          : [];
-      } catch {
-        stored = [];
-      }
+      const stored = readTurnTags(readTags.get(turnId)?.tags ?? null);
       let next = stored.filter((value) => value !== fromTag);
       if (intoTag !== null && !next.includes(intoTag)) {
         // Prepended, not appended — the segment's own tag leads the array in
@@ -3313,7 +3295,7 @@ export function computeSegmentMemberFacetCounts(
     for (const word of new Set(parseMemberFacetArray(member.type))) {
       typeCounts.set(word, (typeCounts.get(word) ?? 0) + 1);
     }
-    for (const tag of new Set(parseMemberFacetArray(member.tags))) {
+    for (const tag of new Set(readTurnTags(member.tags))) {
       if (tag.includes(":") || tag.trim() === "") {
         continue;
       }

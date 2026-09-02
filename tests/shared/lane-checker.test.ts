@@ -269,7 +269,7 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     // tags for E4 to judge, and E4 stays silent on all of them.
     expect(fixtureEdges.some((e) => e.tailTag !== "" || e.headTag !== "")).toBe(true);
     expect(fixtureTurns.every((t) => (t.tags ?? []).length >= 0)).toBe(true);
-    expect(fixtureEdges.some((e) => e.relation === "extends" || e.relation === "narrows")).toBe(true);
+    expect(fixtureEdges.some((e) => e.relation === "use" || e.relation === "correct(partial)")).toBe(true);
   });
 
   test("the golden fixture enumerates 12 real lanes, and no error class judges their shape", () => {
@@ -279,12 +279,12 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
     }
     expect(
       fixtureEdges.some(
-        (e) => e.relation === "override" && (e.tailTag !== "" || e.headTag !== ""),
+        (e) => e.relation === "correct(full)" && (e.tailTag !== "" || e.headTag !== ""),
       ),
     ).toBe(true);
     expect(
       fixtureEdges.some(
-        (e) => e.relation === "indexes" && (e.tailTag !== "" || e.headTag !== ""),
+        (e) => e.relation === "use" && (e.tailTag !== "" || e.headTag !== ""),
       ),
     ).toBe(true);
   });
@@ -597,7 +597,7 @@ describe("report 4b — structural bypass candidates over the SEGMENT's whole gr
         segment: DEFAULT_SEGMENT,
         citingId: 3,
         citedId: 1,
-        relations: ["grounds"],
+        relations: ["use"],
         alternativePath: [3, 2, 1],
       },
     ]);
@@ -619,7 +619,7 @@ describe("report 4b — structural bypass candidates over the SEGMENT's whole gr
       "segment",
     ]);
     const text = renderLaneCheckerReports(result);
-    expect(text).toContain("T3 -> T1 (grounds) -- also joined by T3 -> T2 -> T1");
+    expect(text).toContain("T3 -> T1 (use) -- also joined by T3 -> T2 -> T1");
     for (const verdict of ["redundant", "delete", "remove", "drop this"]) {
       expect(text.toLowerCase()).not.toContain(verdict);
     }
@@ -689,16 +689,21 @@ describe("report 4b — structural bypass candidates over the SEGMENT's whole gr
     expect(directIndexes.bypassCandidates.map((c) => [c.citingId, c.citedId])).toEqual([[3, 1]]);
   });
 
-  test("parallel relation words on ONE pair are ONE candidate carrying every word", () => {
+  // Parallel rows on one pair are stock the main-agent-edges cutover forbids
+  // (the rebuilt `memory_edges` is UNIQUE on `(citing, cited)`), but the
+  // checker is a PURE function over whatever rows it is handed, and its
+  // candidate is keyed by PAIR: two rows collapse to one candidate that names
+  // every class present, and never to two candidates.
+  test("parallel rows on ONE pair are ONE candidate carrying every class", () => {
     const turns = [design(1), design(2), design(3)];
     const result = checkLanes(turns, [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
       edge(3, "grounds", 1),
-      edge(3, "consume", 1),
+      edge(3, "override", 1),
     ]);
     expect(result.bypassCandidates).toHaveLength(1);
-    expect(result.bypassCandidates[0]!.relations).toEqual(["consume", "grounds"]);
+    expect(result.bypassCandidates[0]!.relations).toEqual(["correct(full)", "use"]);
   });
 
   test("the alternative is the SHORTEST route, and equal-length routes break on the smaller next hop", () => {
@@ -1027,7 +1032,7 @@ describe("report 4c — time-order violations", () => {
     const turns = [turnAt(1, [1, 2]), turnAt(2, [1, 9])];
     const edges = [edge(1, "extends", 2, ["x"])]; // citing prompt 2 < cited prompt 9
     const result = checkLanes(turns, edges);
-    expect(result.timeOrderViolations).toEqual([{ citingId: 1, citedId: 2, relation: "extends", tags: ["x"] }]);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 1, citedId: 2, relation: "use", tags: ["x"] }]);
   });
 
   test("a same-session edge where citing strictly postdates cited passes", () => {
@@ -1045,7 +1050,7 @@ describe("report 4c — time-order violations", () => {
     const turns = [turnAt(10, [5, 1], 2000), turnAt(11, [3, 100], 5000)];
     const edges = [edge(10, "grounds", 11, [])];
     const result = checkLanes(turns, edges);
-    expect(result.timeOrderViolations).toEqual([{ citingId: 10, citedId: 11, relation: "grounds", tags: [] }]);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 10, citedId: 11, relation: "use", tags: [] }]);
   });
 
   test("a cross-session pair with EQUAL epoch passes — ties pass", () => {
@@ -1065,10 +1070,10 @@ describe("report 4c — time-order violations", () => {
     expect(result.timeOrderViolations).toEqual([]);
   });
 
-  test("all seven relation words are checked — aggregation (indexes) included, not just stance/consume/grounds", () => {
+  test("every class is checked — a `use` row from the aggregation word included, not just corrections", () => {
     const turns = [turnAt(50, [1, 1]), turnAt(51, [1, 9])];
     const result = checkLanes(turns, [edge(50, "indexes", 51, [])]);
-    expect(result.timeOrderViolations).toEqual([{ citingId: 50, citedId: 51, relation: "indexes", tags: [] }]);
+    expect(result.timeOrderViolations).toEqual([{ citingId: 50, citedId: 51, relation: "use", tags: [] }]);
   });
 
   test("a turn missing order/epoch data yields no judgement for edges touching it — never a fabricated verdict", () => {
@@ -1226,26 +1231,26 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     "",
     "## Report 4b -- structural bypass candidates (a direct edge and a longer route between the same two turns; which to keep depends on what each contributes, so nothing here is marked for deletion)",
     "21 candidate(s) (showing first 20):",
-    "  T913 -> T900 (indexes) -- also joined by T913 -> T910 -> T900",
-    "  T913 -> T910 (indexes) -- also joined by T913 -> T912 -> T910",
-    "  T922 -> T919 (indexes) -- also joined by T922 -> T921 -> T920 -> T919",
-    "  T929 -> T926 (indexes) -- also joined by T929 -> T927 -> T926",
-    "  T939 -> T935 (indexes) -- also joined by T939 -> T937 -> T935",
-    "  T939 -> T937 (indexes) -- also joined by T939 -> T938 -> T937",
-    "  T942 -> T930 (consume) -- also joined by T942 -> T935 -> T933 -> T932 -> T930",
-    "  T959 -> T954 (grounds) -- also joined by T959 -> T958 -> T957 -> T955 -> T954",
-    "  T965 -> T959 (grounds) -- also joined by T965 -> T962 -> T961 -> T960 -> T959",
-    "  T974 -> T958 (grounds) -- also joined by T974 -> T972 -> T970 -> T966 -> T965 -> T959 -> T958",
-    "  T981 -> T978 (indexes) -- also joined by T981 -> T979 -> T978",
-    "  T984 -> T982 (indexes) -- also joined by T984 -> T983 -> T982",
-    "  T998 -> T945 (indexes) -- also joined by T998 -> T946 -> T945",
-    "  T998 -> T946 (indexes) -- also joined by T998 -> T949 -> T948 -> T947 -> T946",
-    "  T998 -> T970 (indexes) -- also joined by T998 -> T972 -> T970",
-    "  T998 -> T972 (indexes) -- also joined by T998 -> T974 -> T972",
-    "  T998 -> T982 (indexes) -- also joined by T998 -> T984 -> T982",
-    "  T998 -> T989 (indexes) -- also joined by T998 -> T992 -> T989",
-    "  T998 -> T992 (indexes) -- also joined by T998 -> T996 -> T992",
-    "  T1001 -> T998 (consume) -- also joined by T1001 -> T999 -> T998",
+    "  T913 -> T900 (use) -- also joined by T913 -> T910 -> T900",
+    "  T913 -> T910 (use) -- also joined by T913 -> T912 -> T910",
+    "  T922 -> T919 (use) -- also joined by T922 -> T921 -> T920 -> T919",
+    "  T929 -> T926 (use) -- also joined by T929 -> T927 -> T926",
+    "  T939 -> T935 (use) -- also joined by T939 -> T937 -> T935",
+    "  T939 -> T937 (use) -- also joined by T939 -> T938 -> T937",
+    "  T942 -> T930 (use) -- also joined by T942 -> T935 -> T933 -> T932 -> T930",
+    "  T959 -> T954 (use) -- also joined by T959 -> T958 -> T957 -> T955 -> T954",
+    "  T965 -> T959 (use) -- also joined by T965 -> T962 -> T961 -> T960 -> T959",
+    "  T974 -> T958 (use) -- also joined by T974 -> T972 -> T970 -> T966 -> T965 -> T959 -> T958",
+    "  T981 -> T978 (use) -- also joined by T981 -> T979 -> T978",
+    "  T984 -> T982 (use) -- also joined by T984 -> T983 -> T982",
+    "  T998 -> T945 (use) -- also joined by T998 -> T946 -> T945",
+    "  T998 -> T946 (use) -- also joined by T998 -> T949 -> T948 -> T947 -> T946",
+    "  T998 -> T970 (use) -- also joined by T998 -> T972 -> T970",
+    "  T998 -> T972 (use) -- also joined by T998 -> T974 -> T972",
+    "  T998 -> T982 (use) -- also joined by T998 -> T984 -> T982",
+    "  T998 -> T989 (use) -- also joined by T998 -> T992 -> T989",
+    "  T998 -> T992 (use) -- also joined by T998 -> T996 -> T992",
+    "  T1001 -> T998 (use) -- also joined by T1001 -> T999 -> T998",
     "",
     "## Report 4c -- time-order violations (the DAG guarantee)",
     "(none)",
@@ -1282,7 +1287,7 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
         "1 error(s)\n",
     )).toBe(true);
     expect(text).toContain(
-      "  [E6] anchor T902 -- T902 --consume--> T900: DRAFT edge -- the head side names no lane (the tail side is {})",
+      "  [E6] anchor T902 -- T902 --use--> T900: DRAFT edge -- the head side names no lane (the tail side is {})",
     );
     expect(text).not.toContain("[E3]");
     expect(text).not.toContain("[E4]");
@@ -1429,7 +1434,7 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
         anchorId: 141,
         citingId: 141,
         citedId: 140,
-        relation: "extends",
+        relation: "use",
         tags: ["b"],
         missing: [{ tag: "b", endpoint: "cited" }],
       },
@@ -1537,7 +1542,7 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
         anchorId: 501,
         citingId: 501,
         citedId: 500,
-        relation: "consume",
+        relation: "use",
         tags: [],
         unsettledSides: ["tail", "head"],
       },
@@ -1855,7 +1860,7 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
       anchorId: 2,
       citingId: 2,
       citedId: 1,
-      relation: "extends",
+      relation: "use",
       tags: ["x"],
       unsettledSides: ["head"],
     });

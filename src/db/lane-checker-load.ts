@@ -15,8 +15,12 @@ import {
   type LaneKey,
   type LaneOrderKey,
 } from "../shared/lane-interpretation";
-import { EDGE_RELATIONS } from "../shared/turn-phase";
-import { relationClassBearingSql } from "../shared/relation-class";
+import {
+  displayEdgeRelation,
+  relationClassBearingSql,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import {
   type EdgeSide,
   type EdgeSideResolution,
@@ -26,6 +30,7 @@ import {
 } from "./edge-side-resolution";
 import { loadDeclaredLaneTags } from "./turn-tag-gate";
 import { liveTurnSql } from "./turn-liveness";
+import { readTurnTags } from "./turn-tags";
 
 /**
  * The lane checker's read-only DB adapter (rubric-v10 ticket 06). Translates
@@ -428,7 +433,6 @@ function turnOrderKey(sessionId: number, promptNumber: number): readonly [number
 interface EdgeLiteRow {
   citingId: number;
   citedId: number;
-  relation: string;
   /** `memory_edges.tail_tag` verbatim — the CITING side's STORED DECLARATION, `''` when the row declares nothing. Which lane the side actually attributes to is `resolveEdgeSide`'s answer, not this (main-agent-edges spec D2). */
   tailTag: string;
   /** `memory_edges.head_tag` verbatim — the CITED side's stored declaration. See `tailTag`. */
@@ -477,12 +481,11 @@ function createProjectionSideResolver(db: Database): ProjectionSideResolver {
 }
 
 /**
- * The cross-pass dedupe key. Since ticket 09 it mirrors the STORAGE identity
- * key `(citing, cited, relation, tail_tag, head_tag)` EXACTLY (lane-model-v12
- * spec D1) — the merged `tags` component the expand step still carried left
- * with the column. Two rows that differ only in which lane each END names are
- * two DIFFERENT edges, so a key blind to the sides would silently fold one
- * into the other.
+ * The cross-pass dedupe key: the PAIR plus both stored sides. Since the
+ * cutover (main-agent-edges ticket 01) the pair alone is the storage identity
+ * and the sides are redundant here; they stay in the key so that, in the
+ * deferral window where a legacy pair can still hold several rows, this loader
+ * folds nothing the checker would otherwise have seen twice.
  *
  * `JSON.stringify` of the field TUPLE rather than a delimiter join, for
  * `laneToken`'s own reason (round-5 review #14): JSON self-delimits every
@@ -492,7 +495,7 @@ function createProjectionSideResolver(db: Database): ProjectionSideResolver {
  * choose, control byte or otherwise.
  */
 function edgeKey(row: EdgeLiteRow): string {
-  return JSON.stringify([row.citingId, row.citedId, row.relation, row.tailTag, row.headTag]);
+  return JSON.stringify([row.citingId, row.citedId, row.tailTag, row.headTag]);
 }
 
 function segmentKeyFor(owningSegmentByTurn: ReadonlyMap<number, number>, turnId: number): string {
@@ -587,7 +590,7 @@ function loadClassEdgesTouching(db: Database, turnIds: readonly number[]): EdgeL
   const placeholders = turnIds.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId,
               me.tail_tag AS tailTag, me.head_tag AS headTag,
               COALESCE(me.relation_class, '') AS relationClass,
               COALESCE(me.relation_coverage, '') AS relationCoverage
@@ -822,7 +825,7 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
   const idPlaceholders = turnIds.map(() => "?").join(",");
   return db
     .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
+      `SELECT me.citing_id AS citingId, me.cited_id AS citedId,
               me.tail_tag AS tailTag, me.head_tag AS headTag,
               COALESCE(me.relation_class, '') AS relationClass,
               COALESCE(me.relation_coverage, '') AS relationCoverage
@@ -837,80 +840,13 @@ function loadComponentEdgesAmong(db: Database, turnIds: readonly number[]): Edge
     .all(...turnIds, ...turnIds);
 }
 
-/**
- * Every live relation-carrying edge with BOTH endpoints inside `turnIds`
- * whose `relation` lies OUTSIDE `EDGE_RELATIONS` (semantic-conformance
- * ticket 02) — e.g. the frozen-legacy `supersedes`, still storable
- * (`db/citations.ts`'s `CITATION_RELATIONS` carries a ninth word this
- * module's own write vocabulary never did) but never surfaced by any of
- * this file's other passes, which all filter to specific IN-vocabulary
- * relation lists (or require `tags != '[]'`, and a frozen-legacy relation
- * predates the tag model and is never tagged). Scoped to turns ALREADY in
- * `turnIds` — never a reason to widen the loaded turn set further, since
- * these rows are reported as a bare fact by the checker, not resolved into
- * lane membership. `loadLaneCheckScope` calls this with the whole loaded turn
- * set, so both endpoints of everything it returns are already present among
- * the turns this projection returns — no dangling-edge risk. Its seed-scoped
- * sibling below is the one pass that CAN name a turn not yet loaded, and it
- * joins that endpoint in explicitly.
- */
-function loadOutOfVocabularyEdgesAmong(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  return db
-    .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag,
-              COALESCE(me.relation_class, '') AS relationClass,
-              COALESCE(me.relation_coverage, '') AS relationCoverage
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
-    )
-    .all(...turnIds, ...turnIds);
-}
-
-/**
- * The seed-scoped counterpart of the pass above (peer round T1466, finding
- * P1-1): every live out-of-vocabulary edge whose CITING side is one of
- * `turnIds`, whatever its cited side is. E2 anchors at the citing turn, so
- * such a row is the seed's own repairable defect and must be visible to the
- * window that owns it even when its cited turn joined no other pass; the
- * among-BOTH-endpoints pass alone hid exactly those rows. The reverse case
- * (cited side in scope, citing side outside) is deliberately NOT loaded: it
- * anchors outside this scope and blocks a different window.
- *
- * `loadLaneCheckScope` joins the cited endpoints this returns into the final
- * turn set, so the projection still cannot carry an edge whose endpoint it
- * never loaded.
- */
-function loadOutOfVocabularyEdgesFromCiting(db: Database, turnIds: readonly number[]): EdgeLiteRow[] {
-  if (turnIds.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  return db
-    .query<EdgeLiteRow, number[]>(
-      `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag,
-              COALESCE(me.relation_class, '') AS relationClass,
-              COALESCE(me.relation_coverage, '') AS relationCoverage
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`,
-    )
-    .all(...turnIds);
-}
+// `loadOutOfVocabularyEdgesAmong` / `loadOutOfVocabularyEdgesFromCiting` ARE
+// DELETED (main-agent-edges ticket 01): they selected rows whose stored WORD
+// lay outside the seven-word vocabulary, and the post-cutover table has no
+// word column and a CHECK that admits only the three classes — no row can be
+// out of vocabulary any more. The checker's own partition
+// (`shared/lane-checker.ts`, `partitionEdgesByVocabulary`) still stands as a
+// defensive gate over whatever it is handed; this loader hands it nothing.
 
 /**
  * D9 proliferation's two segment-wide counts (ticket 09, peer P1-11) — the
@@ -1071,20 +1007,11 @@ function loadLiveTurns(db: Database, turnIds: readonly number[]): Map<number, Tu
  *     ignorance, and ignorance must never manufacture an error the commit
  *     gate would then refuse a window over.
  */
-function parseTurnTags(raw: string | null): readonly string[] | undefined {
-  if (raw === null) {
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
-    return undefined;
-  }
-  return canonicalTagSet(parsed as string[]);
+function parseTurnTags(raw: string | null): readonly string[] {
+  // THE ONE PARSER (main-agent-edges ticket 01, R9-8): a malformed value
+  // throws by name rather than reading as "no verdict" — the storage trigger
+  // refuses it, so meeting one is a defect to surface, not a state to tolerate.
+  return canonicalTagSet(readTurnTags(raw));
 }
 
 /** Row -> the core's input shape. The two side columns are the whole lane surface since ticket 09 retired the merged set (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
@@ -1094,7 +1021,12 @@ function toEdgeInput(row: EdgeLiteRow, resolver: ProjectionSideResolver): LaneCh
   return {
     citingId: row.citingId,
     citedId: row.citedId,
-    relation: row.relation,
+    // The class TOKEN — a display label for renders, sorts and keys, never a
+    // storage word (the cutover dropped the word column).
+    relation: displayEdgeRelation({
+      relationClass: row.relationClass as RelationClassValue,
+      relationCoverage: row.relationCoverage as RelationCoverageValue,
+    }),
     relationClass: row.relationClass as LaneEdgeInput["relationClass"],
     relationCoverage: row.relationCoverage as LaneEdgeInput["relationCoverage"],
     // THE RESOLVED ATTRIBUTION (main-agent-edges spec D2), not the stored word
@@ -1505,29 +1437,10 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
   // never scoped to see (`LaneCheckProjection`'s own doc comment).
   // `checkLanes` (`shared/lane-checker.ts`) is what keeps these OUT of every
   // graph computation once they DO reach it, through its own third parameter.
-  const outOfVocabularyRows = new Map<string, EdgeLiteRow>();
-  for (const row of loadOutOfVocabularyEdgesAmong(db, [...allTurnIds])) {
-    outOfVocabularyRows.set(edgeKey(row), row);
-  }
-  for (const row of loadOutOfVocabularyEdgesFromCiting(db, seedTurnIds)) {
-    outOfVocabularyRows.set(edgeKey(row), row);
-  }
-  // The far endpoints join the projection (never the reverse — this pass
-  // widens the TURN set only, never re-runs the among-pass over the widened
-  // set: an out-of-vocabulary row is a reported fact, not a lane input, so
-  // one round is the whole of it).
-  for (const row of outOfVocabularyRows.values()) {
-    allTurnIds.add(row.citingId);
-    allTurnIds.add(row.citedId);
-  }
-  sideResolver.prime([...outOfVocabularyRows.values()].flatMap((row) => [row.citingId, row.citedId]));
-  const outOfVocabularyEdges = [...outOfVocabularyRows.values()]
-    .map((row) => toEdgeInput(row, sideResolver))
-    .sort((a, b) => {
-      if (a.citingId !== b.citingId) return a.citingId - b.citingId;
-      if (a.citedId !== b.citedId) return a.citedId - b.citedId;
-      return a.relation.localeCompare(b.relation);
-    });
+  // Post-cutover there is no out-of-vocabulary row to load (see the note where
+  // the two loaders used to be); the projection's field stays, empty, so the
+  // checker's own partition and every render of it keep their shape.
+  const outOfVocabularyEdges: LaneCheckerEdgeInput[] = [];
 
   const turnRows = loadLiveTurns(db, [...allTurnIds]);
   const owningSegmentsForTurns = loadOwningSegments(db, [...allTurnIds]);
@@ -1708,6 +1621,7 @@ export function loadLaneControlCapability(db: Database): LaneControlCapability {
 export interface LaneControlEdge {
   citingId: number;
   citedId: number;
+  /** The class token (`correct(full)`, `verify`, …) — a label. */
   relation: string;
   /** `memory_edges.provenance` — carried as a DENOMINATOR fact only (which queue a row belongs to), never as a filter: the checker judges every relation-carrying live edge and so does every control. */
   provenance: string;
@@ -1733,7 +1647,8 @@ export interface LaneControlEdge {
 interface ControlEdgeRow {
   citingId: number;
   citedId: number;
-  relation: string;
+  relationClass: string;
+  relationCoverage: string;
   provenance: string;
   tailTag: string;
   headTag: string;
@@ -1771,7 +1686,8 @@ export function loadLaneControlEdges(db: Database): LaneControlEdge[] {
   const rows = db
     .query<ControlEdgeRow, []>(
       `SELECT me.citing_id AS citingId, me.cited_id AS citedId,
-              me.relation AS relation, me.provenance AS provenance,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage,
+              me.provenance AS provenance,
               me.tail_tag AS tailTag, me.head_tag AS headTag,
               tc.session_id AS citingSession, tc.prompt_number AS citingPrompt,
               tc.created_at_epoch AS citingEpoch, tc.tags AS citingTagsRaw,
@@ -1781,10 +1697,9 @@ export function loadLaneControlEdges(db: Database): LaneControlEdge[] {
          JOIN turns tc ON tc.id = me.citing_id
          JOIN turns td ON td.id = me.cited_id
         WHERE me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-          AND me.relation IS NOT NULL
+          AND ${relationClassBearingSql("me")}
           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
-        ORDER BY me.citing_id ASC, me.cited_id ASC, me.relation ASC,
-                 me.tail_tag ASC, me.head_tag ASC`,
+        ORDER BY me.citing_id ASC, me.cited_id ASC, me.id ASC`,
     )
     .all();
   const owningSegments = loadOwningSegments(
@@ -1795,7 +1710,10 @@ export function loadLaneControlEdges(db: Database): LaneControlEdge[] {
     const edge: LaneControlEdge = {
       citingId: row.citingId,
       citedId: row.citedId,
-      relation: row.relation,
+      relation: displayEdgeRelation({
+        relationClass: row.relationClass as RelationClassValue,
+        relationCoverage: row.relationCoverage as RelationCoverageValue,
+      }),
       provenance: row.provenance,
       tailTag: row.tailTag,
       headTag: row.headTag,
@@ -1933,7 +1851,7 @@ export function loadDownstreamTurns(
 // Re-exported so a consumer (the CLI, the settlement tool) that only needs
 // the relation vocabulary for validating a `--lane` argument's shape need
 // not also import `turn-phase.ts` directly.
-export { EDGE_RELATIONS };
+
 
 // Re-exported so a consumer (`mcp/note.ts`'s settlement `lane_check` tool)
 // that names a lane by its own `LaneKey` need not also import

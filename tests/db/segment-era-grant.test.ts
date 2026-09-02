@@ -246,9 +246,9 @@ describe("era grant — member visibility", () => {
     const citer = makeTurn(61, ERA_EPOCH, "fix", "era-side");
     db.query<unknown, [number, number, number]>(
       `INSERT INTO memory_edges (
-         citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+         citing_kind, citing_id, cited_kind, cited_id, relation_class, provenance,
          created_at_epoch
-       ) VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', ?)`,
+       ) VALUES ('turn', ?, 'turn', ?, 'use', 'judged', ?)`,
     ).run(citer, orphan, ERA_EPOCH);
     grant(orphan, LEGACY_EPOCH + 500);
 

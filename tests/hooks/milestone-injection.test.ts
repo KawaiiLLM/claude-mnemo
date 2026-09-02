@@ -20,6 +20,7 @@ import {
   type TimelineView,
 } from "../../src/mcp/timeline";
 import { estimateTokens } from "../../src/utils/token-estimate";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 const ERA_BASE = 1_785_000_000;
 
@@ -104,7 +105,7 @@ function cite(
     citedPrompts.map((promptNumber) => ({
       citing: { kind: "turn" as const, id: citingId },
       cited: { kind: "turn" as const, id: turnDbId(db, sessionId, promptNumber) },
-      relation: "verifies" as const,
+      ...wordEdgeClass("verifies"),
       provenance: "judged" as const,
     })),
     ERA_BASE,
@@ -285,7 +286,7 @@ describe("SessionStart milestone injection = the arc view", () => {
       'T1 07-25 ⚖️ Framed the slicing problem · "卷号锚定要解决什么"',
     );
     // `↳` is an ADDRESS index; no grade, no title, no `前件` count.
-    expect(injected).toContain("↳ -verifies-> T2");
+    expect(injected).toContain("↳ -verify-> T2");
     expect(injected).not.toMatch(/\bG[0-4]\b/);
     expect(injected).not.toContain("前件");
     expect(injected).toContain("Weighed the evidence and switched the anchor.");
@@ -483,7 +484,7 @@ function indexTurn(
       {
         citing: { kind: "turn" as const, id: citerId },
         cited: { kind: "turn" as const, id },
-        relation: "indexes" as const,
+        ...wordEdgeClass("indexes"),
         provenance: "judged" as const,
       },
     ],

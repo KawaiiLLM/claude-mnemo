@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { buildTimelineView, renderTimeline, timelineQuery } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Milestone rows nest under each segment line on the era side of an `S<n>`
@@ -129,7 +130,7 @@ function seedSegmentMilestoneFixture(db: Database): {
       {
         citing: { kind: "turn" as const, id: ids.overrider! },
         cited: { kind: "turn" as const, id: ids.overridden! },
-        relation: "override" as const,
+        ...wordEdgeClass("override"),
         provenance: "judged" as const,
       },
       // A second edge, corrector -> overridden, used to stand here under
@@ -260,7 +261,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
         {
           citing: { kind: "turn" as const, id: ids.corrector! },
           cited: { kind: "turn" as const, id: ids.correctorCited! },
-          relation: "grounds" as const,
+          ...wordEdgeClass("grounds"),
           provenance: "judged" as const,
         },
       ],
@@ -273,7 +274,7 @@ describe("milestone rows nest under segment lines, election-based admission", ()
     expect(output).not.toMatch(/G[0-4]/);
     expect(spineBlock).not.toContain("the user asked something"); // the shared prompt text — never on a milestone row
     // Spec 金样例: `↳` is a pure address index, never a `+N 前件` count.
-    expect(spineBlock).toContain("↳ -grounds-> T20");
+    expect(spineBlock).toContain("↳ -use-> T20");
     expect(spineBlock).not.toContain("↳ T19");
     expect(output).not.toContain("前件");
   });

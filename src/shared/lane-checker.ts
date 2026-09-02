@@ -321,7 +321,6 @@ import { phasesForTypes } from "./turn-phase";
  */
 function carriesRelationClass(edge: LaneEdgeInput): boolean {
   return edgeRelationClass({
-    relation: edge.relation ?? null,
     relationClass: edge.relationClass ?? "",
     relationCoverage: edge.relationCoverage ?? "",
   }) !== null;
@@ -330,7 +329,6 @@ function carriesRelationClass(edge: LaneEdgeInput): boolean {
 /** How one edge reads as a class token (`correct(full)`, `verify`, …) — `null` for a row that carries no class at all. */
 function relationClassToken(edge: LaneEdgeInput): string | null {
   const resolved = edgeRelationClass({
-    relation: edge.relation ?? null,
     relationClass: edge.relationClass ?? "",
     relationCoverage: edge.relationCoverage ?? "",
   });
@@ -956,7 +954,6 @@ function computeCoupling(
     if (tail === null || head === null) continue;
     if (sameLaneKey(tail, head)) continue; // internal to one lane, never a crossing
     const resolved = edgeRelationClass({
-      relation: edge.relation ?? null,
       relationClass: edge.relationClass ?? "",
       relationCoverage: edge.relationCoverage ?? "",
     });

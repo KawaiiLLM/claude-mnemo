@@ -19,6 +19,8 @@ import {
   openConsoleReaderDatabase,
   parseSessionsCursor,
 } from "../../src/worker/console-reader";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeTurnsTagsToPreCutover } from "../support/pre-cutover-edge-shape";
 
 /**
  * ConsoleReader (memory-console spec, "Read-only, structurally"; ticket 02,
@@ -223,7 +225,7 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
         {
           citing: { kind: "turn", id: citingId },
           cited: { kind: "turn", id: citedId },
-          relation: relation as never,
+          ...wordEdgeClass(relation),
           provenance: "asserted",
           ...deriveSideTags(tags),
         },
@@ -393,6 +395,12 @@ describe("ConsoleReader query surface (in-memory schema)", () => {
     // A display field must never be able to fail a whole graph request: every
     // shape that is not an array of strings answers [], never a throw.
     test("malformed, non-array and non-string tag values all degrade to [] rather than throwing", () => {
+      // The malformed values this case is about exist only on the PRE-CUTOVER
+      // shape: transform 1 normalised every one away and the `turns` trigger
+      // refuses a new one. The CONSOLE reader is deliberately the one path
+      // that still degrades rather than throwing — it renders a live database
+      // read-only and must survive whatever it meets.
+      downgradeTurnsTagsToPreCutover(db);
       const sessionId = seedSession("tags-bad", 3_000);
       const reader = createConsoleReader(db);
       for (const stored of ["not json at all", '{"a":1}', "42", '["ok", 7, null]']) {

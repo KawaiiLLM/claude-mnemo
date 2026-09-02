@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { relationClassBearingSql } from "../shared/relation-class";
+
 import type { NoteSettlementStage } from "./note-settlement";
 import {
   settlementWritePermissions,
@@ -1059,10 +1061,10 @@ export function relationsReadRemedy(address: string): string {
  * ordinary case, since the main agent now writes its edges on its own turn's
  * `note` as the turn lands.
  *
- * WORDLESS ROWS DO NOT COUNT. `relation IS NOT NULL` is the predicate: a
- * pre-cutover bare row records that some prose named a target, which tells a
- * writer nothing about what its turn claims, so a turn holding only those is
- * still a turn with nothing to have read.
+ * WORDLESS ROWS DO NOT COUNT. `relationClassBearingSql` is the predicate: a
+ * pre-cutover bare row (deferral window only) records that some prose named a
+ * target, which tells a writer nothing about what its turn claims, so a turn
+ * holding only those is still a turn with nothing to have read.
  *
  * WRITER-AGNOSTIC, and deliberately so. The exception is a property of the
  * TURN, not of who is writing: settlement filling the first edge on a turn the
@@ -1082,7 +1084,8 @@ function hasNoOutgoingRelationAtoms(db: Database, turnId: number): boolean {
   const row = db
     .query<{ count: number }, [number]>(
       `SELECT COUNT(*) AS count FROM memory_edges
-        WHERE citing_kind = 'turn' AND citing_id = ? AND relation IS NOT NULL`,
+        WHERE citing_kind = 'turn' AND citing_id = ?
+          AND ${relationClassBearingSql("memory_edges")}`,
     )
     .get(turnId);
   return (row?.count ?? 0) === 0;

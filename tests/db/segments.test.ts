@@ -35,6 +35,7 @@ import {
 } from "../../src/shared/segment-fields";
 import { resetTurnExtractionFields, updateTurnById } from "../../src/db/turns";
 import { normalizeTypeValues } from "../../src/shared/type-vocabulary";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 describe("segments and membership", () => {
   let db: Database;
@@ -759,7 +760,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["lane-a"]),
           },
@@ -779,7 +780,7 @@ describe("segments and membership", () => {
       if (!result.ok) {
         expect(result.message).toContain(`E${destination}`);
         expect(result.message).toContain('has not declared lane "lane-a"');
-        expect(result.message).toContain("--extends-->");
+        expect(result.message).toContain("--use-->");
         expect(result.message).toContain("nothing was moved");
       }
       // The TAG write did not land either — a refused move leaves the turn's
@@ -864,7 +865,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags([]),
           },
@@ -915,7 +916,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "consume",
+            ...wordEdgeClass("consume"),
             provenance: "asserted",
             tailTag: "lane-a",
             headTag: "lane-b",
@@ -931,7 +932,7 @@ describe("segments and membership", () => {
         {
           citingTurnId: citing,
           citedTurnId: cited,
-          relation: "consume",
+          relation: "use",
           tag: "lane-a",
           endpoint: "citing",
           segmentIdAfter: destination,
@@ -977,7 +978,7 @@ describe("segments and membership", () => {
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: cited },
-            relation: "extends",
+            ...wordEdgeClass("extends"),
             provenance: "asserted",
             ...deriveSideTags(["legacy"]),
           },

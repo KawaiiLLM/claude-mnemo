@@ -10,6 +10,7 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
 import { DEFAULT_SEGMENT } from "../../src/shared/lane-interpretation";
+import { insertEdgeRow, wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The lane checker DB adapter (rubric-v10 ticket 06). These tests exercise
@@ -68,13 +69,20 @@ function insertTurn(
     type?: string[];
     wasRolledBack?: boolean;
     status?: string;
-    /** tag-mandate ticket 03: `turns.tags` verbatim. `undefined` leaves the column NULL (the pre-tag-era shape); a raw string lets a test store the malformed JSON the column has no CHECK against. */
+    /**
+     * tag-mandate ticket 03: `turns.tags` verbatim. `undefined` means "no
+     * tags" and stores `'[]'` — the main-agent-edges cutover normalised every
+     * NULL away and made the column NOT NULL DEFAULT `'[]'` behind a trigger,
+     * so the pre-tag-era NULL this helper used to default to can no longer be
+     * written at all. A raw string still goes in verbatim, which is how a test
+     * proves the trigger refuses malformed JSON.
+     */
     tags?: string[] | string;
   } = {},
 ): number {
   const tags =
     options.tags === undefined
-      ? null
+      ? "[]"
       : typeof options.tags === "string"
         ? options.tags
         : JSON.stringify(options.tags);
@@ -191,7 +199,7 @@ function tagEdge(
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation: relation as never,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags(tags),
       },
@@ -203,70 +211,18 @@ function tagEdge(
   }
 }
 
-/**
- * A row carrying a relation word the CURRENT vocabulary does not have — the
- * only shape E2 (out-of-vocabulary) has ever been about.
- *
- * Since lane-model-v12 ticket 03 no such row can be WRITTEN: `memory_edges`'
- * CHECK is now exactly the seven-word write vocabulary, and both frozen-legacy
- * words were migrated onto `override` and removed from it. So the fixture has
- * to say what it actually means — "a row a build older than that migration
- * left behind" — and `ignore_check_constraints` is the narrowest way to write
- * one. Going through `writeMemoryEdges` would not do: its own
- * `isCitationRelation` gate refuses the word before the table is reached.
- */
-function legacyOutOfVocabularyEdge(citingId: number, citedId: number, relation: string): void {
-  db.exec("PRAGMA ignore_check_constraints = ON");
-  try {
-    db.query<unknown, [number, number, string]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ${NOW})`,
-    ).run(citingId, citedId, relation);
-  } finally {
-    db.exec("PRAGMA ignore_check_constraints = OFF");
-  }
-}
+// `legacyOutOfVocabularyEdge` IS DELETED (main-agent-edges ticket 01). It
+// wrote a row whose `relation` WORD lay outside the vocabulary — the only
+// shape E2 was ever about. The cutover dropped the word column and left a
+// `relation_class` CHECK that admits exactly the three classes, so no row can
+// be out of vocabulary any more and the loader no longer looks for one.
 
-/**
- * A SECOND row on a pair that already carries one — pre-cutover stock, written
- * past the write path, with its side-index rows and lane claims exactly as
- * `tagEdge` would have left them.
- *
- * main-agent-edges D5 made the pair the whole of a row's identity: a second
- * write onto a pair PROMOTES its row (a strictly more specific class) or is a
- * no-op, and never mints another, so `writeMemoryEdges` cannot produce the
- * two-rows-on-one-pair shape any more. Production still holds 109 such pairs
- * until ticket 01's cutover folds them, and the loader reads over exactly that
- * stock — a per-ROW projection count, an E4 error per row, a pair naming two
- * lanes at once — so the fixtures that need it state it in SQL rather than
- * pretending a writer will still produce it.
- */
-function legacyTagEdge(
-  citingId: number,
-  citedId: number,
-  relation: string,
-  tags: readonly string[],
-): void {
-  const { tailTag, headTag } = deriveSideTags([...tags]);
-  const row = db
-    .query<{ id: number }, [number, number, string, string, string]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, '', '', ${NOW})
-       RETURNING id`,
-    )
-    .get(citingId, citedId, relation, tailTag, headTag)!;
-  const insertSide = db.query<unknown, [number, string, string]>(
-    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
-  );
-  if (tailTag !== "") {
-    insertSide.run(row.id, "tail", tailTag);
-    insertSide.run(row.id, "head", headTag);
-  }
-  recordLaneClaims([citingId, citedId], tailTag === "" ? [] : tags);
-}
+
+// `legacyTagEdge` IS DELETED (main-agent-edges ticket 01): it wrote a SECOND
+// row onto a pair that already had one — pre-cutover stock the rebuilt
+// `memory_edges` cannot hold, since `(citing_kind, citing_id, cited_kind,
+// cited_id)` is now UNIQUE. Fixtures that need one pair to name two lanes use
+// `crossLaneEdge` instead.
 
 /**
  * A CROSS-LANE edge — `tail_tag !== head_tag`, both settled (the merged set
@@ -284,14 +240,15 @@ function crossLaneEdge(
   tailTag: string,
   headTag: string,
 ): void {
-  const row = db
-    .query<{ id: number }, [number, number, string, string, string]>(
-      `INSERT INTO memory_edges
-         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
-       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, ${NOW})
-       RETURNING id`,
-    )
-    .get(citingId, citedId, relation, tailTag, headTag)!;
+  const rowId = insertEdgeRow(db, {
+    citingId,
+    citedId,
+    relation,
+    tailTag,
+    headTag,
+    createdAtEpoch: NOW,
+  });
+  const row = { id: rowId };
   const insertSide = db.query<unknown, [number, string, string]>(
     `INSERT INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
   );
@@ -340,7 +297,7 @@ describe("range scope", () => {
     const turnIds = projection.turns.map((turn) => turn.id).sort((a, b) => a - b);
     expect(turnIds).toEqual([t1, t2, t10].sort((a, b) => a - b));
     expect(
-      projection.edges.some((edge) => edge.citingId === t10 && edge.citedId === t1 && edge.relation === "indexes"),
+      projection.edges.some((edge) => edge.citingId === t10 && edge.citedId === t1 && edge.relation === "use"),
     ).toBe(true);
     assertNoDanglingEdges(projection);
 
@@ -913,7 +870,7 @@ describe("segment-global component widening (round-4 review #4a)", () => {
       laneKeys: [{ segment: String(segment.id), tag: "lane" }],
     });
     expect(
-      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "consume"),
+      projection.edges.some((edge) => edge.citingId === h3 && edge.citedId === h2 && edge.relation === "use"),
     ).toBe(true);
 
     const result = checkLanes(projection.turns, projection.edges);
@@ -1015,83 +972,15 @@ describe("a homeless (default-segment) lane is unreachable, and nothing widens f
 });
 
 describe("out-of-vocabulary edges (semantic-conformance ticket 02): the loader surfaces a frozen-legacy relation as a fact, never widening the graph", () => {
-  test("a supersedes edge between two turns already in scope reaches the checker's vocabulary-conformance report, never the lane's own edge tally", () => {
-    const sessionId = seedSession();
-    const t1 = insertTurn(sessionId, 1);
-    const t2 = insertTurn(sessionId, 2);
-    tagEdge(t2, t1, "extends", ["ownership"]);
-    // The pair's SECOND in-vocabulary row is pre-cutover stock (see
-    // `legacyTagEdge`): main-agent-edges D5 made the pair one row, so a second
-    // `writeMemoryEdges` call here would be a no-op rather than the second
-    // tallied edge this case counts.
-    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
-    legacyOutOfVocabularyEdge(t2, t1, "supersedes"); // pre-migration stock, never in EDGE_RELATIONS
-
-    const projection = loadLaneCheckScope(db, {
-      kind: "range",
-      sessionId,
-      promptStart: 1,
-      promptEnd: 2,
-    });
-    // None of the OTHER passes ever surface `supersedes` on their own (every
-    // one of them filters to rows that carry a relation CLASS, which a
-    // frozen-legacy word does not), and it is deliberately kept off
-    // `projection.edges` itself (that field's own doc comment) — this
-    // projection carries it ONLY on its own separate field. Its SIDES are
-    // resolved like any other row's (main-agent-edges D2), so a row whose
-    // endpoints are uniquely laned reports the lane it derives even while its
-    // WORD keeps it out of every graph.
-    expect(projection.outOfVocabularyEdges).toEqual([
-      expect.objectContaining({
-        citingId: t2,
-        citedId: t1,
-        relation: "supersedes",
-        tailTag: "ownership",
-        headTag: "ownership",
-      }),
-    ]);
-    expect(
-      projection.edges.some((edge) => edge.citingId === t2 && edge.citedId === t1 && edge.relation === "supersedes"),
-    ).toBe(false);
-    assertNoDanglingEdges(projection);
-
-    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    expect(result.vocabularyConformance.outOfVocabularyEdges).toEqual({
-      count: 1,
-      entries: [{ citingId: t2, citedId: t1, relation: "supersedes" }],
-    });
-    // Never admitted: the lane's own attributed-edge tally is exactly the
-    // extends+indexes pair — two `use` rows since main-agent-edges ticket 02
-    // counts by CLASS — and no `supersedes` key at all.
-    expect(result.lanes[0]!.edgeCountsByRelation).toEqual({ use: 2 });
-  });
-
-  // T1466 (finding P1-1) narrowed this claim rather than dropping it: a
-  // seed-scoped pass now DOES widen for a row written FROM the scope (see
-  // "turn-id seed scope" below). The direction is the anchor rule — this
-  // case, whose CITING side is the out-of-scope turn, anchors outside and
-  // stays unloaded, which is what the test has always actually pinned.
-  test("a supersedes edge whose CITING side is outside the scope is never surfaced — it anchors outside and blocks a different window", () => {
-    const sessionId = seedSession();
-    const t1 = insertTurn(sessionId, 1);
-    const t2 = insertTurn(sessionId, 2);
-    const outside = insertTurn(sessionId, 3); // never referenced by any tagged edge
-    tagEdge(t2, t1, "extends", ["ownership"]);
-    tagEdge(t2, t1, "indexes", ["ownership"]);
-    tagEdge(outside, t1, "supersedes", []); // cites FROM `outside`, which is never in scope
-
-    const projection = loadLaneCheckScope(db, {
-      kind: "range",
-      sessionId,
-      promptStart: 1,
-      promptEnd: 2,
-    });
-    expect(projection.turns.map((turn) => turn.id)).not.toContain(outside);
-    expect(projection.outOfVocabularyEdges).toEqual([]);
-
-    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
-    expect(result.vocabularyConformance.outOfVocabularyEdges).toEqual({ count: 0, entries: [] });
-  });
+  // DELETED (main-agent-edges ticket 01): the two `supersedes` cases here —
+  // "reaches the vocabulary-conformance report" and "whose CITING side is
+  // outside the scope is never surfaced" — both seeded a row whose stored
+  // WORD lay outside the vocabulary. There is no word column after the
+  // cutover and `relation_class` is CHECKed to the three classes, so the row
+  // they described cannot exist and `loadLaneCheckScope` no longer has the
+  // pass that found it (`projection.outOfVocabularyEdges` is always `[]`).
+  // The scope-direction rule they doubled as a probe for is pinned, on stock
+  // that still exists, by the turn-id seed block below.
 
   // NB (pre-existing, out of this ticket's scope): a TAGGED out-of-vocabulary
   // relation (e.g. a hypothetically tagged `supersedes`) is NOT excluded from
@@ -1151,11 +1040,11 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    // ONE row on the pair: the cutover's rebuilt table is UNIQUE on
+    // `(citing, cited)`, so the second row this case used to seed can no
+    // longer exist. What it was about — the turns' own tags riding the
+    // projection so E4 is judged — is unchanged.
     tagEdge(t2, t1, "extends", ["ownership"]);
-    // Pre-cutover stock, see `legacyTagEdge` — under main-agent-edges D5 a
-    // second write onto this pair is a no-op, so a second ROW has to be
-    // seeded, and it is a second row this projection carries.
-    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
 
     const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
     expect(projection.turns.map((turn) => turn.tags)).toEqual([["ownership"], ["ownership"]]);
@@ -1166,11 +1055,9 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     const sessionId = seedSession();
     const t1 = insertTurn(sessionId, 1, { tags: ["ownership"] });
     const t2 = insertTurn(sessionId, 2, { tags: ["ownership"] });
+    // ONE row on the pair (pair-UNIQUE after the cutover) and therefore ONE
+    // E4 — the count below moved from two to one for that reason alone.
     tagEdge(t2, t1, "extends", ["ownership"]);
-    // Two STORED rows on one pair (pre-cutover stock, see `legacyTagEdge`) —
-    // the projection carries one E4 per row, which is what the two errors
-    // below count.
-    legacyTagEdge(t2, t1, "indexes", ["ownership"]);
     // Settle the fixture's own membership claims BEFORE the edit, so the edit
     // is the last word on this turn's tags (see `recordLaneClaims`).
     applyPendingLaneClaims();
@@ -1180,18 +1067,37 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
 
     const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
     const errors = checkLanes(projection.turns, projection.edges).errors;
-    expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E4@${t2}`, `E4@${t2}`]);
+    expect(errors.map((error) => `${error.class}@${error.anchorId}`)).toEqual([`E4@${t2}`]);
   });
 
-  test("a NULL tags column reads as the empty set (a real verdict), a malformed one as not-loaded (no verdict)", () => {
+  // REPLACES "a NULL tags column reads as the empty set, a malformed one as
+  // not-loaded". Both of those states were normalised away by the cutover's
+  // transform 1 and are now refused at STORAGE by the `turns` trigger, so the
+  // loader's old "no verdict" arm is unreachable and `parseTurnTags` throws by
+  // name instead of coercing. What this pins is the invariant that replaced
+  // them: neither value can be written at all, and an empty tag set is the
+  // only "no tags" the loader can ever meet.
+  test("neither NULL nor malformed tags can be stored — the trigger refuses, and `[]` is the only empty verdict", () => {
     const sessionId = seedSession();
-    const nullTags = insertTurn(sessionId, 1); // column left NULL
-    const malformed = insertTurn(sessionId, 2, { tags: "{not json array" });
+    expect(() =>
+      db
+        .query<unknown, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response,
+             tool_call_count, created_at_epoch, was_rolled_back, type, tags)
+           VALUES (?, 1, 'active', 'p', 'r', 1, 1, 0, '["design"]', NULL)`,
+        )
+        .run(sessionId),
+    ).toThrow(/turns\.tags must be a JSON array of strings/);
+    expect(() => insertTurn(sessionId, 2, { tags: "{not json array" })).toThrow(
+      /turns\.tags must be a JSON array of strings/,
+    );
+    expect(() => insertTurn(sessionId, 3, { tags: '["ok", 7]' })).toThrow(
+      /turns\.tags must be a JSON array of strings/,
+    );
 
-    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 2 });
-    const byId = new Map(projection.turns.map((turn) => [turn.id, turn]));
-    expect(byId.get(nullTags)!.tags).toEqual([]);
-    expect(byId.get(malformed)!.tags).toBeUndefined();
+    const empty = insertTurn(sessionId, 4); // the helper's default: '[]'
+    const projection = loadLaneCheckScope(db, { kind: "range", sessionId, promptStart: 1, promptEnd: 4 });
+    expect(projection.turns.find((turn) => turn.id === empty)!.tags).toEqual([]);
   });
 
   test("a legally-SKIPPED turn with an empty type never reaches the checker, so it can never raise E3", () => {
@@ -1233,7 +1139,7 @@ describe("tag-mandate ticket 03 — turn tags reach the checker, skipped turns n
     // over it would have had the row to fire on.
     expect(
       projection.edges.some(
-        (edge) => edge.citingId === t3 && edge.citedId === t2 && edge.relation === "extends",
+        (edge) => edge.citingId === t3 && edge.citedId === t2 && edge.relation === "use",
       ),
     ).toBe(true);
     const errors = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges).errors;
@@ -1296,7 +1202,7 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
       expect.objectContaining({
         citingId: a2,
         citedId: a1,
-        relation: "extends",
+        relation: "use",
         tailTag: "a",
         headTag: "a",
       }),
@@ -1339,12 +1245,12 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
     const t11 = insertTurn(sessionId, 11, { tags: ["a"] });
     const t20 = insertTurn(sessionId, 20, { tags: ["b"] });
     const t21 = insertTurn(sessionId, 21, { tags: ["b"] });
-    tagEdge(t2, t1, "extends", ["a"]); // the seed pair's lane-{a} row
-    // …and its lane-{b} row (post-M-A shape). Pre-cutover stock, seeded past
-    // the write path: main-agent-edges D5 made the pair one row, so the state
-    // this case is about — ONE pair naming TWO lanes — is exactly the legacy
-    // multi-row stock the loader still has to fan out from.
-    legacyTagEdge(t2, t1, "extends", ["b"]);
+    // ONE pair naming TWO lanes, in the ONLY shape the pair-UNIQUE rebuilt
+    // table leaves for it: a CROSS-LANE row whose tail declares {a} for the
+    // citing turn and whose head declares {b} for the cited one. (Before the
+    // cutover this state was two rows; the fan-out the loader has to do from
+    // it is the same, and this is the state that still exists.)
+    crossLaneEdge(t2, t1, "extends", "a", "b");
     tagEdge(t11, t10, "extends", ["a"]); // lane {a}'s other edge, far outside the range
     tagEdge(t21, t20, "extends", ["b"]); // lane {b}'s other edge, far outside the range
 
@@ -1356,10 +1262,10 @@ describe("WIDEN loads exactly the rows carrying a lane's ONE tag on a SIDE (v12 
     });
 
     expect(projection.involvedLaneKeys.map((k) => k.tag).sort()).toEqual(["a", "b"]);
-    // FOUR rows, not the three the single multi-tag row produced — the only
-    // number this fixture's migration moves, and it is a ROW count, never a
-    // per-lane one (both lanes' members below are unchanged).
-    expect(projection.edges).toHaveLength(4);
+    // THREE rows: the seed pair is ONE row after the cutover (it was two),
+    // plus each lane's own far edge. A ROW count, never a per-lane one — both
+    // lanes' members below are unchanged.
+    expect(projection.edges).toHaveLength(3);
     const turnIds = new Set(projection.turns.map((turn) => turn.id));
     for (const id of [t1, t2, t10, t11, t20, t21]) {
       expect(turnIds.has(id)).toBe(true);
@@ -1431,7 +1337,7 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
       expect.objectContaining({
         citingId: t2,
         citedId: t1,
-        relation: "grounds",
+        relation: "use",
         tailTag: "x",
         headTag: "x",
       }),
@@ -1475,22 +1381,23 @@ describe("ticket 12 — DISCOVER/WIDEN load a tagged cross-phase edge exactly li
  */
 describe("turn-id seed scope — the frozen writable set as the projection's seed (T1466 P1-1)", () => {
   // lane-declaration ticket 02 retired E1 and v12 ticket 11 deleted E2 as a
-  // CLASS, so the DEFECT this test carries is now an out-of-vocabulary relation
-  // reported as a WARNING (`vocabularyConformance.outOfVocabularyEdges`). What
+  // CLASS; the main-agent-edges cutover then deleted the out-of-vocabulary
+  // relation this test used to carry as its defect (no word column survives,
+  // so no row can be out of vocabulary). The DEFECT is now a legacy turn TYPE
+  // — E3 — which is the one repairable defect that still sits on a NODE. What
   // is under test is unchanged and is the LOADER's, not the class's: a defect
   // sitting in the LOOKBACK is invisible to the window's own prompt range and
-  // visible to the frozen turn-id seed. The untagged stance edge stays in the
-  // fixture as the loader probe it always doubled as — its pass outlived E1
-  // (it is a segment-graph edge and ticket 11's cluster domain), so this test
-  // still fails if that pass is dropped.
-  test("a LOOKBACK turn's edge defect fires under the turn-id seed, and is invisible to the window's own range", () => {
+  // visible to the frozen turn-id seed. The untagged `use` edge stays in the
+  // fixture as the loader probe it always doubled as — its pass is the
+  // segment graph and ticket 11's cluster domain — so this test still fails
+  // if that pass is dropped.
+  test("a LOOKBACK turn's defect fires under the turn-id seed, and is invisible to the window's own range", () => {
     const sessionId = seedSession("seed-lookback");
-    const lookbackCited = insertTurn(sessionId, 1, { type: ["design"] });
+    const lookbackCited = insertTurn(sessionId, 1, { type: ["discovery"] }); // the defect: a legacy type
     const lookbackCiting = insertTurn(sessionId, 2, { type: ["design"] });
     const windowA = insertTurn(sessionId, 8, { type: ["design"] });
     const windowB = insertTurn(sessionId, 9, { type: ["design"] });
     tagEdge(lookbackCiting, lookbackCited, "extends", []); // legal stock; the loader probe
-    legacyOutOfVocabularyEdge(lookbackCiting, lookbackCited, "supersedes"); // the defect, in the lookback
 
     // The defect the RANGE cannot see: the window is prompts 8-9.
     const rangeOnly = loadLaneCheckScope(db, {
@@ -1501,7 +1408,7 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     });
     expect(
       checkLanes(rangeOnly.turns, rangeOnly.edges, rangeOnly.outOfVocabularyEdges)
-        .vocabularyConformance.outOfVocabularyEdges.entries,
+        .errors.filter((error) => error.class === "E3"),
     ).toEqual([]);
 
     // The same defect, under the writable set the commit gate actually froze.
@@ -1516,17 +1423,14 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
         (edge) =>
           edge.citingId === lookbackCiting &&
           edge.citedId === lookbackCited &&
-          edge.relation === "extends",
+          edge.relation === "use",
       ),
     ).toBe(true);
-    const outOfVocabulary = checkLanes(
-      projection.turns,
-      projection.edges,
-      projection.outOfVocabularyEdges,
-    ).vocabularyConformance.outOfVocabularyEdges.entries;
-    expect(outOfVocabulary).toEqual([
-      { citingId: lookbackCiting, citedId: lookbackCited, relation: "supersedes" },
-    ]);
+    expect(
+      checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges)
+        .errors.filter((error) => error.class === "E3")
+        .map((error) => error.anchorId),
+    ).toEqual([lookbackCited]);
   });
 
   test("an EDGE-LESS seed still loads: a legacy type anywhere in the frozen set fires E3", () => {
@@ -1542,47 +1446,13 @@ describe("turn-id seed scope — the frozen writable set as the projection's see
     expect(e3.map((error) => error.anchorId)).toEqual([legacy]);
   });
 
-  test("an out-of-vocabulary edge whose CITED endpoint is outside the seed is still surfaced, and that endpoint joins the projection", () => {
-    const sessionId = seedSession("seed-e2-external");
-    const seedTurn = insertTurn(sessionId, 5, { type: ["design"] });
-    const external = insertTurn(sessionId, 1, { type: ["design"] }); // in no lane, in no seed
-    legacyOutOfVocabularyEdge(seedTurn, external, "supersedes"); // pre-migration stock, anchors at seedTurn
-
-    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
-
-    expect(projection.outOfVocabularyEdges).toEqual([
-      expect.objectContaining({
-        citingId: seedTurn,
-        citedId: external,
-        relation: "supersedes",
-        tailTag: "",
-        headTag: "",
-      }),
-    ]);
-    // The endpoint is JOINED IN rather than left dangling — the same
-    // invariant every other pass holds. (It becomes a judgable row in its own
-    // right; any error it earns anchors at ITSELF, i.e. outside this
-    // window's writable set, so the commit gate still ignores it.)
-    expect(projection.turns.map((turn) => turn.id)).toContain(external);
-    assertNoDanglingEdges(projection);
-
-    // v12 ticket 11: reported as a WARNING rather than error class E2 — the
-    // LOADER contract this test guards (the far endpoint joins in) is unchanged.
-    const reported = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges)
-      .vocabularyConformance.outOfVocabularyEdges.entries;
-    expect(reported).toEqual([{ citingId: seedTurn, citedId: external, relation: "supersedes" }]);
-  });
-
-  test("the CITING side is the direction: an out-of-vocabulary edge INTO a seed from outside anchors elsewhere and is not loaded", () => {
-    const sessionId = seedSession("seed-e2-inbound");
-    const seedTurn = insertTurn(sessionId, 5, { type: ["design"] });
-    const external = insertTurn(sessionId, 9, { type: ["design"] });
-    tagEdge(external, seedTurn, "supersedes", []); // anchors at `external`, not at the seed
-
-    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seedTurn] });
-    expect(projection.outOfVocabularyEdges).toEqual([]);
-    expect(projection.turns.map((turn) => turn.id)).not.toContain(external);
-  });
+  // DELETED (main-agent-edges ticket 01): "an out-of-vocabulary edge whose
+  // CITED endpoint is outside the seed is still surfaced" and "the CITING side
+  // is the direction" both seeded a `supersedes` row. No such row can exist
+  // after the cutover (no word column; `relation_class` CHECKed to the three
+  // classes), and the loader pass that carried them is gone. The far-endpoint
+  // join-in they guarded is still pinned by the DISCOVER/WIDEN case below and
+  // by `assertNoDanglingEdges` on every projection in this file.
 
   test("DISCOVER/WIDEN seed from the FULL set: a lane touched only by a lookback seed still resolves whole", () => {
     const sessionId = seedSession("seed-widen");
@@ -1680,7 +1550,7 @@ describe("tag-mandate ticket 05 acceptance repair — laneless stock still loads
       promptStart: 1,
       promptEnd: 2,
     });
-    expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "extends")).toBe(true);
+    expect(projection.edges.some((e) => e.citingId === b && e.citedId === a && e.relation === "use")).toBe(true);
 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
     // Ticket 20 made the row E6 (a DRAFT edge); main-agent-edges D6 narrows E6
@@ -1986,14 +1856,7 @@ describe("D9 segment facts — the registry and the membership table, never the 
     tailTag: string,
     headTag: string,
   ): void {
-    const row = db
-      .query<{ id: number }, [number, number, string, string, string]>(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, ${NOW})
-         RETURNING id`,
-      )
-      .get(citingId, citedId, relation, tailTag, headTag)!;
+    const row = { id: insertEdgeRow(db, { citingId, citedId, relation, tailTag, headTag, createdAtEpoch: NOW }) };
     const insertSide = db.query<unknown, [number, string, string]>(
       `INSERT INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
     );
@@ -2063,7 +1926,7 @@ describe("D9 segment facts — the registry and the membership table, never the 
         anchorId: y,
         citingId: y,
         citedId: x,
-        relation: "extends",
+        relation: "use",
         tags: ["alpha", "beta"],
         missing: [{ tag: "beta", endpoint: "cited" }],
       },
@@ -2118,7 +1981,7 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
       expect.objectContaining({
         citingId: t2,
         citedId: t1,
-        relation: "extends",
+        relation: "use",
         tailTag: "a",
         headTag: "b",
       }),
@@ -2152,7 +2015,7 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
       expect(named.edges[0]).toMatchObject({
         citingId: t2,
         citedId: t1,
-        relation: "extends",
+        relation: "use",
         tailTag: "a",
         headTag: "b",
       });

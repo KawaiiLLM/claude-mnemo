@@ -29,6 +29,7 @@ import {
   snapshotWriteGateSequence,
   stampField,
 } from "../../src/db/write-gate";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * `mergeSegments` — container-unification ticket 08, spec D6.
@@ -130,9 +131,9 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     const edgeId = db
       .query<{ id: number }, [number, number, number]>(
         `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+           (citing_kind, citing_id, cited_kind, cited_id, provenance,
             tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', 'solo', '', 'use', '', ?)
+         VALUES ('turn', ?, 'turn', ?, 'judged', 'solo', '', 'use', '', ?)
          RETURNING id`,
       )
       .get(citing, cited, NOW)!.id;
@@ -211,7 +212,7 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: "shared-work",
           headTag: "shared-work",
@@ -589,7 +590,7 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
         {
           citing: { kind: "turn", id: t2 },
           cited: { kind: "turn", id: t1 },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: "contested2",
           headTag: "contested2",

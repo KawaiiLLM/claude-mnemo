@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-  retiredRelationFieldRefusal,
-  type RelationClass,
-} from "../shared/relation-class";
+import { displayEdgeRelation, type RelationClass } from "../shared/relation-class";
 import type { Database } from "bun:sqlite";
 
 import {
@@ -96,7 +93,6 @@ import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
   phasesForTypes,
   validateRelationTarget,
-  type TurnEdgeRelation,
   type TurnPhase,
 } from "../shared/turn-phase";
 
@@ -915,10 +911,9 @@ function recordHomelessMotivatedRetractions(
       citingId: edge.citing.id,
       citedKind: edge.cited.kind,
       citedId: edge.cited.id,
-      // A retraction always addresses a NAMED relation (the `retract…` mirrors
-      // are one per word), so this is never the bare row's null in practice;
-      // the fallback keeps the column non-null rather than asserting.
-      relationWord: edge.relation ?? "",
+      // The audit's `relation_word` column carries the class TOKEN since the
+      // cutover dropped the word column (main-agent-edges ticket 01).
+      relationWord: displayEdgeRelation(edge),
       tailTag: edge.tailTag,
       headTag: edge.headTag,
       outcome: "retracted",
@@ -1281,17 +1276,6 @@ export function evaluateSettlementTurnWrite(
   const proseFields = PROSE_FIELDS.filter(
     (field) => rawInput[field] !== undefined || isFieldEditMode(modeMap[field]),
   );
-
-  // relation-vocabulary-v13 ticket 02: a settlement run still holding the old
-  // seven-word teaching (a worker mid-flight, a cached prompt) is told the WORD
-  // and its replacement rather than "unrecognized key" — the same refusal
-  // `mcp/note.ts` returns, out of the same table.
-  const retiredRelations = retiredRelationFieldRefusal(
-    rawInput as unknown as Record<string, unknown>,
-  );
-  if (retiredRelations) {
-    return { ok: false, message: retiredRelations };
-  }
 
   const touchesReview =
     rawInput.type !== undefined ||

@@ -15,6 +15,8 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { TagNamespaceCollisionError } from "../../src/db/tag-namespace";
 import { upsertSession } from "../../src/db/sessions";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 /**
  * `mergeLaneTag` — lane-model-v12 spec D3d, ticket 15.
@@ -130,7 +132,7 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: (options.relation ?? "extends") as never,
+          ...wordEdgeClass(options.relation ?? "extends"),
           provenance: options.provenance ?? "asserted",
           tailTag: options.tailTag ?? "",
           headTag: options.headTag ?? "",
@@ -170,23 +172,21 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   ): number {
     const tailTag = options.tailTag ?? "";
     const headTag = options.headTag ?? "";
-    const id = db
-      .query<{ id: number }, [number, number, string, string, string, string, number]>(
-        `INSERT INTO memory_edges
-           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-         VALUES ('turn', ?, 'turn', ?, ?, ?, ?, ?, '', '', ?)
-         RETURNING id`,
-      )
-      .get(
-        citing,
-        cited,
-        options.relation ?? "extends",
-        options.provenance ?? "asserted",
-        tailTag,
-        headTag,
-        options.createdAtEpoch ?? NOW,
-      )!.id;
+    // PRE-CUTOVER shape (idempotent): the rebuilt `memory_edges` is UNIQUE on
+    // the pair, so the two-rows-on-one-pair state a lane COLLISION is by
+    // definition exists only in D9's deferral window — which is the one state
+    // the collision arm can still fire in.
+    downgradeToPreCutoverShape(db);
+    const id = seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation: options.relation ?? "extends",
+      relationClass: "use",
+      provenance: options.provenance ?? "asserted",
+      tailTag,
+      headTag,
+      createdAtEpoch: options.createdAtEpoch ?? NOW,
+    });
     const insertSide = db.query<unknown, [number, string, string]>(
       "INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)",
     );
@@ -393,26 +393,34 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     expect(receipt.collisions[0]!.rule).toBe("earlier");
   });
 
-  test("a different RELATION on the same pair is a different key — nothing is folded", () => {
+  // INVERTED by main-agent-edges ticket 01. The merge's identity key used to
+  // include the relation WORD, so two rows of one pair that differed only in
+  // it survived a fold. The cutover made the PAIR the whole key — `mergeLaneTag`
+  // matches it — so those two rows now COLLIDE and one is dropped, which is
+  // the same subtraction the cutover's own fold performs on this stock.
+  test("two stored rows of ONE pair collide once the merge lands them on the same sides", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
-    // Both seeded past the write path, for the same reason the collision
-    // fixtures above are: under main-agent-edges D5 a second write onto this
-    // pair would promote or no-op the FIRST row rather than add a second, and
-    // the property under test is that two STORED rows of one pair that differ
-    // only in relation do not fold into each other.
-    const extendsEdge = legacyEdge(t2, t1, { tailTag: "lane-a", headTag: "lane-a" });
-    const groundsEdge = legacyEdge(t2, t1, {
-      relation: "grounds",
+    // Deferral-window stock: no writer can mint the second row (D5) and the
+    // rebuilt table has no form for it, so the fixture seeds the pre-cutover
+    // shape.
+    const keptEdge = legacyEdge(t2, t1, { tailTag: "lane-a", headTag: "lane-a" });
+    const droppedEdge = legacyEdge(t2, t1, {
+      relation: "verifies",
       tailTag: "lane-b",
       headTag: "lane-b",
     });
 
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
 
-    expect(receipt.collisions).toEqual([]);
-    expect(attributedSides(extendsEdge)).toEqual({ tail: "lane-b", head: "lane-b" });
-    expect(attributedSides(groundsEdge)).toEqual({ tail: "lane-b", head: "lane-b" });
+    expect(receipt.collisions).toHaveLength(1);
+    expect(receipt.collisions[0]).toMatchObject({
+      keptEdgeId: keptEdge,
+      droppedEdgeId: droppedEdge,
+      tailTag: "lane-b",
+      headTag: "lane-b",
+    });
+    expect(attributedSides(keptEdge)).toEqual({ tail: "lane-b", head: "lane-b" });
   });
 
   // -------------------------------------------------------------------------

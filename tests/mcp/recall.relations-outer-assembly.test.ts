@@ -11,6 +11,7 @@ import { getTurn } from "../../src/db/turns";
 import { RELATIONS_FIELD_LEGEND } from "../../src/mcp/relations-view";
 import { recallMemory, recallMemoryDelivery } from "../../src/mcp/recall";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Settlement-read-once spec D8's OUTER assembly. The renderer's own job ends
@@ -101,7 +102,7 @@ describe("the relations response is assembled once (spec D8 outer assembly)", ()
         {
           citing: { kind: "turn", id: getTurn(db, sessionA, 3)!.id },
           cited: { kind: "turn", id: getTurn(db, sessionA, 1)!.id },
-          relation: "extends",
+          ...wordEdgeClass("extends"),
           provenance: "asserted",
           tailTag: "lane-a",
           headTag: "lane-a",

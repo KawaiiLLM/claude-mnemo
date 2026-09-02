@@ -2,8 +2,37 @@ import type { Database } from "bun:sqlite";
 
 import { BUILD_ID } from "../shared/build-id";
 import { recordInitializerBuild } from "./build-state";
-import { isCitationRelation, type CitationRelation } from "./citations";
 import { runWriteTransaction } from "./database";
+import { loadEndpointLaneFacts, type EndpointLaneFacts } from "./edge-side-resolution";
+import {
+  MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_RECEIPT,
+  MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE,
+  MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL,
+  MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE,
+  MAIN_AGENT_EDGES_CUTOVER_WRITER,
+  readMainAgentEdgesCutoverState,
+  type CutoverEdgeDisposition,
+  type MainAgentEdgesCutoverOutcome,
+  type MainAgentEdgesCutoverReceipt,
+  type MainAgentEdgesRollbackOutcome,
+} from "./main-agent-edges-cutover";
+import {
+  NOTE_SETTLEMENT_LEASE_MS,
+  NOTE_SETTLEMENT_MAX_ATTEMPTS,
+  reclaimExpiredNoteSettlementClaims,
+} from "./note-settlement";
+import { resetNoteSettlementJobToStageOne } from "./settlement-job-invalidation";
+import { reindexTurnFromDb } from "./search";
+import {
+  snapshotWriteGateSequence,
+  stampField,
+  stampTurnRelationsRevision,
+} from "./write-gate";
 import { resolveEraCutoff } from "./era";
 import {
   assertLaneRegistrySettled,
@@ -22,10 +51,13 @@ import {
   canonicalizeTagSet,
   countMemoryEdges,
   deriveSideTags,
+  memoryEdgesPredatesCutover,
   rankEdgeProvenance,
   rebuildMemoryEdgeSideTagsIndexCore,
+  selectLogicalEdgeRow,
   writeMemoryEdges,
   type EdgeProvenance,
+  type MemoryEdge,
   type WriteEdgeInput,
 } from "./memory-edges";
 import { canonicalizeSettlementProposalAddresses } from "./note-settlement-proposals";
@@ -33,8 +65,12 @@ import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex, reindexAllSegments } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets, writeMembershipTags } from "./segments";
 import { loadSegmentTagIndex } from "./turn-tag-gate";
-import { LEGACY_RELATION_CLASS } from "../shared/relation-class";
-import { EDGE_RELATIONS } from "../shared/turn-phase";
+import {
+  isRelationClass,
+  type RelationClass,
+  type RelationClassValue,
+  type RelationCoverageValue,
+} from "../shared/relation-class";
 import { ERA_GRANT_COLUMN } from "../segment-era";
 
 const MEMORY_FTS_DDL = `
@@ -2157,7 +2193,35 @@ function hasTable(db: Database, table: string): boolean {
  * `isFirstCreation` only, i.e. BEFORE M-B could ever see the row, so the
  * remap has to happen here rather than being left to the migration.
  */
-function remapLegacyRelation(relation: string): CitationRelation | null {
+/**
+ * THE SEVEN-WORD STORAGE VOCABULARY, FROZEN AS A MIGRATION LITERAL
+ * (main-agent-edges ticket 01). It used to live in `shared/turn-phase.ts`
+ * (`EDGE_RELATIONS`) and `shared/relation-class.ts` (`LEGACY_RELATION_CLASS`),
+ * where readers consulted it at runtime; the cutover dropped the `relation`
+ * column those words lived in, and nothing at runtime names one any more. Two
+ * migrations that run BEFORE the cutover on a database old enough to still
+ * carry the column keep needing the mapping — the `turn_citations` fold and
+ * the v13 backfill — so it survives here, as every other historical word list
+ * in this file does: a literal a vocabulary constant can no longer move.
+ */
+const MEMORY_EDGES_LEGACY_WORD_CLASS: Readonly<
+  Record<string, { relationClass: RelationClass; relationCoverage: RelationCoverageValue }>
+> = Object.freeze({
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: "" },
+  extends: { relationClass: "use", relationCoverage: "" },
+  consume: { relationClass: "use", relationCoverage: "" },
+  grounds: { relationClass: "use", relationCoverage: "" },
+  indexes: { relationClass: "use", relationCoverage: "" },
+});
+const MEMORY_EDGES_LEGACY_WORDS: readonly string[] = Object.keys(MEMORY_EDGES_LEGACY_WORD_CLASS);
+
+function isLegacyRelationWord(value: unknown): value is string {
+  return typeof value === "string" && MEMORY_EDGES_LEGACY_WORDS.includes(value);
+}
+
+function remapLegacyRelation(relation: string): string | null {
   if (relation === "implements") {
     return "consume";
   }
@@ -2170,7 +2234,7 @@ function remapLegacyRelation(relation: string): CitationRelation | null {
   if (relation === "supersedes") {
     return "override";
   }
-  return isCitationRelation(relation) ? relation : null;
+  return isLegacyRelationWord(relation) ? relation : null;
 }
 
 interface LegacyRelationCandidate {
@@ -2196,7 +2260,7 @@ interface LegacyRelationCandidate {
  */
 function pickWinningLegacyRelation(
   candidates: readonly LegacyRelationCandidate[],
-): { relation: CitationRelation | null; provenance: EdgeProvenance; createdAtEpoch: number } {
+): { relation: string | null; provenance: EdgeProvenance; createdAtEpoch: number } {
   const remapped = candidates.map((candidate) => ({
     relation: remapLegacyRelation(candidate.relation),
     provenance: candidate.provenance,
@@ -4075,7 +4139,10 @@ export function ensureMemoryEdgesRelationTurnScoped(
   db: Database,
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): void {
-  if (!hasTable(db, "memory_edges")) {
+  // Post-cutover (main-agent-edges ticket 01) every row is turn->turn by the
+  // rebuilt table's own CHECK, and the stray-row query reads the dropped
+  // `relation` column.
+  if (!hasTable(db, "memory_edges") || !memoryEdgesPredatesCutover(db)) {
     return;
   }
   // A read, not a decision: it only says whether taking the write lock is
@@ -4324,6 +4391,9 @@ function ensureLaneDispositionJustificationEvidence(db: Database): void {
  * when the class is `correct`. Existing rows carry `''` in both and satisfy it.
  */
 function ensureMemoryEdgesRelationClassColumns(db: Database): void {
+  if (!memoryEdgesPredatesCutover(db)) {
+    return;
+  }
   addColumnIfMissing(
     db,
     "memory_edges",
@@ -4447,7 +4517,10 @@ function classifyLegacyMemoryEdgeRelations(
   db: Database,
   nowEpoch: number = Math.floor(Date.now() / 1000),
 ): void {
-  if (!hasTable(db, "memory_edges")) {
+  // Post-cutover (main-agent-edges ticket 01) there is no `relation` column
+  // to classify from; the cutover itself refuses to run without this receipt,
+  // so a post-cutover database always carries it.
+  if (!hasTable(db, "memory_edges") || !memoryEdgesPredatesCutover(db)) {
     return;
   }
   if (hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)) {
@@ -4467,8 +4540,8 @@ function classifyLegacyMemoryEdgeRelations(
 
     const classifiedByRelation: Record<string, number> = {};
     let classified = 0;
-    for (const word of EDGE_RELATIONS) {
-      const { relationClass, relationCoverage } = LEGACY_RELATION_CLASS[word];
+    for (const word of MEMORY_EDGES_LEGACY_WORDS) {
+      const { relationClass, relationCoverage } = MEMORY_EDGES_LEGACY_WORD_CLASS[word]!;
       const changes = classify.run(relationClass, relationCoverage, word).changes;
       classifiedByRelation[word] = changes;
       classified += changes;
@@ -4512,27 +4585,37 @@ function countUnsettledEdges(db: Database): number {
 
 function ensureMemoryEdgesSchema(db: Database): void {
   const isFirstCreation = !hasTable(db, "memory_edges");
-  if (!isFirstCreation) {
-    ensureMemoryEdgesPairIdentity(db);
-    ensureMemoryEdgesRelationVocabulary(db);
-    ensureMemoryEdgesMultiRelation(db);
-    ensureMemoryEdgesSelfReferenceCheck(db);
-    ensureMemoryEdgesVocabularyFlip(db);
-    ensureMemoryEdgesRelationContract(db);
-    ensureMemoryEdgesIndexesRename(db);
-    ensureMemoryEdgesTagSetIdentity(db);
+  // main-agent-edges ticket 01: a database the cutover has already rebuilt is
+  // in its FINAL shape. Every probe in the legacy chain below reads the stored
+  // DDL for a word or a column that shape no longer has (`'narrows'`, the
+  // `relation` column, the bare-pair index) and would misreport "stale", and
+  // `MEMORY_EDGES_DDL`'s own index list names the dropped column — so the
+  // whole pre-cutover chain is skipped by shape, and only the shape-blind
+  // parts (triggers, side index, receipts) run.
+  const postCutover = !isFirstCreation && !memoryEdgesPredatesCutover(db);
+  if (!postCutover) {
+    if (!isFirstCreation) {
+      ensureMemoryEdgesPairIdentity(db);
+      ensureMemoryEdgesRelationVocabulary(db);
+      ensureMemoryEdgesMultiRelation(db);
+      ensureMemoryEdgesSelfReferenceCheck(db);
+      ensureMemoryEdgesVocabularyFlip(db);
+      ensureMemoryEdgesRelationContract(db);
+      ensureMemoryEdgesIndexesRename(db);
+      ensureMemoryEdgesTagSetIdentity(db);
+    }
+    db.exec(MEMORY_EDGES_DDL);
+    // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran
+    // this migration against the production database ahead of release, and the
+    // still-live 0.12.1 bundle's `ON CONFLICT (citing_kind, citing_id,
+    // cited_kind, cited_id)` could no longer prepare against the rebuilt table.
+    // The stopgap (user-approved plan B) was a hand-created 4-column UNIQUE
+    // index restoring that clause — valid only while no writer can mint
+    // multi-relation pairs. This build's writers CAN, so the crutch must go the
+    // moment this code runs; the multi-relation staleness probe keys on the
+    // table's CHECK text and would never notice a surplus index on its own.
+    db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   }
-  db.exec(MEMORY_EDGES_DDL);
-  // 2026-08-21 incident crutch removal ([S15069/T1136]): a review rehearsal ran
-  // this migration against the production database ahead of release, and the
-  // still-live 0.12.1 bundle's `ON CONFLICT (citing_kind, citing_id,
-  // cited_kind, cited_id)` could no longer prepare against the rebuilt table.
-  // The stopgap (user-approved plan B) was a hand-created 4-column UNIQUE
-  // index restoring that clause — valid only while no writer can mint
-  // multi-relation pairs. This build's writers CAN, so the crutch must go the
-  // moment this code runs; the multi-relation staleness probe keys on the
-  // table's CHECK text and would never notice a surplus index on its own.
-  db.exec("DROP INDEX IF EXISTS idx_memory_edges_legacy_pair;");
   // Runs BEFORE the DDL below, whose `CREATE TABLE IF NOT EXISTS` would
   // otherwise leave a legacy-shaped `lane_read_receipts` standing untouched.
   ensureLaneReadMemberCoverageReceipts(db);
@@ -4662,10 +4745,12 @@ export function migrateTurnCitationsToEdges(db: Database): number {
     if (winner.relation === null) {
       continue;
     }
+    const legacy = MEMORY_EDGES_LEGACY_WORD_CLASS[winner.relation]!;
     inputs.push({
       citing: { kind: "turn", id: sample.citingTurnId },
       cited: { kind: "turn", id: sample.citedTurnId },
-      relation: winner.relation,
+      relationClass: legacy.relationClass,
+      relationCoverage: legacy.relationCoverage,
       provenance: winner.provenance,
       // The row being carried across already happened at a real moment;
       // re-stamping it "now" would make "when did this edge first appear" lie.
@@ -4695,6 +4780,1102 @@ function retireLegacyTurnCitationsTable(db: Database): void {
   }
   migrateTurnCitationsToEdges(db);
   db.exec("DROP TABLE turn_citations");
+}
+
+
+// ---------------------------------------------------------------------------
+// main-agent-edges ticket 01 — THE CUTOVER (spec D9, RULED T2419 + T2421)
+// ---------------------------------------------------------------------------
+
+/**
+ * The FINAL `memory_edges` shape (main-agent-edges spec D1): relation FACTS
+ * only. `relation_class` NOT NULL and CHECKed to the three classes, coverage
+ * exactly when the class is `correct`, both sides `''` = undeclared, the PAIR
+ * UNIQUE. No `relation` column — the seven-word vocabulary is gone with it —
+ * and no bare-pair index, because there is no bare row left to cap. Both
+ * kinds are `turn` by CHECK (container-unification D10 narrowed the relation
+ * graph to turn->turn, and every surviving row IS a relation); the columns
+ * stay so every reader's `citing_kind`/`cited_kind` select keeps compiling.
+ *
+ * A FROZEN literal, like every rebuild target in this file: a target that
+ * moved when a vocabulary constant moved would rewrite history.
+ */
+function memoryEdgesPostCutoverTableDdl(tableName: string): string {
+  return `
+  CREATE TABLE ${tableName} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    citing_kind TEXT NOT NULL CHECK (citing_kind = 'turn'),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind = 'turn'),
+    cited_id INTEGER NOT NULL,
+    provenance TEXT NOT NULL CHECK (
+      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged', 'asserted')
+    ),
+    -- A stored side means exactly "this endpoint is in several lanes and this
+    -- is the one" (spec D2); '' is undeclared, never a lane named ''.
+    tail_tag TEXT NOT NULL DEFAULT '',
+    head_tag TEXT NOT NULL DEFAULT '',
+    relation_class TEXT NOT NULL CHECK (relation_class IN ('correct', 'verify', 'use')),
+    relation_coverage TEXT NOT NULL DEFAULT '' CHECK (
+      relation_coverage IN ('', 'full', 'partial')
+      AND (relation_coverage = '') = (relation_class <> 'correct')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    CHECK (citing_id <> cited_id),
+    -- ONE PAIR, ONE ROW (spec D5): the schema refuses what the write path
+    -- never attempts.
+    UNIQUE (citing_kind, citing_id, cited_kind, cited_id)
+  );
+`;
+}
+
+// A NEW name on purpose: the legacy `MEMORY_EDGES_INDEXES_DDL` names
+// `idx_memory_edges_cited` over the dropped column, and a same-named index
+// here would let that DDL's `IF NOT EXISTS` skip silently instead of being
+// kept out by shape (`ensureMemoryEdgesSchema`).
+const MEMORY_EDGES_POST_CUTOVER_INDEXES_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_memory_edges_cited_node
+    ON memory_edges(cited_kind, cited_id);
+`;
+
+/**
+ * THE TAGS INVARIANT (spec D9, transform 1): `turns.tags` is a JSON array of
+ * strings, always. A CHECK cannot contain a subquery; a trigger can, and the
+ * `CASE` evaluates its arms LAZILY (R10-10) so `json_each` never runs on a
+ * value the earlier arms already refused.
+ *
+ * `NEW.tags IS NULL` is reachable only by an explicit NULL (the column's
+ * `NOT NULL DEFAULT '[]'` fills an omitted value before the trigger sees it —
+ * verified on this engine); it is refused here too so the two guards cannot
+ * disagree about what NULL means.
+ */
+const TURNS_TAGS_INVARIANT_TRIGGERS_DDL = `
+  CREATE TRIGGER IF NOT EXISTS turns_tags_string_array_insert
+    BEFORE INSERT ON turns
+    BEGIN
+      SELECT CASE
+        WHEN NEW.tags IS NULL
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (NULL)')
+        WHEN NOT json_valid(NEW.tags)
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (invalid JSON)')
+        WHEN json_type(NEW.tags) <> 'array'
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (not an array)')
+        WHEN EXISTS (SELECT 1 FROM json_each(NEW.tags) WHERE type <> 'text')
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (non-string member)')
+      END;
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS turns_tags_string_array_update
+    BEFORE UPDATE OF tags ON turns
+    BEGIN
+      SELECT CASE
+        WHEN NEW.tags IS NULL
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (NULL)')
+        WHEN NOT json_valid(NEW.tags)
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (invalid JSON)')
+        WHEN json_type(NEW.tags) <> 'array'
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (not an array)')
+        WHEN EXISTS (SELECT 1 FROM json_each(NEW.tags) WHERE type <> 'text')
+          THEN RAISE(ABORT, 'turns.tags must be a JSON array of strings (non-string member)')
+      END;
+    END;
+`;
+
+const TURNS_TAGS_INVARIANT_TRIGGER_NAMES = [
+  "turns_tags_string_array_insert",
+  "turns_tags_string_array_update",
+] as const;
+
+/**
+ * Rebuild `turns` with `tags` either ENFORCED (`NOT NULL DEFAULT '[]'` plus the
+ * two triggers — the cutover) or RELAXED (nullable, no trigger — the rollback).
+ * Same create/copy/drop/rename shape as `retireTurnCitesRecordedColumn`, same
+ * canonical column list, same conditional-column carry and the same
+ * unexpected-column guard, so a column this codebase does not know about is
+ * a named refusal and never a silent drop. The caller holds the transaction
+ * and has `PRAGMA foreign_keys` OFF.
+ *
+ * The `type` CHECK text is copied verbatim: `turnsTypeColumnIsStale` probes
+ * for it, and a rebuild that paraphrased it would re-arm that migration.
+ */
+function rebuildTurnsForTagsInvariant(db: Database, mode: "enforce" | "relax"): void {
+  const carriedColumns = presentConditionalTurnsColumns(db);
+  const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
+  const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
+  const canonicalColumns = [
+    "id", "session_id", "prompt_number", "content_prompt_id",
+    "was_interrupted", "was_rolled_back", "status", "user_prompt",
+    "assistant_response", "assistant_transcript", "title", "content",
+    "insight", "type", "significance_grade", "tags",
+    "files_read", "files_modified", "tool_call_count",
+    "transcript_line_start",
+    "consulted_memories", "compact_boundary_uuid", "parent_turn_id",
+    "created_at_epoch", "updated_at_epoch",
+  ];
+  assertNoUnexpectedTurnsColumns(
+    db,
+    [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
+    ["cites_recorded", "election_tier"],
+    `rebuildTurnsForTagsInvariant(${mode})`,
+  );
+  const tagsColumnDdl = mode === "enforce" ? "tags TEXT NOT NULL DEFAULT '[]'" : "tags TEXT";
+  const columnList = `
+          id, session_id, prompt_number, content_prompt_id, was_interrupted,
+          was_rolled_back, status, user_prompt, assistant_response,
+          assistant_transcript, title, content, insight, type,
+          significance_grade, tags, files_read, files_modified,
+          tool_call_count, transcript_line_start,
+          ${carriedColumnNames ? `${carriedColumnNames},` : ""}
+          consulted_memories, compact_boundary_uuid, parent_turn_id,
+          created_at_epoch, updated_at_epoch`;
+
+  db.exec(`
+        CREATE TABLE turns_tags_invariant_rebuild (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          prompt_number INTEGER NOT NULL,
+          content_prompt_id TEXT,
+          was_interrupted INTEGER NOT NULL DEFAULT 0,
+          was_rolled_back INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'active',
+          user_prompt TEXT,
+          assistant_response TEXT,
+          assistant_transcript TEXT,
+          title TEXT,
+          content TEXT,
+          insight TEXT,
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
+          significance_grade INTEGER CHECK (
+            significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+          ),
+          ${tagsColumnDdl},
+          files_read TEXT,
+          files_modified TEXT,
+          tool_call_count INTEGER,
+          transcript_line_start INTEGER,
+${carriedColumnDdl}
+          consulted_memories TEXT,
+          compact_boundary_uuid TEXT,
+          parent_turn_id INTEGER,
+          created_at_epoch INTEGER NOT NULL,
+          updated_at_epoch INTEGER,
+          UNIQUE(session_id, prompt_number)
+        )
+  `);
+  // Prepared-and-run, never a multi-statement `exec`: bun:sqlite's `exec`
+  // swallows one statement's constraint failure and runs the rest.
+  db.query(
+    `INSERT INTO turns_tags_invariant_rebuild (${columnList}) SELECT ${columnList} FROM turns`,
+  ).run();
+  db.exec("DROP TABLE turns");
+  db.exec("ALTER TABLE turns_tags_invariant_rebuild RENAME TO turns");
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
+      ON turns(session_id, prompt_number)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_turns_status_created
+      ON turns(status, created_at_epoch)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_turns_created_at
+      ON turns(created_at_epoch)
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+      ON turns(session_id, compact_boundary_uuid)
+      WHERE compact_boundary_uuid IS NOT NULL
+  `);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+      ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+  `);
+  // From the SHARED constants, never a second copy of their bodies.
+  db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
+  if (mode === "enforce") {
+    db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
+  }
+}
+
+/** Re-create every archived trigger on `turns` that the rebuild's own shared constants did not already put back. */
+function reexecArchivedTurnsTriggers(db: Database): void {
+  const archived = db
+    .query<{ name: string; sql: string | null }, []>(
+      `SELECT name, sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+        WHERE kind = 'trigger' AND tbl_name = 'turns' AND sql IS NOT NULL`,
+    )
+    .all();
+  for (const trigger of archived) {
+    const present =
+      db
+        .query<{ name: string }, [string]>(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        )
+        .get(trigger.name) !== null;
+    if (!present && trigger.sql) {
+      db.exec(trigger.sql);
+    }
+  }
+}
+
+/**
+ * Standing guard for a post-cutover database: the tags invariant is DDL, and a
+ * later `turns` rebuild that forgot it would silently un-ship it. If the
+ * column has gone nullable the table is rebuilt again (enforce); if only the
+ * triggers are missing they are re-created. A no-op on every ordinary open.
+ */
+function ensureTurnsTagsInvariant(db: Database): void {
+  const tagsColumn = db
+    .query<{ name: string; notnull: number }, []>("PRAGMA table_info(turns)")
+    .all()
+    .find((column) => column.name === "tags");
+  if (!tagsColumn) {
+    return;
+  }
+  if (tagsColumn.notnull === 0) {
+    db.exec("PRAGMA foreign_keys = OFF;");
+    try {
+      runWriteTransaction(db, () => {
+        db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run();
+        rebuildTurnsForTagsInvariant(db, "enforce");
+      });
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
+    return;
+  }
+  db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
+}
+
+interface CutoverEdgeRow {
+  id: number;
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  relation: string | null;
+  provenance: string;
+  tailTag: string;
+  headTag: string;
+  relationClass: string;
+  relationCoverage: string;
+  createdAtEpoch: number;
+}
+
+/** One surviving logical edge, as the rebuilt table will hold it. */
+interface CutoverSurvivor {
+  id: number;
+  /** Carried verbatim so the rebuilt table's own CHECK (`= 'turn'`) is what refuses a stray kind, never a silent rewrite. */
+  citingKind: string;
+  citingId: number;
+  citedKind: string;
+  citedId: number;
+  provenance: string;
+  tailTag: string;
+  headTag: string;
+  relationClass: RelationClass;
+  relationCoverage: RelationCoverageValue;
+  createdAtEpoch: number;
+}
+
+function cutoverRowToMemoryEdge(row: CutoverEdgeRow): MemoryEdge {
+  return {
+    id: row.id,
+    citing: { kind: row.citingKind as MemoryEdge["citing"]["kind"], id: row.citingId },
+    cited: { kind: row.citedKind as MemoryEdge["cited"]["kind"], id: row.citedId },
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+    relationClass: row.relationClass as RelationClassValue,
+    relationCoverage: row.relationCoverage as RelationCoverageValue,
+    provenance: row.provenance as MemoryEdge["provenance"],
+    createdAtEpoch: row.createdAtEpoch,
+  };
+}
+
+/**
+ * Transforms 2–5 over the class-bearing rows, as a PURE plan: which rows
+ * survive (and how they are rewritten), which are folded away, which are
+ * deleted for an unattributable side, and the per-transform counts the
+ * receipt reports. Nothing here touches the database; `runMainAgentEdgesCutover`
+ * applies the plan. Kept separate so the fold can be pinned against
+ * `selectLogicalEdgeRow` on a fixture with no database in the loop.
+ *
+ * THE FOLD (transform 2): per pair, the survivor is `selectLogicalEdgeRow`'s
+ * choice — IMPORTED, never restated (peer S15069/T2438): most specific class,
+ * then the lowest row id, whose provenance and creation time survive. Two
+ * rules ride on top of the survivor and are D9's own sentences: its coverage
+ * is `full` if ANY correct row of the pair said `full`; a side keeps a
+ * declaration only if exactly ONE distinct VALID qualified declaration exists
+ * across the folded rows (identical duplicates are one declaration, not an
+ * ambiguity; a declaration no endpoint lane supports is not a candidate).
+ *
+ * THE CLEARS (3, 4) and THE DELETE (5) then apply per side of every survivor,
+ * single-row pairs included, in the spec's order: a declaration not among the
+ * endpoint's lanes is cleared as invalid; a declaration on an endpoint in
+ * fewer than two lanes is cleared as redundant; a blank side on an endpoint in
+ * two or more lanes is unattributable and the edge is deleted.
+ */
+export function planMainAgentEdgesCutover(
+  rows: readonly CutoverEdgeRow[],
+  facts: ReadonlyMap<number, EndpointLaneFacts>,
+): {
+  survivors: CutoverSurvivor[];
+  dispositions: Map<number, CutoverEdgeDisposition>;
+  stampedCiters: Set<number>;
+  counts: Pick<
+    MainAgentEdgesCutoverReceipt,
+    | "foldedPairs"
+    | "foldedRowsDeleted"
+    | "foldedPairsByClass"
+    | "foldedPairsBySidesOnly"
+    | "coveragePromoted"
+    | "redundantCleared"
+    | "invalidCleared"
+    | "ambiguousDeleted"
+    | "wordlessDeleted"
+  >;
+} {
+  const dispositions = new Map<number, CutoverEdgeDisposition>();
+  const stampedCiters = new Set<number>();
+  const counts = {
+    foldedPairs: 0,
+    foldedRowsDeleted: 0,
+    foldedPairsByClass: 0,
+    foldedPairsBySidesOnly: 0,
+    coveragePromoted: 0,
+    redundantCleared: 0,
+    invalidCleared: 0,
+    ambiguousDeleted: 0,
+    wordlessDeleted: 0,
+  };
+
+  const byPair = new Map<string, CutoverEdgeRow[]>();
+  for (const row of rows) {
+    if (!isRelationClass(row.relationClass)) {
+      dispositions.set(row.id, "deleted-wordless");
+      counts.wordlessDeleted += 1;
+      continue;
+    }
+    const key = `${row.citingKind}:${row.citingId}>${row.citedKind}:${row.citedId}`;
+    const bucket = byPair.get(key);
+    if (bucket) {
+      bucket.push(row);
+    } else {
+      byPair.set(key, [row]);
+    }
+  }
+
+  const lanesOf = (turnId: number): readonly string[] => facts.get(turnId)?.lanes ?? [];
+  const survivors: CutoverSurvivor[] = [];
+
+  for (const group of byPair.values()) {
+    const winner = selectLogicalEdgeRow(group.map(cutoverRowToMemoryEdge))!;
+    const winnerRow = group.find((row) => row.id === winner.id)!;
+    let relationCoverage = winnerRow.relationCoverage as RelationCoverageValue;
+    let tailTag = winnerRow.tailTag;
+    let headTag = winnerRow.headTag;
+    let rewritten = false;
+
+    if (group.length > 1) {
+      counts.foldedPairs += 1;
+      counts.foldedRowsDeleted += group.length - 1;
+      const classes = new Set(group.map((row) => `${row.relationClass}/${row.relationCoverage}`));
+      if (classes.size > 1) {
+        counts.foldedPairsByClass += 1;
+      } else {
+        counts.foldedPairsBySidesOnly += 1;
+      }
+      for (const row of group) {
+        if (row.id !== winner.id) {
+          dispositions.set(row.id, "folded");
+        }
+      }
+      // D9: coverage = any full -> full, only when the class is correct.
+      if (
+        winner.relationClass === "correct" &&
+        relationCoverage !== "full" &&
+        group.some((row) => row.relationClass === "correct" && row.relationCoverage === "full")
+      ) {
+        relationCoverage = "full";
+        counts.coveragePromoted += 1;
+        rewritten = true;
+      }
+      // D9: one DISTINCT valid qualified declaration per side survives the fold.
+      const pickSide = (side: "tail" | "head"): string => {
+        const endpointLanes = lanesOf(side === "tail" ? winnerRow.citingId : winnerRow.citedId);
+        const distinctValid = new Set(
+          group
+            .map((row) => (side === "tail" ? row.tailTag : row.headTag))
+            .filter((tag) => tag !== "" && endpointLanes.includes(tag)),
+        );
+        return distinctValid.size === 1 ? [...distinctValid][0]! : "";
+      };
+      const foldedTail = pickSide("tail");
+      const foldedHead = pickSide("head");
+      if (foldedTail !== tailTag || foldedHead !== headTag) {
+        rewritten = true;
+      }
+      tailTag = foldedTail;
+      headTag = foldedHead;
+    }
+
+    // Transforms 3 and 4, per side, on the (possibly folded) survivor.
+    const clearSide = (tag: string, endpointId: number): string => {
+      if (tag === "") {
+        return tag;
+      }
+      const endpointLanes = lanesOf(endpointId);
+      if (!endpointLanes.includes(tag)) {
+        counts.invalidCleared += 1;
+        rewritten = true;
+        return "";
+      }
+      if (endpointLanes.length < 2) {
+        counts.redundantCleared += 1;
+        rewritten = true;
+        return "";
+      }
+      return tag;
+    };
+    tailTag = clearSide(tailTag, winnerRow.citingId);
+    headTag = clearSide(headTag, winnerRow.citedId);
+
+    // Transform 5: a blank side on an endpoint in two or more lanes cannot be
+    // attributed by anyone. Deleted, receipted, counted (T2421).
+    const tailAmbiguous = tailTag === "" && lanesOf(winnerRow.citingId).length >= 2;
+    const headAmbiguous = headTag === "" && lanesOf(winnerRow.citedId).length >= 2;
+    if (tailAmbiguous || headAmbiguous) {
+      dispositions.set(winner.id, "deleted-ambiguous");
+      counts.ambiguousDeleted += 1;
+      stampedCiters.add(winnerRow.citingId);
+      continue;
+    }
+
+    dispositions.set(winner.id, rewritten ? "rewritten" : "kept");
+    if (rewritten || group.length > 1) {
+      stampedCiters.add(winnerRow.citingId);
+    }
+    survivors.push({
+      id: winner.id,
+      citingKind: winnerRow.citingKind,
+      citingId: winnerRow.citingId,
+      citedKind: winnerRow.citedKind,
+      citedId: winnerRow.citedId,
+      provenance: winnerRow.provenance,
+      tailTag,
+      headTag,
+      relationClass: winner.relationClass as RelationClass,
+      relationCoverage,
+      createdAtEpoch: winnerRow.createdAtEpoch,
+    });
+  }
+
+  return { survivors, dispositions, stampedCiters, counts };
+}
+
+/** Rows in `sqlite_master` for one table: the table itself, its indexes and its triggers. */
+function archiveTableDdl(db: Database, tableName: string): void {
+  const insert = db.query<unknown, [string, string, string, string | null]>(
+    `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE} (kind, name, tbl_name, sql)
+     VALUES (?, ?, ?, ?)`,
+  );
+  for (const row of db
+    .query<{ type: string; name: string; tblName: string; sql: string | null }, [string]>(
+      `SELECT type, name, tbl_name AS tblName, sql FROM sqlite_master
+        WHERE tbl_name = ? AND type IN ('table', 'index', 'trigger')`,
+    )
+    .all(tableName)) {
+    insert.run(row.type, row.name, row.tblName, row.sql);
+  }
+  const seq = db
+    .query<{ seq: number }, [string]>("SELECT seq FROM sqlite_sequence WHERE name = ?")
+    .get(tableName);
+  if (seq) {
+    db.query<unknown, [string, number]>(
+      `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE} (name, seq) VALUES (?, ?)`,
+    ).run(tableName, seq.seq);
+  }
+}
+
+function restoreArchivedSequence(db: Database, tableName: string): void {
+  const archived = db
+    .query<{ seq: number }, [string]>(
+      `SELECT seq FROM ${MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE} WHERE name = ?`,
+    )
+    .get(tableName);
+  if (!archived) {
+    return;
+  }
+  // AUTOINCREMENT's ledger: never let a rebuilt table hand out an id below
+  // what the old one had reached, whatever rows the copy kept. `sqlite_sequence`
+  // has no key to upsert on, so: update if present, insert otherwise.
+  const current = db
+    .query<{ seq: number }, [string]>("SELECT seq FROM sqlite_sequence WHERE name = ?")
+    .get(tableName);
+  if (current) {
+    db.query<unknown, [number, string]>(
+      "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?",
+    ).run(archived.seq, tableName);
+  } else {
+    db.query<unknown, [string, number]>(
+      "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+    ).run(tableName, archived.seq);
+  }
+}
+
+/** Archive the current `relations`/`tags` stamps of `turnIds` — the absence of one included (`writer IS NULL`). */
+function archiveTurnStamps(db: Database, turnIds: ReadonlySet<number>, fields: readonly string[]): void {
+  const read = db.query<
+    { writer: string; writeSequence: number; writtenAtEpoch: number },
+    [number, string]
+  >(
+    `SELECT writer, write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
+       FROM write_gate_stamps WHERE entity_type = 'turn' AND entity_id = ? AND field = ?`,
+  );
+  const insert = db.query<
+    unknown,
+    [number, string, string | null, number | null, number | null]
+  >(
+    `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE}
+       (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+     VALUES ('turn', ?, ?, ?, ?, ?)`,
+  );
+  for (const turnId of turnIds) {
+    for (const field of fields) {
+      const stamp = read.get(turnId, field);
+      insert.run(
+        turnId,
+        field,
+        stamp?.writer ?? null,
+        stamp?.writeSequence ?? null,
+        stamp?.writtenAtEpoch ?? null,
+      );
+    }
+  }
+}
+
+/**
+ * THE ONE-SHOT (main-agent-edges spec D9). One `runWriteTransaction`, in this
+ * order: the durable fence -> the receipts -> transforms 1–6 -> `PRAGMA
+ * foreign_key_check` -> side-index verification -> the completion marker,
+ * LAST. A crash anywhere rolls the whole thing back and the old schema stands.
+ *
+ * THE FENCE (R10-8). Hooks, the MCP server and the worker each run
+ * `initializeSchema` independently, so the gate lives in the database: the
+ * cutover runs only when no `note_settlement_jobs` row is `claimed` — AFTER
+ * reaping expired leases exactly as the claim path does
+ * (`reclaimExpiredNoteSettlementClaims`, generation bumped), since lease
+ * expiry never mutates `claimed` on its own. A claim rows is durable and
+ * visible to every process; an in-flight settlement child holds one until it
+ * completes or its lease expires, and a child without a claim cannot write.
+ * While a claim is live this returns `deferred` — the reap commits, nothing
+ * else moves, every initializer proceeds on the OLD schema, the new worker
+ * claims nothing (`claimNextNoteSettlementJob`), and the next open retries.
+ * Before the transforms, every pending or failed job that kept `stage =
+ * 'edges'` is reset to stage 1 (`resetNoteSettlementJobToStageOne`): its
+ * frozen stage-2 worklist was computed over the unfolded table.
+ *
+ * WHAT IS NOT RECONCILED, AND WHY. Transform 1 rewrites `tags` for NULL,
+ * non-array and non-string-member values; none of those changes the tag LIST
+ * a reader derived from the column (all three already read as the string
+ * members), so the membership the primitive derives from that list is already
+ * consistent and the reconcile the spec names is a no-op by construction. The
+ * `tags` field is stamped, the segment facets go stale through the existing
+ * trigger and are repaired after commit, and the FTS row is rebuilt.
+ *
+ * PRECONDITION: the v13 backfill receipt. The cutover treats `relation_class
+ * = ''` as "wordless" (D1: deleted); on a database whose worded rows were never
+ * classified that would delete every edge, so it refuses by name instead.
+ */
+export function runMainAgentEdgesCutover(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+  nowMs: number = Date.now(),
+): MainAgentEdgesCutoverOutcome {
+  if (!hasTable(db, "memory_edges")) {
+    return { ran: "already" };
+  }
+  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
+  if (!memoryEdgesPredatesCutover(db)) {
+    ensureTurnsTagsInvariant(db);
+    return { ran: "already" };
+  }
+  if (!hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)) {
+    throw new Error(
+      "main-agent-edges cutover refused: the relation-class backfill " +
+        `(${MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT}) has not run on this database, so ` +
+        "relation_class = '' would mean 'unclassified' rather than 'wordless' and the cutover " +
+        "would delete every classified edge. Run initializeSchema first.",
+    );
+  }
+
+  const startedAt = Date.now();
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    return runWriteTransaction(db, (): MainAgentEdgesCutoverOutcome => {
+      if (!memoryEdgesPredatesCutover(db)) {
+        return { ran: "already" };
+      }
+
+      // ---- the fence ----------------------------------------------------
+      const claimsReaped = reclaimExpiredNoteSettlementClaims(db, {
+        sessionId: null,
+        nowEpoch,
+        leaseCutoffEpoch: Math.floor((nowMs - NOTE_SETTLEMENT_LEASE_MS) / 1000),
+        maxAttempts: NOTE_SETTLEMENT_MAX_ATTEMPTS,
+      });
+      const claimedJobs =
+        db
+          .query<{ n: number }, []>(
+            "SELECT COUNT(*) AS n FROM note_settlement_jobs WHERE status = 'claimed'",
+          )
+          .get()?.n ?? 0;
+      if (claimedJobs > 0) {
+        return { ran: "deferred", claimedJobs };
+      }
+      let edgesStageJobsReset = 0;
+      if (hasColumn(db, "note_settlement_jobs", "stage")) {
+        for (const job of db
+          .query<{ id: number }, []>(
+            `SELECT id FROM note_settlement_jobs
+              WHERE status IN ('pending', 'failed') AND stage = 'edges' ORDER BY id`,
+          )
+          .all()) {
+          if (resetNoteSettlementJobToStageOne(db, job.id, nowEpoch) !== null) {
+            edgesStageJobsReset += 1;
+          }
+        }
+      }
+
+      // ---- a rolled-back run's archive is consumed; this run's replaces it ----
+      for (const table of [
+        MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
+        MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE,
+        MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE,
+        MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE,
+        MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
+        MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE,
+      ]) {
+        db.query(`DELETE FROM ${table}`).run();
+      }
+      db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(
+        MAIN_AGENT_EDGES_CUTOVER_RECEIPT,
+      );
+
+      // ---- receipts: DDL and sequences, before anything is rebuilt --------
+      archiveTableDdl(db, "memory_edges");
+      archiveTableDdl(db, "turns");
+
+      // ---- transform 1: the tags invariant, by RAW update ------------------
+      const nullTurns = db
+        .query<{ id: number }, []>("SELECT id FROM turns WHERE tags IS NULL")
+        .all()
+        .map((row) => row.id);
+      const nonArrayTurns = db
+        .query<{ id: number }, []>(
+          `SELECT id FROM turns
+            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`,
+        )
+        .all()
+        .map((row) => row.id);
+      const nonStringTurns = db
+        .query<{ id: number }, []>(
+          `SELECT id FROM turns t
+            WHERE tags IS NOT NULL AND json_valid(tags) AND json_type(tags) = 'array'
+              AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE type <> 'text')`,
+        )
+        .all()
+        .map((row) => row.id);
+      const normalisedTurns = new Set([...nullTurns, ...nonArrayTurns, ...nonStringTurns]);
+      const archiveTags = db.query<unknown, [number]>(
+        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE} (turn_id, tags)
+         SELECT id, tags FROM turns WHERE id = ?`,
+      );
+      const archiveMembership = db.query<unknown, [number]>(
+        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE}
+           (segment_id, turn_id, created_at_epoch)
+         SELECT segment_id, turn_id, created_at_epoch FROM segment_members WHERE turn_id = ?`,
+      );
+      for (const turnId of normalisedTurns) {
+        archiveTags.run(turnId);
+        archiveMembership.run(turnId);
+      }
+      const nullToEmpty = db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run().changes;
+      const nonArrayToEmpty = db
+        .query(
+          `UPDATE turns SET tags = '[]'
+            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`,
+        )
+        .run().changes;
+      const nonStringMembersDropped = db
+        .query(
+          `UPDATE turns
+              SET tags = (SELECT json_group_array(value) FROM json_each(turns.tags) WHERE type = 'text')
+            WHERE json_valid(tags) AND json_type(tags) = 'array'
+              AND EXISTS (SELECT 1 FROM json_each(turns.tags) WHERE type <> 'text')`,
+        )
+        .run().changes;
+
+      // ---- transforms 2–5: the plan ---------------------------------------
+      const rows = db
+        .query<CutoverEdgeRow, []>(
+          `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
+                  cited_kind AS citedKind, cited_id AS citedId,
+                  relation, provenance, tail_tag AS tailTag, head_tag AS headTag,
+                  COALESCE(relation_class, '') AS relationClass,
+                  COALESCE(relation_coverage, '') AS relationCoverage,
+                  created_at_epoch AS createdAtEpoch
+             FROM memory_edges ORDER BY id`,
+        )
+        .all();
+      const endpointIds = [
+        ...new Set(
+          rows
+            .filter((row) => isRelationClass(row.relationClass))
+            .flatMap((row) => [row.citingId, row.citedId]),
+        ),
+      ];
+      const facts = loadEndpointLaneFacts(db, endpointIds);
+      const plan = planMainAgentEdgesCutover(rows, facts);
+
+      // ---- receipts: every old edge row, the stamps of every touched turn ----
+      const archiveEdge = db.query<
+        unknown,
+        [number, string, number, string, number, string | null, string, string, string, string, string, number, string]
+      >(
+        `INSERT INTO ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}
+           (id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch, disposition)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        archiveEdge.run(
+          row.id, row.citingKind, row.citingId, row.citedKind, row.citedId,
+          row.relation, row.provenance, row.tailTag, row.headTag,
+          row.relationClass, row.relationCoverage, row.createdAtEpoch,
+          plan.dispositions.get(row.id) ?? "kept",
+        );
+      }
+      archiveTurnStamps(db, plan.stampedCiters, ["relations"]);
+      archiveTurnStamps(db, normalisedTurns, ["tags"]);
+
+      // ---- stamps (R10-10): every citer whose row was folded/cleared/deleted, every normalised turn ----
+      for (const citerId of [...plan.stampedCiters].sort((a, b) => a - b)) {
+        stampTurnRelationsRevision(db, citerId, MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
+      }
+      for (const turnId of [...normalisedTurns].sort((a, b) => a - b)) {
+        stampField(db, "turn", turnId, "tags", MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
+      }
+
+      // ---- transform 6: rebuild memory_edges on the pair key, without the word ----
+      const rowsBefore = rows.length;
+      db.exec(memoryEdgesPostCutoverTableDdl("memory_edges_post_cutover"));
+      const insertSurvivor = db.query<
+        unknown,
+        [number, string, number, string, number, string, string, string, string, string, number]
+      >(
+        `INSERT INTO memory_edges_post_cutover
+           (id, citing_kind, citing_id, cited_kind, cited_id, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const survivor of plan.survivors) {
+        insertSurvivor.run(
+          survivor.id, survivor.citingKind, survivor.citingId, survivor.citedKind, survivor.citedId,
+          survivor.provenance,
+          survivor.tailTag, survivor.headTag, survivor.relationClass,
+          survivor.relationCoverage, survivor.createdAtEpoch,
+        );
+      }
+      db.exec("DROP TABLE memory_edges");
+      db.exec("ALTER TABLE memory_edges_post_cutover RENAME TO memory_edges");
+      db.exec(MEMORY_EDGES_POST_CUTOVER_INDEXES_DDL);
+      restoreArchivedSequence(db, "memory_edges");
+      const rowsAfter = countMemoryEdges(db);
+      if (rowsAfter !== plan.survivors.length) {
+        throw new Error(
+          `main-agent-edges cutover: ${plan.survivors.length} survivors planned, ${rowsAfter} rows landed`,
+        );
+      }
+
+      // The side index, from the surviving declarations, then verified
+      // row-for-row against them in both directions.
+      rebuildMemoryEdgeSideTagsIndexCore(db);
+      const sideMismatch =
+        db
+          .query<{ n: number }, []>(
+            `SELECT COUNT(*) AS n FROM (
+               SELECT id AS edge_row_id, 'tail' AS side, tail_tag AS tag FROM memory_edges WHERE tail_tag <> ''
+               UNION ALL
+               SELECT id, 'head', head_tag FROM memory_edges WHERE head_tag <> ''
+               EXCEPT
+               SELECT edge_row_id, side, tag FROM memory_edge_side_tags
+             )`,
+          )
+          .get()?.n ?? 0;
+      const indexOrphans =
+        db
+          .query<{ n: number }, []>(
+            `SELECT COUNT(*) AS n FROM (
+               SELECT edge_row_id, side, tag FROM memory_edge_side_tags
+               EXCEPT
+               SELECT id, 'tail', tail_tag FROM memory_edges WHERE tail_tag <> ''
+               EXCEPT
+               SELECT id, 'head', head_tag FROM memory_edges WHERE head_tag <> ''
+             )`,
+          )
+          .get()?.n ?? 0;
+      if (sideMismatch > 0 || indexOrphans > 0) {
+        throw new Error(
+          `main-agent-edges cutover: side index disagrees with the surviving declarations ` +
+            `(${sideMismatch} missing, ${indexOrphans} orphaned)`,
+        );
+      }
+      const sideIndexRows = countMemoryEdgeSideTagRows(db);
+
+      // ---- transform 1's DDL half: turns with the tags invariant ----------
+      rebuildTurnsForTagsInvariant(db, "enforce");
+      reexecArchivedTurnsTriggers(db);
+      restoreArchivedSequence(db, "turns");
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `main-agent-edges cutover left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
+        );
+      }
+
+      // ---- the completion marker, LAST ------------------------------------
+      const writeGateSequence = snapshotWriteGateSequence(db);
+      const receipt: MainAgentEdgesCutoverReceipt = {
+        tagsNormalised: {
+          nullToEmpty,
+          nonArrayToEmpty,
+          nonStringMembersDropped,
+          turnsChanged: normalisedTurns.size,
+        },
+        ...plan.counts,
+        rowsBefore,
+        rowsAfter,
+        sideIndexRows,
+        citersStamped: plan.stampedCiters.size,
+        claimsReaped,
+        edgesStageJobsReset,
+        writeGateSequence,
+        durationMs: Date.now() - startedAt,
+      };
+      writeMigrationReceipt(db, MAIN_AGENT_EDGES_CUTOVER_RECEIPT, nowEpoch, receipt);
+      db.query<unknown, [number, number]>(
+        `INSERT INTO ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
+           (id, status, applied_at_epoch, write_gate_sequence, rolled_back_at_epoch)
+         VALUES (1, 'complete', ?, ?, NULL)
+         ON CONFLICT(id) DO UPDATE SET
+           status = 'complete', applied_at_epoch = excluded.applied_at_epoch,
+           write_gate_sequence = excluded.write_gate_sequence, rolled_back_at_epoch = NULL`,
+      ).run(nowEpoch, writeGateSequence);
+
+      return { ran: "cut-over", receipt };
+    });
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+    // Derived state, rebuilt rather than receipted (spec D9): the facets the
+    // tags update marked stale, and the FTS rows of the normalised turns.
+    if (!memoryEdgesPredatesCutover(db)) {
+      repairStaleSegmentFacets(db);
+      for (const row of db
+        .query<{ turnId: number }, []>(
+          `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
+        )
+        .all()) {
+        reindexTurnFromDb(db, row.turnId);
+      }
+    }
+  }
+}
+
+/**
+ * THE ROLLBACK TOOL (spec D9): put the pre-cutover state back from the
+ * receipt, byte for byte, inside the rollback boundary — and REFUSE outside
+ * it. OFFLINE ONLY: run it with the worker stopped and no hook or MCP process
+ * open; nothing here can verify that, so the caller owns it.
+ *
+ * Refuses when: the cutover has not run; it was already rolled back; any
+ * `relations`/`tags` stamp carries a sequence above the recorded boundary, or
+ * any `memory_edges` row has an id above the archived maximum — either means
+ * a receipt-owned domain (relation rows, `turns.tags`, `segment_members`) was
+ * written since, and restoring old rows would overwrite that write.
+ *
+ * Restores: `memory_edges` from the archived DDL and rows (ids kept), its
+ * archived indexes and `sqlite_sequence`; `turns` rebuilt with the RELAXED
+ * tags column, the archived `tags` values (NULL included) put back, the
+ * archived triggers re-created; `segment_members` and the write-gate stamps
+ * of the archived turns, absence restored as absence. Rebuilds: the side
+ * index, the stale facets, the FTS rows of the archived turns. Then flips the
+ * marker to `rolled_back`; the next open runs the cutover again over a fresh
+ * archive.
+ */
+export function rollbackMainAgentEdgesCutover(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): MainAgentEdgesRollbackOutcome {
+  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
+  const state = readMainAgentEdgesCutoverState(db);
+  if (state?.status === "rolled_back") {
+    return { ok: false, refusal: { reason: "already-rolled-back" } };
+  }
+  if (state === null || memoryEdgesPredatesCutover(db)) {
+    return { ok: false, refusal: { reason: "not-cut-over" } };
+  }
+  const stampsAfterBoundary =
+    db
+      .query<{ n: number }, [number]>(
+        `SELECT COUNT(*) AS n FROM write_gate_stamps
+          WHERE entity_type = 'turn' AND field IN ('relations', 'tags') AND write_sequence > ?`,
+      )
+      .get(state.writeGateSequence)?.n ?? 0;
+  const archivedMaxId =
+    db
+      .query<{ n: number | null }, []>(
+        `SELECT MAX(id) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`,
+      )
+      .get()?.n ?? 0;
+  const edgeRowsAfterBoundary =
+    db
+      .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM memory_edges WHERE id > ?")
+      .get(archivedMaxId)?.n ?? 0;
+  if (stampsAfterBoundary > 0 || edgeRowsAfterBoundary > 0) {
+    return {
+      ok: false,
+      refusal: { reason: "written-since", stampsAfterBoundary, edgeRowsAfterBoundary },
+    };
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    const outcome = runWriteTransaction(db, (): MainAgentEdgesRollbackOutcome => {
+      // ---- memory_edges: the archived DDL, rows and indexes ---------------
+      const tableDdl = db
+        .query<{ sql: string }, []>(
+          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'table' AND name = 'memory_edges'`,
+        )
+        .get();
+      if (!tableDdl) {
+        throw new Error("main-agent-edges rollback: the archived memory_edges DDL is missing");
+      }
+      db.exec("DROP TABLE memory_edges");
+      db.exec(tableDdl.sql);
+      const edgesRestored = db
+        .query(
+          `INSERT INTO memory_edges
+             (id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+              tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+           SELECT id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+                  tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch
+             FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY id`,
+        )
+        .run().changes;
+      for (const index of db
+        .query<{ sql: string }, []>(
+          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
+            WHERE kind = 'index' AND tbl_name = 'memory_edges' AND sql IS NOT NULL`,
+        )
+        .all()) {
+        db.exec(index.sql);
+      }
+      restoreArchivedSequence(db, "memory_edges");
+      rebuildMemoryEdgeSideTagsIndexCore(db);
+
+      // ---- turns: relaxed column, archived tags, membership, stamps ---------
+      rebuildTurnsForTagsInvariant(db, "relax");
+      reexecArchivedTurnsTriggers(db);
+      restoreArchivedSequence(db, "turns");
+      const archivedTurns = db
+        .query<{ turnId: number; tags: string | null }, []>(
+          `SELECT turn_id AS turnId, tags FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
+        )
+        .all();
+      const restoreTags = db.query<unknown, [string | null, number]>(
+        "UPDATE turns SET tags = ? WHERE id = ?",
+      );
+      const clearMembership = db.query<unknown, [number]>(
+        "DELETE FROM segment_members WHERE turn_id = ?",
+      );
+      const restoreMembership = db.query<unknown, [number]>(
+        `INSERT OR REPLACE INTO segment_members (segment_id, turn_id, created_at_epoch)
+         SELECT segment_id, turn_id, created_at_epoch
+           FROM ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE} WHERE turn_id = ?`,
+      );
+      for (const turn of archivedTurns) {
+        restoreTags.run(turn.tags, turn.turnId);
+        clearMembership.run(turn.turnId);
+        restoreMembership.run(turn.turnId);
+      }
+      const deleteStamp = db.query<unknown, [string, number, string]>(
+        "DELETE FROM write_gate_stamps WHERE entity_type = ? AND entity_id = ? AND field = ?",
+      );
+      const restoreStamp = db.query<unknown, [string, number, string, string, number, number]>(
+        `INSERT INTO write_gate_stamps
+           (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const stamp of db
+        .query<
+          {
+            entityType: string;
+            entityId: number;
+            field: string;
+            writer: string | null;
+            writeSequence: number | null;
+            writtenAtEpoch: number | null;
+          },
+          []
+        >(
+          `SELECT entity_type AS entityType, entity_id AS entityId, field, writer,
+                  write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
+             FROM ${MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE}`,
+        )
+        .all()) {
+        deleteStamp.run(stamp.entityType, stamp.entityId, stamp.field);
+        if (stamp.writer !== null) {
+          restoreStamp.run(
+            stamp.entityType, stamp.entityId, stamp.field, stamp.writer,
+            stamp.writeSequence!, stamp.writtenAtEpoch!,
+          );
+        }
+      }
+
+      const violations = db
+        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `main-agent-edges rollback left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
+        );
+      }
+
+      db.query<unknown, [number]>(
+        `UPDATE ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
+            SET status = 'rolled_back', rolled_back_at_epoch = ? WHERE id = 1`,
+      ).run(nowEpoch);
+      return { ok: true, edgesRestored, turnsRestored: archivedTurns.length };
+    });
+    repairStaleSegmentFacets(db);
+    for (const row of db
+      .query<{ turnId: number }, []>(
+        `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
+      )
+      .all()) {
+      reindexTurnFromDb(db, row.turnId);
+    }
+    return outcome;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
 }
 
 export function initializeSchema(db: Database): void {
@@ -4841,6 +6022,14 @@ export function initializeSchema(db: Database): void {
   // writes through the ticket-02 primitive, which itself only exists once
   // `segment_members`/`segments` are in that shape.
   cutoverNamedTaskMembershipTags(db);
+  // main-agent-edges ticket 01 (spec D9), STRICTLY LAST: the one-shot that
+  // takes `memory_edges` and `turns` into their FINAL shape — one pair one
+  // row, no word column, tags a DB-level invariant — reads every table above
+  // in the final shape those migrations produce, and after it no earlier
+  // `memory_edges` migration can run again (`ensureMemoryEdgesSchema` skips
+  // the whole legacy chain by shape). Fenced on the durable settlement claim
+  // set; while a claim is live it does nothing and the next open retries.
+  runMainAgentEdgesCutover(db);
 }
 
 /**
@@ -5077,6 +6266,15 @@ function cutoverNamedTaskMembershipTags(
  */
 export function runLaneModelV12EdgeMigration(db: Database): void {
   assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
+  // main-agent-edges ticket 01: every phase below reads or rebuilds the
+  // pre-cutover shape (the `relation` column, its CHECK text, the merged
+  // `tags` column). A database the cutover has rebuilt has none of them and
+  // owes none of these phases — only the shape-blind homeless tables at the
+  // end.
+  if (!memoryEdgesPredatesCutover(db)) {
+    ensureHomelessRecordTables(db);
+    return;
+  }
   // M-C (ticket 04): retract every row whose two ends are the same node. It
   // reads no lane column at all — only `citing_kind`/`citing_id` — so it is
   // order-independent with respect to the `tags` -> `tail_tag`/`head_tag`

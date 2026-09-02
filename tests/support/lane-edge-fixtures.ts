@@ -6,6 +6,71 @@ import {
   type LaneEdgeInput,
   type LaneTurnInput,
 } from "../../src/shared/lane-interpretation";
+import {
+  formatRelationClass,
+  type RelationClass,
+  type RelationCoverageValue,
+} from "../../src/shared/relation-class";
+
+/**
+ * The seven storage words a pre-cutover fixture still spells, mapped to the
+ * class and coverage the v13 backfill gave them — the FIXTURE-SIDE mirror of
+ * `db/schema.ts`'s frozen `MEMORY_EDGES_LEGACY_WORD_CLASS` migration literal.
+ *
+ * It lives here, in `tests/`, because the main-agent-edges cutover dropped the
+ * `relation` column and nothing in `src/` may name one of these words outside
+ * that migration literal (spec P3, the raw-word release gate). A fixture that
+ * predates the cutover states its edges in the old vocabulary; this is the one
+ * place that vocabulary is translated, so no fixture can invent a class the
+ * migration would not have written.
+ *
+ * A fixture may pass `relationClass`/`relationCoverage` directly instead — the
+ * shape a post-cutover row actually carries — and then no word is involved.
+ */
+export const FIXTURE_LEGACY_WORD_CLASS: Readonly<
+  Record<string, { relationClass: RelationClass; relationCoverage: RelationCoverageValue }>
+> = Object.freeze({
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: "" },
+  extends: { relationClass: "use", relationCoverage: "" },
+  consume: { relationClass: "use", relationCoverage: "" },
+  grounds: { relationClass: "use", relationCoverage: "" },
+  indexes: { relationClass: "use", relationCoverage: "" },
+});
+
+/** The seven words, in the frozen order the storage vocabulary listed them. */
+export const FIXTURE_LEGACY_WORDS: readonly string[] = Object.freeze([
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies",
+]);
+
+/**
+ * A fixture's class, from whichever surface it stated: the explicit
+ * class/coverage pair, else the legacy word translated. A word this table does
+ * not know (a deliberately out-of-vocabulary fixture, e.g. `supersedes`)
+ * carries NO class — exactly what a row the backfill skipped looks like, and
+ * what every class-bearing reader must keep out of its graph.
+ */
+export function fixtureRelationClass(input: {
+  relation?: string;
+  relationClass?: RelationClass | "";
+  relationCoverage?: RelationCoverageValue;
+}): { relationClass: RelationClass | ""; relationCoverage: RelationCoverageValue } {
+  if (input.relationClass !== undefined && input.relationClass !== "") {
+    return {
+      relationClass: input.relationClass,
+      relationCoverage: input.relationCoverage ?? "",
+    };
+  }
+  const mapped = input.relation === undefined ? undefined : FIXTURE_LEGACY_WORD_CLASS[input.relation];
+  return mapped ?? { relationClass: "", relationCoverage: "" };
+}
 
 /**
  * Give every turn the lane tags ITS OWN SIDE of the given edges names — the
@@ -149,16 +214,28 @@ export function laneEdge(input: {
   citingId: number;
   citedId: number;
   relation: string;
+  relationClass?: RelationClass | "";
+  relationCoverage?: RelationCoverageValue;
   tags?: readonly string[];
   tailTag?: string;
   headTag?: string;
 }): LaneEdgeInput {
   const tags = input.tags ?? [];
   const derived = deriveSideTags(tags);
+  const { relationClass, relationCoverage } = fixtureRelationClass(input);
   return {
     citingId: input.citingId,
     citedId: input.citedId,
-    relation: input.relation,
+    // `LaneEdgeInput.relation` is the CLASS TOKEN since the cutover — a
+    // display label, never a storage word. A fixture that spells the old word
+    // gets the token its class formats to; one the vocabulary never knew keeps
+    // its own spelling, because there is no class to format.
+    relation:
+      relationClass === ""
+        ? input.relation
+        : formatRelationClass(relationClass, relationCoverage),
+    relationClass,
+    relationCoverage,
     tailTag: input.tailTag ?? derived.tailTag,
     headTag: input.headTag ?? derived.headTag,
   };

@@ -40,6 +40,7 @@ import {
   SETTLEMENT_ERA_CUTOFF_EPOCH,
   settlementScopeProvenanceFor,
 } from "../support/settlement-config";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * SETTLEMENT-GATE-TAXONOMY TICKET 05 — THE THIRD CHANNEL.
@@ -89,7 +90,7 @@ interface Fixture {
 }
 
 /**
- * A deliberately DIRTY window: `w2 --verifies--> w1` with both sides unsettled
+ * A deliberately DIRTY window: `w2 --verify--> w1` with both sides unsettled
  * is a DRAFT edge, which is E6 — a blocking error under the frozen
  * classification rule. Every assertion below that says "no report / no verdict"
  * therefore has something real to suppress: without the guard `lane_check`
@@ -148,7 +149,7 @@ function seedFixture(db: Database): Fixture {
       {
         citing: { kind: "turn", id: w2 },
         cited: { kind: "turn", id: w1 },
-        relation: "verifies",
+        ...wordEdgeClass("verifies"),
         provenance: "asserted",
         // Both sides unsettled — a DRAFT edge, which is E6 and blocks.
         tailTag: "",

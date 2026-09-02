@@ -11,6 +11,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { timelineQuery } from "../../src/mcp/timeline";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * The `timeline(id="S<n>/T<m>")` NODE SELECTOR (island-view spec, ticket 13
@@ -58,7 +59,7 @@ function tagEdge(citingId: number, citedId: number, relation: string, tags: read
       {
         citing: { kind: "turn", id: citingId },
         cited: { kind: "turn", id: citedId },
-        relation: relation as never,
+        ...wordEdgeClass(relation),
         provenance: "asserted",
         ...deriveSideTags(tags),
       },

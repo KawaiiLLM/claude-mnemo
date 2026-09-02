@@ -205,14 +205,14 @@ function seedGhostLaneFixture(db: Database): GhostLaneFixture {
   const carrier = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },
     cited: { kind: "turn" as const, id: cited },
-    relation: "extends" as const,
+    relationClass: "use" as const,
     provenance: "asserted" as const,
     ...deriveSideTags(["carrier-lane"]),
   });
   const ghostClaim = (citing: number, cited: number) => ({
     citing: { kind: "turn" as const, id: citing },
     cited: { kind: "turn" as const, id: cited },
-    relation: "indexes" as const,
+    relationClass: "use" as const,
     provenance: "asserted" as const,
     ...deriveSideTags(["ghost-lane"]),
   });
@@ -223,7 +223,7 @@ function seedGhostLaneFixture(db: Database): GhostLaneFixture {
       {
         citing: { kind: "turn", id: w2 },
         cited: { kind: "turn", id: w1 },
-        relation: "extends",
+        relationClass: "use",
         provenance: "asserted",
         ...deriveSideTags(["window-lane"]),
       },
@@ -389,7 +389,7 @@ async function collectFractureSets(
       // named the lane directly and so armed a gate against a lane the run had
       // written no member of), so the touch is now what it should always have
       // been: an EDGE SIDE naming the lane, on one of the lane's OWN members.
-      // `g3 --extends--> g1` sits INSIDE island {g1,g2,g3}, so it merges
+      // `g3 --use--> g1` sits INSIDE island {g1,g2,g3}, so it merges
       // nothing and the topology arm 3 just measured is untouched — asserted,
       // not assumed, by `wholeLaneAfter`.
       if (canTouch) {

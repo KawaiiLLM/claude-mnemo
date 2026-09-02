@@ -24,7 +24,7 @@ import {
   renderSegmentLaneView,
 } from "../../src/mcp/timeline";
 import { renderAttachedSegmentBlock } from "../../src/hooks/session-composition";
-import type { CitationRelation } from "../../src/db/citations";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * Frontier-injection ticket 06 — the CROSS-SURFACE integration corpus: one
@@ -124,7 +124,7 @@ function makeEdge(
   db: Database,
   citingTurnId: number,
   citedTurnId: number,
-  relation: CitationRelation,
+  relation: string,
   tailTag: string,
   headTag: string,
 ): void {
@@ -134,7 +134,7 @@ function makeEdge(
       {
         citing: { kind: "turn", id: citingTurnId },
         cited: { kind: "turn", id: citedTurnId },
-        relation,
+        ...wordEdgeClass(relation),
         provenance: "judged",
         tailTag,
         headTag,
@@ -352,8 +352,8 @@ describe("ticket 06 — cross-surface denominator agreement on one corpus", () =
     // --- The lane view's own cross-surface content spot-checks: the
     // cross-lane forward stub and the cross-lane inbound mirror both name
     // the SAME qualified addresses the digest pointer speaks.
-    expect(pageAlphaB).toContain(`override => S${s1}/T1^(E${taskA.id}/#alpha)`);
-    expect(pageAlphaA).toContain(`└ override <= S${s2}/T1^(E${taskB.id}/#alpha)`);
+    expect(pageAlphaB).toContain(`correct(full) => S${s1}/T1^(E${taskA.id}/#alpha)`);
+    expect(pageAlphaA).toContain(`└ correct(full) <= S${s2}/T1^(E${taskB.id}/#alpha)`);
 
     db.close();
   });

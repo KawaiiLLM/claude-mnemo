@@ -16,7 +16,6 @@ import {
   settlementMembershipWriteInputShape,
 } from "../../src/worker/note-settlement-membership-facade";
 import { RELATION_CLASSES } from "../../src/shared/relation-class";
-import { EDGE_RELATIONS } from "../../src/shared/turn-phase";
 import {
   renderMainAgentRubricBlock,
   renderMemoryRubricConceptsBlock,
