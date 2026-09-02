@@ -147,7 +147,7 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
 
     // Some atoms reached the reader, and some did not: that is `cut`.
     expect(output).toContain("- relations:");
-    expect(output).toContain("-extends->");
+    expect(output).toContain("extends ->");
     expect(output).toContain("…");
     const row = relationsRow(reader, citing);
     expect(row?.complete).toBe(0);
@@ -163,7 +163,7 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
 
     // The header line survives; not one atom does. A label is not a set.
     expect(output).toContain("- relations:");
-    expect(output).not.toContain("-extends->");
+    expect(output).not.toContain("extends ->");
     expect(relationsRow(reader, citing)).toBeNull();
 
     const verdict = checkRelationsGate(db, reader, citing, "S1/T1");

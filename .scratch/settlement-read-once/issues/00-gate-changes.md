@@ -4,7 +4,7 @@
 
 **Blocked by:** None — ships first; blocks 01–07.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2411 at f294ee22 (merged ff)**: tsc 0, 4706/0/259 on the branch; my probes RED — outgoing cap counting bare rows (1), clearLane stamping nothing (1), evaluated-empty relations recording no row (1). Design note accepted: structural verbs stamp with RESERVED writer ids (`lane:merge`, `lane:clear`, `compact:repair`, `trigger:prune`) so a caller cannot keep writing on a set its own verb moved.
 
 - [x] `mergeLaneTag`, `clearLane`, compact occupied-turn repair stamp `stampTurnRelationsRevision` for every citing turn whose outgoing rows they rewrite or delete, in the same transaction.
 - [x] The prune trigger `memory_edges_prune_deleted_turn` itself advances the relations revision of every surviving citer of the deleted turn with a reserved writer id (`trigger:prune`), so direct SQL and cascade deletes cannot bypass the stamp. Test: delete a cited turn by direct SQL → the surviving citer's stale grant is refused naming `trigger:prune`. A task merge does NOT stale a grant (qualifiers are advisory).

@@ -4,7 +4,7 @@
 
 **Blocked by:** 00.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2411 at fe58d7dd (merged 413b5d43)**: tsc 0; merged tree 4732/0/261 after one conflict (format.ts comment vs ticket-00 code, resolved by keeping both) and one stale expectation in ticket 00's delivery-gate test (`-extends->` tree glyph → `extends ->`); my probes RED — segment card falling back to the tree (1), cross-task qualifier dropping `E<n>/` (1). Widest atom 76 chars / ~19 tokens; `relations` budget for ticket 01 ≈ 800 tokens. Arrow decision accepted: `->`/`<-` only, crossing carried by the two-sided suffix per the spec grammar (a one-function change if the lane view's four arrows are wanted).
 
 - [x] Data source: the full live relation rows of the turn, outgoing and incoming, whatever their sides (`getTurnRelationEdges`-class read); rows with `relation IS NULL` (bare text-refs) do not render here.
 - [x] Grammar, one block per turn, outgoing then incoming, one legend line per response: `word -> T<n> (#tail → #head)` (same lane both sides prints once as `(#lane)`; cross-task side prints `E<m>/#lane`); half-settled `(#tail → ·)` / `(· → #head)`; `word -> T<n> [unplaced]` for the `''` sentinel (canonical word "unplaced"); incoming `<- T<n> word (…)`; several relations on one pair merge ONLY when their sides are identical — rows grouped by `(other endpoint, tailTag, headTag)` (production: 109 pairs with more than one placement render as separate rows). No `^`, no cross-page arrow, no hop expansion. Legend says qualifiers are the endpoints' CURRENT tasks, advisory.

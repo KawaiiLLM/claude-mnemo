@@ -7570,6 +7570,13 @@ function getOutgoingEdges(db, citing) {
        ORDER BY cited_kind ASC, cited_id ASC, ${EDGE_IDENTITY_ORDER}`
   ).all(citing.kind, citing.id).map(mapEdgeRow);
 }
+function getIncomingEdges(db, cited) {
+  return db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+       WHERE cited_kind = ? AND cited_id = ?
+       ORDER BY citing_kind ASC, citing_id ASC, ${EDGE_IDENTITY_ORDER}`
+  ).all(cited.kind, cited.id).map(mapEdgeRow);
+}
 function mapTurnRelationEdgeRow(row) {
   return {
     relation: row.relation,
@@ -8007,6 +8014,69 @@ function storedRelationRowKeys(db, citing) {
     )
   );
 }
+function countRelationAtoms(edges) {
+  return edges.filter((edge) => edge.relation !== null).length;
+}
+function turnAddress(db, turnId) {
+  const row = db.query(
+    `SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?`
+  ).get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`;
+}
+function checkRelationDegreeCaps(db, citing, inputs, alreadyStored) {
+  const additions = inputs.filter(
+    (input) => !alreadyStored.has(
+      relationRowKey(citing, input.cited, input.relation, {
+        // The same defaulting `writeMemoryEdges` applies on the way in, so
+        // an input with no side named keys identically to the row it would
+        // become — otherwise a restatement would read as an addition and
+        // the cap would refuse a call that adds nothing.
+        tailTag: input.tailTag ?? UNSETTLED_SIDE_TAG,
+        headTag: input.headTag ?? UNSETTLED_SIDE_TAG
+      })
+    )
+  );
+  if (additions.length === 0) {
+    return [];
+  }
+  const rejections = [];
+  const classOf = (input) => input.relationClass || "use";
+  if (citing.kind === "turn") {
+    const stored = countRelationAtoms(getOutgoingEdges(db, citing));
+    if (stored + additions.length > MAX_TURN_RELATION_DEGREE) {
+      rejections.push({
+        relation: classOf(additions[0]),
+        raw: turnAddress(db, citing.id),
+        reason: "outgoing-degree-cap"
+      });
+    }
+  }
+  const addedPerCited = /* @__PURE__ */ new Map();
+  for (const input of additions) {
+    if (input.cited.kind !== "turn") {
+      continue;
+    }
+    const bucket = addedPerCited.get(input.cited.id);
+    if (bucket) {
+      bucket.push(input);
+    } else {
+      addedPerCited.set(input.cited.id, [input]);
+    }
+  }
+  for (const [citedId, added] of addedPerCited) {
+    const stored = countRelationAtoms(
+      getIncomingEdges(db, { kind: "turn", id: citedId })
+    );
+    if (stored + added.length > MAX_TURN_RELATION_DEGREE) {
+      rejections.push({
+        relation: classOf(added[0]),
+        raw: turnAddress(db, citedId),
+        reason: "incoming-degree-cap"
+      });
+    }
+  }
+  return rejections;
+}
 function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "asserted") {
   const citing = { kind: "turn", id: citingTurnId };
   const rejected = [];
@@ -8059,6 +8129,10 @@ function attachTurnRelations(db, citingTurnId, fields, nowEpoch, provenance = "a
     return { written: [], restated: [], rejected };
   }
   const alreadyStored = storedRelationRowKeys(db, citing);
+  const overCap = checkRelationDegreeCaps(db, citing, inputs, alreadyStored);
+  if (overCap.length > 0) {
+    return { written: [], restated: [], rejected: overCap };
+  }
   const { written, rejected: storageRejected } = writeMemoryEdges(db, inputs, nowEpoch);
   if (storageRejected.length > 0) {
     return {
@@ -8176,7 +8250,7 @@ function retractTurnRelations(db, citingTurnId, fields, nowEpoch = Math.floor(Da
   );
   return { deleted, restored, rejected: [] };
 }
-var CITATION_RELATIONS, RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES, RELATION_REJECTION_TEXT;
+var CITATION_RELATIONS, RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES, MAX_TURN_RELATION_DEGREE, RELATION_REJECTION_TEXT;
 var init_citations = __esm({
   "src/db/citations.ts"() {
     "use strict";
@@ -8197,6 +8271,7 @@ var init_citations = __esm({
     RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
       ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
     );
+    MAX_TURN_RELATION_DEGREE = 20;
     RELATION_REJECTION_TEXT = {
       malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
       unresolved: "does not resolve to a turn or segment",
@@ -8219,7 +8294,13 @@ var init_citations = __esm({
       // and both legal values, because a writer told only "coverage required" has
       // to go read a schema to find out what to send.
       "coverage-required": 'is a `correct` edge with no coverage bit \u2014 add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
-      "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives"
+      "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives",
+      // Settlement-read-once ticket 00 (USER RULING T2404). The message names the
+      // node the cap is being counted on, because a call refused for a CITED
+      // turn's incoming degree is a different repair from one refused for the
+      // citing turn's own outgoing degree, and neither is fixed by re-sending.
+      "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap \u2014 retract one before adding another; nothing in this call was written`,
+      "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap \u2014 nothing in this call was written`
     };
   }
 });
@@ -9678,7 +9759,7 @@ function checkRelationsGate(db, writer, turnId, address) {
     turnId,
     RELATIONS_GATE_FIELD
   );
-  if (!completeness || !completeness.complete) {
+  if (!completeness) {
     return {
       ok: false,
       reason: "incomplete-read",
@@ -9719,7 +9800,7 @@ function checkTurnLiveForWrite(db, turnId, address, options = {}) {
     message: `${address} is skipped \u2014 it is dormant, so it carries no type, no edges and no membership until a note revives it. Write its note first (title and content), or leave it alone. Nothing was written.`
   };
 }
-var EDGE_WRITE_GATE_FIELD, CLAIM_WRITER_PATTERN, CLAIM_WRITER_STAGES, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD;
+var EDGE_WRITE_GATE_FIELD, CLAIM_WRITER_PATTERN, CLAIM_WRITER_STAGES, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD, LANE_MERGE_WRITER, LANE_CLEAR_WRITER;
 var init_write_gate = __esm({
   "src/db/write-gate.ts"() {
     "use strict";
@@ -9732,6 +9813,8 @@ var init_write_gate = __esm({
     SESSION_WRITER_PATTERN = /^session:(\d+)$/;
     STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
     RELATIONS_GATE_FIELD = "relations";
+    LANE_MERGE_WRITER = "lane:merge";
+    LANE_CLEAR_WRITER = "lane:clear";
   }
 });
 
@@ -10020,7 +10103,7 @@ function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
   }
   return added;
 }
-function turnAddress(db, turnId) {
+function turnAddress2(db, turnId) {
   const row = db.query(
     "SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?"
   ).get(turnId);
@@ -10104,7 +10187,7 @@ function findMembershipLaneStrandings(db, turnIds, targetSegmentId) {
 }
 function formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings) {
   const clauses = strandings.map((stranding) => {
-    const arrow = `${turnAddress(db, stranding.citingTurnId)} --${stranding.relation}--> ${turnAddress(db, stranding.citedTurnId)} {${stranding.tag}}`;
+    const arrow = `${turnAddress2(db, stranding.citingTurnId)} --${stranding.relation}--> ${turnAddress2(db, stranding.citedTurnId)} {${stranding.tag}}`;
     const where = stranding.segmentIdAfter === null ? `the ${stranding.endpoint} turn would belong to NO segment, and a lane is declared on a segment` : `E${stranding.segmentIdAfter} \u2014 the ${stranding.endpoint} turn's segment after this move \u2014 has not declared lane "${stranding.tag}"`;
     return `${arrow}: ${where}`;
   });
@@ -10406,7 +10489,7 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
                       ELSE 0
                     END
               ORDER BY t.id ASC`
-  ).all(fromTag).map((row) => turnAddress(db, row.id)) : [];
+  ).all(fromTag).map((row) => turnAddress2(db, row.id)) : [];
   const fromForFields = getSegment(db, fromId);
   const intoForFields = getSegment(db, intoId);
   if (!fromForFields || !intoForFields) {
@@ -10908,6 +10991,12 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
   const updateEdgeSides = db.query(
     "UPDATE memory_edges SET tail_tag = ?, head_tag = ? WHERE id = ?"
   );
+  const relationsMoved = /* @__PURE__ */ new Set();
+  const noteCitingTurn = (row) => {
+    if (row.citingKind === "turn") {
+      relationsMoved.add(row.citingId);
+    }
+  };
   const collisions = [];
   const survivors = [];
   for (const bucket of groups.values()) {
@@ -10942,6 +11031,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
       });
       dropSideTagRows.run(dropped.id);
       deleteEdge.run(dropped.id);
+      noteCitingTurn(dropped.entry.row);
     }
   }
   let edgeSidesRewritten = 0;
@@ -10950,6 +11040,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
       continue;
     }
     edgeSidesRewritten += survivor.sidesRewritten;
+    noteCitingTurn(survivor.row);
     updateEdgeSides.run(survivor.tailTag, survivor.headTag, survivor.row.id);
     dropSideTagRows.run(survivor.row.id);
     if (survivor.tailTag !== "") {
@@ -10958,6 +11049,9 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     if (survivor.headTag !== "") {
       insertSideTagRow.run(survivor.row.id, "head", survivor.headTag);
     }
+  }
+  for (const turnId of relationsMoved) {
+    stampTurnRelationsRevision(db, turnId, LANE_MERGE_WRITER, nowEpoch);
   }
   foldLaneImpressionIntoSurvivor(db, { segmentId, tag: from }, { segmentId, tag: into });
   undeclareEmptiedLane(db, segmentId, from);
@@ -11070,6 +11164,11 @@ function clearLane(db, segmentId, tag, nowEpoch, force) {
       emptiedByCiting.set(citingKey, bucket);
     }
     bucket.targets.push({ kind: row.citedKind, id: row.citedId });
+  }
+  for (const bucket of emptiedByCiting.values()) {
+    if (bucket.citing.kind === "turn") {
+      stampTurnRelationsRevision(db, bucket.citing.id, LANE_CLEAR_WRITER, nowEpoch);
+    }
   }
   let bareRowsRestored = 0;
   for (const bucket of emptiedByCiting.values()) {
@@ -11745,6 +11844,7 @@ var init_lanes = __esm({
     init_segments();
     init_tag_namespace();
     init_turn_liveness();
+    init_write_gate();
     LANE_COLUMNS = `
   id,
   segment_id AS segmentId,
@@ -12036,7 +12136,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtjwsjiu" : "dev";
+    BUILD_ID = true ? "0.29.0-mtjyel99" : "dev";
   }
 });
 
@@ -13459,6 +13559,20 @@ function initializeSchema(db) {
   ensureLaneImpressionColumns(db);
   ensureSegmentImpressionColumns(db);
   retireUntenantedSegmentContentFromSearch(db);
+  ensureMemoryEdgesPruneStampsRelations(db);
+}
+function ensureMemoryEdgesPruneStampsRelations(db) {
+  const existing = db.query(
+    `SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'memory_edges_prune_deleted_turn'`
+  ).get();
+  if (existing?.sql?.includes("write_gate_stamps")) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
+    db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
 }
 function runLaneModelV12EdgeMigration(db) {
   assertLaneRegistrySettled(db, "the lane-model-v12 edge-shape migration");
@@ -14387,15 +14501,7 @@ ${carriedColumnDdl}
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
           ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
       `);
-      db.exec(`
-        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
-          AFTER DELETE ON turns
-          BEGIN
-            DELETE FROM memory_edges
-            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
-               OR (cited_kind = 'turn' AND cited_id = OLD.id);
-          END;
-      `);
+      db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
       db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
       const violations = db.query("PRAGMA foreign_key_check").all();
       if (violations.length > 0) {
@@ -14538,15 +14644,7 @@ ${carriedColumnDdl}
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
           ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
       `);
-      db.exec(`
-        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
-          AFTER DELETE ON turns
-          BEGIN
-            DELETE FROM memory_edges
-            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
-               OR (cited_kind = 'turn' AND cited_id = OLD.id);
-          END;
-      `);
+      db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
       db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
       const violations = db.query("PRAGMA foreign_key_check").all();
       if (violations.length > 0) {
@@ -14693,7 +14791,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, noteSettlementJobsTableDdl, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_UNION_RELATION_WORDS, MEMORY_EDGES_CONTRACT_RELATION_WORDS, MEMORY_EDGES_INDEXES_RENAME_RELATION_WORDS, MEMORY_EDGES_LANE_MODEL_V12_RELATION_WORDS, MEMORY_EDGES_INDEXES_DDL, MEMORY_EDGES_UNION_DDL, MEMORY_EDGES_DDL, MEMORY_EDGE_TAGS_DDL, MEMORY_EDGE_SIDE_TAGS_DDL, MEMORY_EDGES_PRUNE_DELETED_TURN_DDL, MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL, SEGMENT_FACET_STALE_TRIGGERS_DDL, VOCABULARY_FLIP_RENAME, INDEXES_RENAME_MAP, LANE_MODEL_V12_TWO_SIDED_TAGS_RECEIPT, LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT, NOTE_SETTLEMENT_WATERMARK_DISPOSAL_MESSAGE, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT, segmentsStatusVocabularyRebuildDdl, SEGMENTS_INDEXES_DDL, SEGMENTS_OWN_TRIGGER_DDL, segmentsWithoutTopicRebuildDdl, SEGMENTS_TOPIC_RETIRED_INDEXES_DDL, TURN_ERA_GRANT_SEED_RECEIPT, EXPECTED_FTS_COLUMNS, RETIRED_EXTRACTION_STALL_COLUMNS, CONDITIONAL_TURNS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -16050,14 +16148,40 @@ var init_schema = __esm({
   CREATE INDEX IF NOT EXISTS idx_memory_edge_side_tags_tag
     ON memory_edge_side_tags(side, tag, edge_row_id);
 `;
-    MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+    MEMORY_EDGES_PRUNE_DELETED_TURN_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
     BEGIN
+      INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+        ON CONFLICT(id) DO UPDATE SET value = value + 1;
+
+      INSERT INTO write_gate_stamps
+        (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+      SELECT DISTINCT
+             'turn',
+             e.citing_id,
+             'relations',
+             'trigger:prune',
+             (SELECT value FROM write_gate_sequence WHERE id = 1),
+             CAST(strftime('%s', 'now') AS INTEGER)
+        FROM memory_edges e
+       WHERE e.cited_kind = 'turn'
+         AND e.cited_id = OLD.id
+         AND e.citing_kind = 'turn'
+         AND e.citing_id <> OLD.id
+         AND EXISTS (SELECT 1 FROM turns t WHERE t.id = e.citing_id)
+      ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+        writer = excluded.writer,
+        write_sequence = excluded.write_sequence,
+        written_at_epoch = excluded.written_at_epoch;
+
       DELETE FROM memory_edges
       WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
          OR (cited_kind = 'turn' AND cited_id = OLD.id);
     END;
+`;
+    MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  ${MEMORY_EDGES_PRUNE_DELETED_TURN_DDL}
 
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
     AFTER DELETE ON segments
@@ -40034,7 +40158,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // needs it. K1's whole point is that a segment lets an agent avoid
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
-  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see the turn\'s own position in the citation graph as a small tree: its `S<n>/T<m>` root address, then the best out-edge chain extended up to 3 hops (`-word->`, multi-word `-word1,word2->`, a bare `->` for an unclassified pair, `=word=>`/`==>` when the edge crosses lanes) trailing `-> ..` when more remains; up to 4 more `\u2514` branch lines \u2014 every other out-edge, then every in-edge (`<-word-`, reading right-to-left into the root) \u2014 each anchored at its own fork point once that is not the root itself (`\u2514 T<m> -word-> T<k>`; a branch forking straight off the root stays bare `\u2514-word->`), `^` marking (never re-expanding) a node already shown elsewhere in this same tree, `\u2026 +N more` past the cap, `{lane}`/`{tail\u2192head}` suffixing a placed edge, nothing when unplaced (Law-8 filtered). Every hop address is relative to the ROOT line\'s session \u2014 a bare `T<m>` anywhere on the tree means the root\'s session, never the previous hop\'s. Off by default, a read convenience that grants nothing new. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
+  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. A list of TURN addresses (`id="S1/T4, S1/T9, S2/T2"`) is assembled as ONE page rather than several stapled together: the turns render in the order you named them under one header per session, an address named twice is read once, and the whole page carries one legend. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see THIS turn\'s own direct edges, and nothing further \u2014 every edge it cites OUT first (`<words> -> <addr>`), then every edge cited INTO it (`<- <addr> <words>`). No downstream hops, no branch cap, no `+N more`: the whole set renders, both directions, so what you see is what the write gate will check you against. The trailing `(#tail \u2192 #head)` is the edge\'s two stored lane sides \u2014 `(#lane)` when both settle in one, `\xB7` for a side nobody settled, `[unplaced]` when neither did \u2014 and an `E<n>/` in front of a lane names that endpoint\'s CURRENT task when it differs from this turn\'s (resolved at read time, advisory: not part of what an edge write is checked against). Several relation words fold onto one line only when their two sides are identical; one pair placed two ways is two lines. Addresses are relative to the turn\'s own session \u2014 a bare `T<m>` is that session, `S<n>/T<m>` another (Law-8 filtered; a prose-only citation carries no relation word and never appears here). A response that selected `relations` carries ONE legend line for the whole response. Off by default, a read convenience that grants nothing new. The 3-hop TREE view of the same node \u2014 where the thread goes, rather than what this node touches \u2014 is `timeline(id="S<n>/T<m>")`. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the lane blocks overflow one page (overflow rolls to another page, a lane's own block is never split mid-page, and the page states the exact next call; a lane too big for one page shows its newest page in the list \u2014 drill via its `E<n>/#<tag>` address). Each lane renders as a ruled adjacency table over its SETTLED members (settlement-covered canonical turns; skipped/rewound/compact-synthetic turns are out everywhere): a header (`E<n>/#<tag> \xB7 <n> settled \xB7 <n> forward \xB7 <n> mirrors \xB7 islands <a>+<b> \xB7 frontier <k>` \u2014 forward and mirror counts each verifiable against the page's own lines; islands count both-endpoints-in-lane connectivity only, so a cross-lane edge raises forward but never islands) and a one-line arrow legend, then the chain skeleton: roots processed newest to oldest, EVERY valid out-edge of a lane member rendered exactly once \u2014 `<relation> -> <addr>` in-lane (the heaviest relation takes the root's main line, every other out-edge its own `\u2514` line; a line continues through a first-visit single-out node and otherwise stops, `^` marking a node expanded elsewhere on the page), `<relation> => S<n>/T<m>^(E<n>/#tag)` when the edge leaves the lane, and `\u2514 <relation> <= S<n>/T<m>^(E<n>/#tag)` for another lane's edges INTO this one (after all branches; same-relation sources fold onto one line). On a chain line addresses run-length fold: the line's first address is always full `S<session>/T<prompt>`, and a bare `T<m>` after it continues the PREVIOUS address's session \u2014 cross-lane stubs and mirror sources never fold. Then a time-ascending title table (`T<n> <MM-DD> <type words> <title>`) for exactly the nodes the skeleton showed; a settled member with no edges is counted in the header, never drawn. A lane too big for one page splits into contiguous time-range pages, newest first \u2014 on the single-lane addresses (`E<n>/#<tag>`, `E<n>/L<n>`) `page` selects one (default 1 = newest); a paged lane's header inserts `<p>/<N> S<a>/T<b>..S<c>/T<d>` (its position plus its own newest..oldest range) after the mirror count, a branch whose target sits on another page stops as `<relation> -> S<n>/T<m>^ (p/N)` (the target's page), and `\u2514 <relation> <- S<n>/T<m>^ (p/N)` mirrors a SAME-lane edge in from a NEWER page onto the head's own page (in-page inbound stays forward-only). Only a LONE member whose full rendering exceeds the page budget ships over budget, with an explicit self-including `[overflow +<n> tok]` marker. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
@@ -42380,6 +42504,7 @@ function renderRelationTree(tree, formatHopAddress, suffixOf) {
 
 // src/mcp/relations-view.ts
 init_memory_edges();
+init_segments();
 init_relation_class();
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
@@ -42532,9 +42657,6 @@ function buildRelationTree(db, turn) {
     omittedBranchCount
   };
 }
-function buildTurnRelationLines(db, turn) {
-  return buildTurnRelationView(db, turn).lines;
-}
 function collectRelationTreeTurnIds(tree) {
   const ids = /* @__PURE__ */ new Set();
   const addSpine = (spine) => {
@@ -42563,6 +42685,101 @@ function buildTurnRelationView(db, turn) {
     lines.push(`${indent}\u2026 +${built.omittedBranchCount} more`);
   }
   return { lines, turnIds: collectRelationTreeTurnIds(built.tree) };
+}
+function groupDirectRows(rows) {
+  const byPlacement = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const key = `${row.otherTurnId} ${row.tailTag} ${row.headTag}`;
+    const existing = byPlacement.get(key);
+    const word = displayEdgeRelation(row);
+    if (existing) {
+      if (!existing.words.includes(word)) {
+        existing.words.push(word);
+      }
+      continue;
+    }
+    byPlacement.set(key, {
+      otherTurnId: row.otherTurnId,
+      otherSessionId: row.otherSessionId,
+      otherPromptNumber: row.otherPromptNumber,
+      tailTag: row.tailTag,
+      headTag: row.headTag,
+      words: [word]
+    });
+  }
+  const grouped = [...byPlacement.values()];
+  for (const group of grouped) {
+    group.words.sort();
+  }
+  grouped.sort((left, right) => {
+    if (left.otherSessionId !== right.otherSessionId) {
+      return left.otherSessionId - right.otherSessionId;
+    }
+    if (left.otherPromptNumber !== right.otherPromptNumber) {
+      return left.otherPromptNumber - right.otherPromptNumber;
+    }
+    if (left.tailTag !== right.tailTag) return left.tailTag < right.tailTag ? -1 : 1;
+    if (left.headTag !== right.headTag) return left.headTag < right.headTag ? -1 : 1;
+    return 0;
+  });
+  return grouped;
+}
+var UNPLACED_MARKER = "[unplaced]";
+var UNSETTLED_SIDE_MARK = "\xB7";
+var SIDE_ARROW = "\u2192";
+function formatSide(tag, endpointTaskId, viewerTaskId) {
+  if (tag === "") {
+    return null;
+  }
+  if (endpointTaskId !== null && endpointTaskId !== viewerTaskId) {
+    return `E${endpointTaskId}/#${tag}`;
+  }
+  return `#${tag}`;
+}
+function formatSides(tail, head) {
+  if (tail === null && head === null) {
+    return UNPLACED_MARKER;
+  }
+  if (tail !== null && tail === head) {
+    return `(${tail})`;
+  }
+  return `(${tail ?? UNSETTLED_SIDE_MARK} ${SIDE_ARROW} ${head ?? UNSETTLED_SIDE_MARK})`;
+}
+var RELATIONS_FIELD_LEGEND = "relations legend: `<words> -> <addr>` is an edge this turn cites OUT, `<- <addr> <words>` one cited IN; this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. The trailing `(#tail \u2192 #head)` is the edge's two stored lane sides \u2014 `(#lane)` when both settle in one, `\xB7` a side nobody settled, `[unplaced]` neither. An `E<n>/` before a lane names that endpoint's CURRENT task, resolved at read time and advisory: it is not part of what an edge write is checked against.";
+function buildTurnDirectRelationLines(db, turn) {
+  const edges = getTurnRelationEdges(db, turn.id);
+  if (edges.outbound.length === 0 && edges.inbound.length === 0) {
+    return [];
+  }
+  const taskCache = /* @__PURE__ */ new Map();
+  const taskOf = (turnId) => {
+    const cached2 = taskCache.get(turnId);
+    if (cached2 !== void 0) {
+      return cached2;
+    }
+    const resolved = getOwningSegmentId(db, turnId);
+    taskCache.set(turnId, resolved);
+    return resolved;
+  };
+  const viewerTaskId = taskOf(turn.id);
+  const lines = [];
+  for (const row of groupDirectRows(edges.outbound)) {
+    const sides = formatSides(
+      formatSide(row.tailTag, viewerTaskId, viewerTaskId),
+      formatSide(row.headTag, taskOf(row.otherTurnId), viewerTaskId)
+    );
+    const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
+    lines.push(`${row.words.join(",")} -> ${address} ${sides}`);
+  }
+  for (const row of groupDirectRows(edges.inbound)) {
+    const sides = formatSides(
+      formatSide(row.tailTag, taskOf(row.otherTurnId), viewerTaskId),
+      formatSide(row.headTag, viewerTaskId, viewerTaskId)
+    );
+    const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
+    lines.push(`<- ${address} ${row.words.join(",")} ${sides}`);
+  }
+  return lines;
 }
 
 // src/shared/file-tree.ts
@@ -43147,11 +43364,15 @@ function cutFieldLines(field, values, fieldBudgets, signal) {
   return { lines: cut.length > 0 ? cut.split("\n") : [], complete: false };
 }
 function capRenderToTokenBudget(rendered, budgetTokens, signal) {
+  return capRenderWithOutcome(rendered, budgetTokens, signal).text;
+}
+function capRenderWithOutcome(rendered, budgetTokens, signal) {
+  const wholeLineCount = () => rendered.split("\n").length;
   if (budgetTokens === void 0 || !Number.isFinite(budgetTokens)) {
-    return rendered;
+    return { text: rendered, keptSourceLines: wholeLineCount() };
   }
   if (estimateTokens(rendered) <= budgetTokens) {
-    return rendered;
+    return { text: rendered, keptSourceLines: wholeLineCount() };
   }
   const lines = rendered.split("\n");
   const markerTokens = estimateTokens(TURN_BUDGET_TRUNCATION_MARKER);
@@ -43164,7 +43385,7 @@ function capRenderToTokenBudget(rendered, budgetTokens, signal) {
     if (remaining <= 0) {
       markTruncated(signal);
       kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-      return kept.join("\n");
+      return { text: kept.join("\n"), keptSourceLines: index };
     }
     if (lineTokens <= remaining) {
       kept.push(line);
@@ -43177,14 +43398,14 @@ function capRenderToTokenBudget(rendered, budgetTokens, signal) {
     }
     markTruncated(signal);
     kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-    return kept.join("\n");
+    return { text: kept.join("\n"), keptSourceLines: partial2 ? index + 1 : index };
   }
   if (kept.length === lines.length) {
-    return rendered;
+    return { text: rendered, keptSourceLines: lines.length };
   }
   markTruncated(signal);
   kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-  return kept.join("\n");
+  return { text: kept.join("\n"), keptSourceLines: kept.length - 1 };
 }
 var DEFAULT_TURN_RENDER_FIELDS = /* @__PURE__ */ new Set([
   "title",
@@ -43420,21 +43641,28 @@ function formatTurnBody(turn, fields, options) {
       lines.push(childBlock);
     }
   }
+  let relations = fields.has("relations") ? { kind: "empty" } : { kind: "absent" };
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
     const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
     ownComplete.set("relations", cut.complete);
     if (cut.lines.length > 0) {
+      relations = { kind: "atoms", labelLine: lines.length };
       lines.push(`${fieldIndent}- relations:`);
       for (const line of cut.lines) {
         lines.push(`${bulletIndent}${line}`);
       }
+    } else {
+      relations = { kind: "elided" };
     }
   }
-  return { text: lines.join("\n"), ownComplete };
+  return { text: lines.join("\n"), ownComplete, relations };
 }
-function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete) {
+function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownComplete, relationsDelivered) {
   const fieldComplete = (field) => (ownComplete.get(field) ?? true) && bodyComplete;
   for (const field of GATED_TURN_FIELDS) {
+    if (field === "relations" && !relationsDelivered) {
+      continue;
+    }
     if (field === "type" || field === "tags") {
       if (fields.has("metadata")) {
         pushFieldCompleteness(signal, "turn", turnId, field, fieldComplete("metadata"));
@@ -43453,6 +43681,17 @@ function recordTurnFieldCompleteness(turnId, fields, bodyComplete, signal, ownCo
     );
   }
 }
+function relationsWereDelivered(relations, capped, body) {
+  switch (relations.kind) {
+    case "absent":
+    case "elided":
+      return false;
+    case "empty":
+      return capped.text === body;
+    case "atoms":
+      return capped.keptSourceLines > relations.labelLine + 1;
+  }
+}
 function renderNode(node, options = {}) {
   const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
   switch (node.type) {
@@ -43464,16 +43703,21 @@ function renderNode(node, options = {}) {
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const { text: body, ownComplete } = formatTurnBody(node.value, fields, options);
-      const capped = capRenderToTokenBudget(body, budget, options.signal);
+      const { text: body, ownComplete, relations } = formatTurnBody(
+        node.value,
+        fields,
+        options
+      );
+      const capped = capRenderWithOutcome(body, budget, options.signal);
       recordTurnFieldCompleteness(
         node.value.id,
         fields,
-        capped === body,
+        capped.text === body,
         options.signal,
-        ownComplete
+        ownComplete,
+        relationsWereDelivered(relations, capped, body)
       );
-      return capped;
+      return capped.text;
     }
     case "observation":
       return capRenderToTokenBudget(
@@ -43894,7 +44138,7 @@ function renderSegmentMembersByOrdinal(db, segmentId, ordinals, options) {
       // Edge-read-surface spec, ticket 01: query gated on the caller's own
       // `fields` selection, same "costs nothing when not requested" contract
       // `recall.ts`'s `buildTurnView` follows.
-      relations: options.fields?.has("relations") ? buildTurnRelationLines(db, turn) : void 0
+      relations: options.fields?.has("relations") ? buildTurnDirectRelationLines(db, turn) : void 0
     };
     lines.push(
       renderNode(
@@ -48659,7 +48903,7 @@ function buildTurnView(db, turn, eraCutoffEpoch = null, fields) {
     // when not requested" is enforced here, at the query boundary, not just
     // at render time (unlike `insight`/`filesRead`/etc. above, which are
     // already-loaded `TurnRecord` columns with no extra query to skip).
-    relations: fields?.has("relations") ? buildTurnRelationLines(db, turn) : void 0
+    relations: fields?.has("relations") ? buildTurnDirectRelationLines(db, turn) : void 0
   };
 }
 function previewItems(items, size = 5) {
@@ -49418,6 +49662,48 @@ function collectLaneReadReceiptForRoute(db, routed, input, renderedTurnIds, resp
     renderedTurnIds: [...renderedTurnIds]
   });
 }
+function selectAddressedTurns(db, sessionId, promptNumbers, after, before, filter) {
+  return applyTurnSelector(db, sessionId, promptNumbers).filter((turn) => {
+    if (after !== void 0 && turn.createdAtEpoch < after) {
+      return false;
+    }
+    if (before !== void 0 && turn.createdAtEpoch > before) {
+      return false;
+    }
+    return turnMatchesFilter(turn, filter);
+  });
+}
+function renderTurnAddressPage(db, turns, fields, page, pageSize, eraCutoffEpoch, signal, pageBudget, turnBudget, fieldBudgets, routeCheckpoint, ledger) {
+  const paged = paginateByRenderedPageCost(
+    turns,
+    page,
+    pageSize,
+    pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
+    (pageItems) => renderTurnScope(
+      db,
+      pageItems,
+      fields,
+      eraCutoffEpoch,
+      void 0,
+      turnBudget,
+      void 0,
+      fieldBudgets
+    )
+  );
+  const body = renderTurnScope(
+    db,
+    paged.items,
+    fields,
+    eraCutoffEpoch,
+    signal,
+    turnBudget,
+    ledger,
+    fieldBudgets
+  );
+  const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
+  ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
+  return joinPage(header, body, paged.pageCount);
+}
 function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCutoffEpoch = null, signal, pageBudget, turnBudget, filter = {}, ledger, emittedLaneMemberIds) {
   const routeCheckpoint = ledger?.checkpoint() ?? 0;
   if (routed.kind === "sessions") {
@@ -49598,44 +49884,20 @@ function renderRoutedId(db, routed, fields, page, pageSize, after, before, eraCu
     );
   }
   if (routed.kind === "turns") {
-    const turns = applyTurnSelector(db, routed.sessionId, routed.promptNumbers).filter((turn) => {
-      if (after !== void 0 && turn.createdAtEpoch < after) {
-        return false;
-      }
-      if (before !== void 0 && turn.createdAtEpoch > before) {
-        return false;
-      }
-      return turnMatchesFilter(turn, filter);
-    });
-    const paged = paginateByRenderedPageCost(
-      turns,
+    return renderTurnAddressPage(
+      db,
+      selectAddressedTurns(db, routed.sessionId, routed.promptNumbers, after, before, filter),
+      fields,
       page,
       pageSize,
-      pageBudget ?? SEGMENT_CARD_DEFAULT_PAGE_BUDGET,
-      (pageItems) => renderTurnScope(
-        db,
-        pageItems,
-        fields,
-        eraCutoffEpoch,
-        void 0,
-        turnBudget,
-        void 0,
-        filter.fieldBudgets
-      )
-    );
-    const body = renderTurnScope(
-      db,
-      paged.items,
-      fields,
       eraCutoffEpoch,
       signal,
+      pageBudget,
       turnBudget,
-      ledger,
-      filter.fieldBudgets
+      filter.fieldBudgets,
+      routeCheckpoint,
+      ledger
     );
-    const header = formatPageHeader(page, paged.pageCount, paged.total, paged.pageCountExact);
-    ledger?.shiftFrom(routeCheckpoint, pageBodyOffset(header, body, paged.pageCount));
-    return joinPage(header, body, paged.pageCount);
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
@@ -49789,7 +50051,7 @@ function browseFieldText(db, turn, field) {
       return count > 0 ? `${count} observation${count === 1 ? "" : "s"}` : null;
     }
     case "relations": {
-      const lines = buildTurnRelationLines(db, turn);
+      const lines = buildTurnDirectRelationLines(db, turn);
       return lines.length > 0 ? lines.join("; ") : null;
     }
     case "metadata":
@@ -50091,7 +50353,7 @@ function recallMemoryDelivery(db, input) {
   const ledger = input.readerId ? new DeliveryLedger(signal) : void 0;
   const body = recallMemoryBody(db, input, signal, ledger);
   ledger?.sealAt(body.length);
-  const text = appendNavigationLegend(body, signal);
+  const text = appendNavigationLegend(appendRelationsLegend(body, input), signal);
   const readerId = input.readerId;
   return {
     text,
@@ -50103,6 +50365,17 @@ function recallMemoryDelivery(db, input) {
       ledger.commit(db, readerId, deliveredChars, now(), sequence);
     }
   };
+}
+function appendRelationsLegend(body, input) {
+  if (body.startsWith(RECALL_PARAMETER_ERROR_PREFIX)) {
+    return body;
+  }
+  if (!resolveTurnFields(input.filter?.fields).has("relations")) {
+    return body;
+  }
+  return body ? `${body}
+
+${RELATIONS_FIELD_LEGEND}` : RELATIONS_FIELD_LEGEND;
 }
 function recallMemoryBody(db, input, signal, ledger) {
   const page = Math.max(1, input.page ?? 1);
@@ -50182,6 +50455,44 @@ function recallMemoryBody(db, input, signal, ledger) {
     if (routedItems.some((routed) => routed.kind !== firstKind)) {
       return formatParameterError(
         `mixed id kinds in comma list "${input.id}" \u2014 ${ID_SELECTOR_GRAMMAR_HINT}`
+      );
+    }
+    if (firstKind === "turns") {
+      const listCheckpoint = ledger?.checkpoint() ?? 0;
+      const listed = [];
+      const seenTurnIds = /* @__PURE__ */ new Set();
+      for (const routed of routedItems) {
+        if (routed.kind !== "turns") {
+          continue;
+        }
+        for (const turn of selectAddressedTurns(
+          db,
+          routed.sessionId,
+          routed.promptNumbers,
+          filter.after,
+          filter.before,
+          filter
+        )) {
+          if (seenTurnIds.has(turn.id)) {
+            continue;
+          }
+          seenTurnIds.add(turn.id);
+          listed.push(turn);
+        }
+      }
+      return renderTurnAddressPage(
+        db,
+        listed,
+        fields,
+        page,
+        pageSize,
+        eraCutoffEpoch,
+        signal,
+        pageBudget,
+        turnBudget,
+        filter.fieldBudgets,
+        listCheckpoint,
+        ledger
       );
     }
     const itemTexts = [];
