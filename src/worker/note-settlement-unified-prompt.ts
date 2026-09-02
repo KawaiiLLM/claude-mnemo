@@ -183,6 +183,35 @@ function renderTaskRoster(context: NoteSettlementContext): string {
  *
  * Ticket 09 is the precedent for the scope: a few sentences each, at the point
  * the duty is introduced, nothing else reworded.
+ *
+ * SETTLEMENT-READ-ONCE TICKET 04 (spec D3, "Stage 1 is topic-first"). The
+ * topic pass stops being a per-turn write loop and becomes a per-TOPIC one:
+ * after the one read, list the topics, declare the lane a topic has none for,
+ * tag that topic's turns in ONE batch call (`note(turns:[…], task:"E<n>",
+ * addTags:[…])` — ticket 02's membership primitive, settlement-only, additive,
+ * all-or-nothing), correct the few turns the audit caught with a per-turn
+ * `note`, then `finalize`. Three sentences of the old shape retire with it:
+ * "one `note` call per turn whose tags change" (duty 7), which made the write
+ * cost linear in the WINDOW rather than in its topics; the projection framing
+ * that made a whole-set `tags` write the normal path rather than the removal
+ * path (it survives, moved into duty 8, because ADDITIVE batches cannot take a
+ * lane away); and step 1's "batches of ten turns", which bounded a working
+ * memory the one read no longer partitions (ticket 01 owns the read's own
+ * shape — this ticket only removes the batching clause).
+ *
+ * TWO THINGS THE SPEC SAYS AND THIS TEXT DELIBERATELY DOES NOT. D3 writes the
+ * declaration as `remember(create, id="E<n>/#tag")`, optionally with
+ * `members`; that is the PUBLIC `remember`'s shape. The settlement facade
+ * (`note-settlement-membership-facade.ts`) takes `id="E<n>"` plus `tag`, and
+ * `resolveOpenSegment` there refuses a lane address by name — and the facade
+ * has no `members` parameter at all. Teaching the spec's literal form would
+ * teach a call this run's own tool refuses, so duty 5 keeps the facade's form.
+ *
+ * MULTI-LANE MEMBERSHIP (D3, rubric 一个节点可以属于多条泳道) is stated where
+ * the batch write is taught rather than as its own clause: a turn two topics
+ * run through is named in both calls and the additive union is the outcome,
+ * with the test for each membership stated separately — the turn's PRINCIPAL
+ * result serves that topic, a mention of it does not.
  */
 export function renderNoteSettlementUnifiedPrompt(
   context: NoteSettlementContext,
@@ -299,12 +328,10 @@ export function renderNoteSettlementUnifiedPrompt(
     "",
     "PHASE 1 — TOPIC PASS.",
     "",
-    "1. READ the writable set in chronological batches of ten turns, through",
-    "   `recall`. Batches bound working memory and nothing else — they are",
-    "   never a line boundary. For the sweep itself, raise `pageSize` above",
-    "   its default of 10 (recall's own parameter — it already exists, ask",
-    "   for it) so one call returns a full batch, or the whole writable set,",
-    "   in one page instead of many round trips. Ask for",
+    "1. READ the writable set in chronological order, through `recall`. For",
+    "   the sweep itself, raise `pageSize` above its default of 10 (recall's",
+    "   own parameter — it already exists, ask for it) so one call returns",
+    "   the whole writable set in one page instead of many round trips. Ask for",
     "   `filter={fields:[\"title\",\"metadata\",\"content\",\"prompt\"],",
     "   fieldBudgets:{prompt:50}}` with `turn` raised to roughly 280:",
     "   `fieldBudgets` cuts `prompt` to AT MOST 50 tokens — the user's own",
@@ -327,11 +354,23 @@ export function renderNoteSettlementUnifiedPrompt(
     "   repair the default `metadata` field already carries both, so the",
     "   plain re-read is enough.",
     "2. For each turn, do the TURN-SCOPE work as you read it (duties 1-2 below).",
-    "3. Only once the whole set has been read, do the WINDOW-SCOPE work (duties",
-    "   3-6). Drafting lines while still reading is how a window ends up sliced",
+    "   THE AUDIT IS A DUTY OF THE READ: type, title, content and `topic:`",
+    "   words are judged on the material the read has already put in front of",
+    "   you, in the one pass that sees it. Most turns are sound and take no",
+    "   write at all — carry the few that need one as an edit list and write",
+    "   them in step 4. EDITS ARE THE EXCEPTION, not the shape of this pass.",
+    "3. Only once the whole set has been read, LIST the topics this window",
+    "   actually ran through and do the WINDOW-SCOPE work (duties 3-6): draft",
+    "   the lines, map them onto the task's existing lanes, DECLARE a lane for",
+    "   every line no declared lane is a synonym for, and report the homeless.",
+    "   Drafting lines while still reading is how a window ends up sliced",
     "   by phase: the early turns are all research, so \"research\" looks like a",
     "   line.",
-    "4. Write the final projection (duty 7), then call `finalize` (duty 8).",
+    "4. WRITE, in this order: ONE batch tag call per topic (duty 7), then the",
+    "   per-turn `note` corrections your audit caught (duty 8), then `finalize`",
+    "   (duty 9). Declaring comes BEFORE tagging — a lane has to exist before a",
+    "   turn's tags may name it — and the corrections come AFTER the batch, so",
+    "   a `tags` write among them restates the lane words the batch just added.",
     "",
     "PHASE 2 — EDGE PASS, once `finalize` has succeeded.",
     "",
@@ -440,18 +479,41 @@ export function renderNoteSettlementUnifiedPrompt(
     "   below — synonym only. A line whose subject is a synonym of a declared",
     "   lane IS that lane; every other line is not, however near it feels.",
     "5. CREATE the lanes the remaining lines need — `remember(create, id=\"E<n>\",",
-    "   tag=…)`, one per line, in the task those turns belong to. A sub-topic",
-    "   gets its own lane; it is not folded into its parent.",
+    "   tag=…)`, one per line, in the task those turns belong to, BEFORE",
+    "   anything is tagged with that word: a lane must be declared before a",
+    "   turn's tags may name it, and the batch write in duty 7 refuses an",
+    "   undeclared word. A sub-topic gets its own lane; it is not folded into",
+    "   its parent.",
     "6. DISPOSE the homeless. A line whose turns belong to NO task has nowhere",
     "   legal to live: a lane exists inside a task, and you may not open a task.",
     "   Report it on `finalize`'s `homeless` list — its label, why, and each of",
     "   its member turns — and never invent a lane or a task for it.",
-    "7. WRITE the final projection, one `note` call per turn whose tags change.",
-    "   A member's tags are its TASK TAG plus its assigned lanes plus ALL its",
-    "   `topic:` words. REPLACEMENT SEMANTICS: a lane word you do not assign is",
-    "   REMOVED by that write — that is how a mis-filed turn leaves a lane, and",
-    "   it is why the projection is written whole rather than patched.",
-    "8. FINALIZE. `finalize` is your transition, not a duty you can skip. It",
+    "7. TAG each topic's turns in ONE call: `note(turns:[\"S<a>/T<b>\", …],",
+    "   task:\"E<n>\", addTags:[\"<lane>\"])`, one call per topic, naming every",
+    "   turn that topic runs through. The write is ADDITIVE — each member keeps",
+    "   its `topic:` words and everything else it carries, and the task's own",
+    "   tag rides along onto a member that lacks it — and ALL-OR-NOTHING: one",
+    "   member that fails a check means nothing is written and every failure is",
+    "   named, so a single repair call fixes the batch.",
+    "   A TURN MAY BELONG TO SEVERAL LANES. A turn two topics run through is",
+    "   simply named in BOTH calls; the union is the outcome, there is no",
+    "   special call for it and nothing to reconcile afterwards. Judge each",
+    "   membership on its own and on the same test: does this turn's PRINCIPAL",
+    "   result serve that topic — the conclusion or output the turn actually",
+    "   reached — or does the turn merely MENTION it. Multi-lane is legitimate;",
+    "   tagging by mention is over-tagging, and it is the one that makes a lane",
+    "   unreadable.",
+    "8. CORRECT what the audit caught, one `note` per turn — the exception, not",
+    "   the pass. A turn whose type, title, content, insight or `topic:` words",
+    "   need a repair takes ONE call carrying all of them together. A turn that",
+    "   must LEAVE a lane takes one too, because the batch write only ever ADDS:",
+    "   removal is a whole-set `tags` write on that turn, and REPLACEMENT",
+    "   SEMANTICS govern it — the write states the turn's TASK TAG plus every",
+    "   lane it belongs to plus ALL its `topic:` words, and a lane word you",
+    "   leave out is REMOVED. That is how a mis-filed turn leaves a lane. These",
+    "   calls run AFTER duty 7, so a `tags` write here must restate the lane",
+    "   words the batch just added; leaving one out un-files the turn.",
+    "9. FINALIZE. `finalize` is your transition, not a duty you can skip. It",
     "   refuses while a turn in the writable set still has an empty or",
     "   out-of-vocabulary `type`, or a window turn still carries no `topic:`",
     "   word — those are your own two duties, unfinished. It says nothing about",

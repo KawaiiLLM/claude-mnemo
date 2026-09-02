@@ -21,6 +21,7 @@ import {
   IMPRESSION_GOLDEN_SAMPLE_THIN,
   renderImpressionTeaching,
 } from "../../src/worker/note-settlement-impression-teaching";
+import { UNIFIED_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 import { renderNoteSettlementUnifiedPrompt } from "../../src/worker/note-settlement-unified-prompt";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -169,7 +170,7 @@ describe("ticket 09 item 2 — the finalize and commit duty paragraphs state the
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const prompt = renderPromptFor(context);
 
-    const finalizeDuty = prompt.slice(prompt.indexOf("8. FINALIZE."));
+    const finalizeDuty = prompt.slice(prompt.indexOf("9. FINALIZE."));
     expect(finalizeDuty.slice(0, 600)).toContain("capped at 1000 characters");
     expect(finalizeDuty.slice(0, 600)).toContain("shorten below ~800");
   });
@@ -227,7 +228,7 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological batches"),
+      prompt.indexOf("1. READ the writable set in chronological"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
     expect(step1).toContain("raise `pageSize` above");
@@ -247,7 +248,7 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological batches"),
+      prompt.indexOf("1. READ the writable set in chronological"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
     expect(step1).toContain("YIELD-REPAIR: a write refused");
@@ -274,7 +275,7 @@ describe("first-settlement-feedback ticket 01 — the read step names the ADDRES
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological batches"),
+      prompt.indexOf("1. READ the writable set in chronological"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
     // Job 170's first tool call obeyed every part of this step that existed
@@ -313,5 +314,175 @@ describe("first-settlement-feedback ticket 01 — the edge pass places the edge 
     expect(step6).toContain("A bare address writes a DRAFT");
     expect(step6).toContain("E6 ERROR that blocks your");
     expect(step6).toContain("retract-and-re-add round");
+  });
+});
+
+/**
+ * SETTLEMENT-READ-ONCE TICKET 04 (spec D3, "Stage 1 is topic-first"). The
+ * topic pass is no longer a per-turn write loop: after the one read it lists
+ * the window's topics, declares the lane a topic has none for, tags that
+ * topic's turns in ONE batch call (ticket 02's membership primitive), corrects
+ * the few turns the audit caught with a per-turn `note`, and finalizes.
+ *
+ * Pinned the same way ticket 09 and first-settlement-feedback ticket 01 pinned
+ * theirs — a needle on the rendered text, scoped to the step or duty that owns
+ * it, so a passing test means the run actually sees the sentence where it
+ * needs it. The `not.toContain` block is the other half: a retired sentence
+ * that is merely unreachable in the source still ships if it renders.
+ */
+describe("settlement-read-once ticket 04 — stage 1 works topic-first", () => {
+  function prompt(): string {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    return renderPromptFor(context);
+  }
+
+  test("the procedure states the order: read+audit → topics and lanes → batch tag → corrections → finalize", () => {
+    const text = prompt();
+
+    const step2 = text.slice(
+      text.indexOf("2. For each turn, do the TURN-SCOPE work"),
+      text.indexOf("3. Only once the whole set has been read"),
+    );
+    // D3: the audit is a duty of the READ, edits are the exception.
+    expect(step2).toContain("THE AUDIT IS A DUTY OF THE READ");
+    expect(step2).toContain("in the one pass that sees it");
+    expect(step2).toContain("Most turns are sound and take no");
+    expect(step2).toContain("EDITS ARE THE EXCEPTION, not the shape of this pass");
+
+    const step3 = text.slice(
+      text.indexOf("3. Only once the whole set has been read"),
+      text.indexOf("4. WRITE, in this order"),
+    );
+    expect(step3).toContain("LIST the topics this window");
+    expect(step3).toContain(
+      "DECLARE a lane for",
+    );
+    expect(step3).toContain("every line no declared lane is a synonym for");
+
+    const step4 = text.slice(
+      text.indexOf("4. WRITE, in this order"),
+      text.indexOf("PHASE 2 — EDGE PASS"),
+    );
+    expect(step4).toContain("ONE batch tag call per topic (duty 7)");
+    expect(step4).toContain("then the");
+    expect(step4).toContain("per-turn `note` corrections your audit caught (duty 8), then `finalize`");
+    expect(step4).toContain("(duty 9)");
+    expect(step4).toContain("Declaring comes BEFORE tagging");
+    expect(step4).toContain("the corrections come AFTER the batch");
+
+    // The order is also the ORDER OF THE STEPS, not only of the sentences.
+    expect(text.indexOf("3. Only once the whole set has been read")).toBeGreaterThan(
+      text.indexOf("2. For each turn, do the TURN-SCOPE work"),
+    );
+    expect(text.indexOf("4. WRITE, in this order")).toBeGreaterThan(
+      text.indexOf("3. Only once the whole set has been read"),
+    );
+  });
+
+  test("duty 5 puts the declaration before any tag names the lane", () => {
+    const text = prompt();
+    const duty5 = text.slice(
+      text.indexOf("5. CREATE the lanes the remaining lines need"),
+      text.indexOf("6. DISPOSE the homeless"),
+    );
+    // The settlement facade's OWN shape — `id="E<n>"` plus `tag`. Its
+    // `resolveOpenSegment` refuses a lane address, and it has no `members`
+    // parameter, so the spec's public-`remember` form is not taught here.
+    expect(duty5).toContain('`remember(create, id="E<n>",');
+    expect(duty5).toContain("tag=…)`");
+    expect(duty5).toContain("BEFORE");
+    expect(duty5).toContain("anything is tagged with that word");
+    expect(duty5).toContain("the batch write in duty 7 refuses an");
+    expect(duty5).toContain("undeclared word");
+  });
+
+  test("duty 7 teaches the batch tag write: one call per topic, additive, all-or-nothing", () => {
+    const text = prompt();
+    const duty7 = text.slice(
+      text.indexOf("7. TAG each topic's turns in ONE call"),
+      text.indexOf("8. CORRECT what the audit caught"),
+    );
+    expect(duty7).toContain('`note(turns:["S<a>/T<b>", …],');
+    expect(duty7).toContain('task:"E<n>", addTags:["<lane>"])`');
+    expect(duty7).toContain("one call per topic");
+    expect(duty7).toContain("The write is ADDITIVE");
+    expect(duty7).toContain("the task's own");
+    expect(duty7).toContain("tag rides along onto a member that lacks it");
+    expect(duty7).toContain("ALL-OR-NOTHING");
+    expect(duty7).toContain("a single repair call fixes the batch");
+  });
+
+  test("duty 7 states multi-lane membership and judges each membership on the PRINCIPAL result", () => {
+    const text = prompt();
+    const duty7 = text.slice(
+      text.indexOf("7. TAG each topic's turns in ONE call"),
+      text.indexOf("8. CORRECT what the audit caught"),
+    );
+    expect(duty7).toContain("A TURN MAY BELONG TO SEVERAL LANES");
+    expect(duty7).toContain("named in BOTH calls");
+    expect(duty7).toContain("the union is the outcome");
+    expect(duty7).toContain("nothing to reconcile afterwards");
+    // Each membership judged separately, on the same test.
+    expect(duty7).toContain("Judge each");
+    expect(duty7).toContain("membership on its own");
+    expect(duty7).toContain("PRINCIPAL");
+    expect(duty7).toContain("result serve that topic");
+    expect(duty7).toContain("does the turn merely MENTION it");
+    expect(duty7).toContain("tagging by mention is over-tagging");
+  });
+
+  test("duty 8 makes the per-turn note the correction and removal path, and warns that it runs after the batch", () => {
+    const text = prompt();
+    const duty8 = text.slice(
+      text.indexOf("8. CORRECT what the audit caught"),
+      text.indexOf("9. FINALIZE."),
+    );
+    expect(duty8).toContain("one `note` per turn — the exception, not");
+    expect(duty8).toContain("the pass");
+    expect(duty8).toContain("ONE call carrying all of them together");
+    expect(duty8).toContain("must LEAVE a lane");
+    expect(duty8).toContain("the batch write only ever ADDS");
+    expect(duty8).toContain("REPLACEMENT");
+    expect(duty8).toContain("SEMANTICS");
+    expect(duty8).toContain("a lane word you");
+    expect(duty8).toContain("leave out is REMOVED");
+    expect(duty8).toContain("That is how a mis-filed turn leaves a lane");
+    // The hazard the new order creates, stated where it bites.
+    expect(duty8).toContain("These");
+    expect(duty8).toContain("calls run AFTER duty 7");
+    expect(duty8).toContain("must restate the lane");
+    expect(duty8).toContain("words the batch just added; leaving one out un-files the turn");
+  });
+
+  test("the `note` tool's own description names the batch write as the lane-assignment path", () => {
+    // The prompt teaches the ORDER; the tool description is where a writer
+    // composing the call looks. A description that still presented the
+    // whole-set `tags` write as the way lanes are assigned would teach the
+    // retired shape at the point of use.
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain("LANES ARE ASSIGNED IN BATCHES");
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain(
+      'note(turns:[…], task:"E<n>", addTags:[…])',
+    );
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain("tags one topic's turns in ONE call");
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain("additive, all-or-nothing");
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain(
+      "a turn serving two topics is simply named in both calls",
+    );
+    expect(UNIFIED_NOTE_TOOL_DESCRIPTION).toContain(
+      "A per-turn `tags` write is the CORRECTION and REMOVAL path instead",
+    );
+  });
+
+  test("the retired per-turn projection and the batches-of-ten read are gone from the rendered prompt", () => {
+    const text = prompt();
+    expect(text).not.toContain("one `note` call per turn whose tags change");
+    expect(text).not.toContain("WRITE the final projection");
+    expect(text).not.toContain("written whole rather than patched");
+    expect(text).not.toContain("batches of ten");
+    expect(text).not.toContain("Batches bound working memory");
+    expect(text).not.toContain("a full batch, or the whole writable set");
   });
 });

@@ -2659,7 +2659,11 @@ export const UNIFIED_NOTE_TOOL_DESCRIPTION =
   "own `finalize` has succeeded: title/content/insight, type and tags — the " +
   "topic pass's own fields, judged by the Memory Rubric in your prompt; the " +
   "three relation fields and their retract… mirrors are refused, naming the " +
-  "edge pass you have not reached yet. Tags are the projection: a whole-set " +
+  "edge pass you have not reached yet. LANES ARE ASSIGNED IN BATCHES: " +
+  "`note(turns:[…], task:\"E<n>\", addTags:[…])` tags one topic's turns in " +
+  "ONE call — additive, all-or-nothing — and a turn serving two topics is " +
+  "simply named in both calls. A per-turn `tags` write is the CORRECTION and " +
+  "REMOVAL path instead, and it is the projection: a whole-set " +
   "`tags` write states the turn's task tag, every lane it belongs to and " +
   "every `topic:` word — a lane word left out is REMOVED, a `topic:` word " +
   "left out is refused (use `retireTopic` to correct one). AFTER `finalize` " +
