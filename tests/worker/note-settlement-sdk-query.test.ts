@@ -5806,10 +5806,15 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       const before = computeSettlementShapeNumbers(db, fixture.job.id);
       const alphaShape = before.lanes.find((lane) => lane.laneTag === "alpha")!;
       expect(alphaShape.memberCount).toBe(3);
-      // THREE in-lane rows now: the declared `a2 -> a1`, the fixture's own
-      // undeclared draft on the same pair, and the half-declared `a3 -> a2`.
-      // All three derive `alpha` on every blank side.
-      expect(alphaShape.edgeCount).toBe(3);
+      // TWO in-lane rows: the declared `a2 -> a1` and the half-declared
+      // `a3 -> a2`, whose blank head DERIVES `alpha` from an endpoint in one
+      // lane. It read THREE while ticket 02 was the tip — the fixture's own
+      // undeclared draft on `(a2, a1)` counted as a third physical row — and
+      // ticket 03's ONE PAIR, ONE ROW (spec D1/D5) is what removed it: the
+      // retract above deletes the pair whole and the write below re-creates it
+      // as a single row. Stale expectation, corrected here rather than left
+      // failing at HEAD (main-agent-edges ticket 04).
+      expect(alphaShape.edgeCount).toBe(2);
       // …so every member is connected: `a3 -> a2 -> a1`. The edgeless-member
       // property is asserted on `beta` below, which genuinely has one.
       expect(alphaShape.componentCount).toBe(1);
@@ -6441,5 +6446,294 @@ describe("the host loop feeds the response-origin coordinator (ticket 01)", () =
       "handler: (args: Record<string, unknown>, extra: unknown) => unknown,",
     );
     expect(source).toContain("return handler(args, extra);");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MAIN-AGENT-EDGES TICKET 04 — E6 and E4 on the THREE-LAYER AUDIT, both faces.
+//
+// Spec D6: the audit keeps its three layers (load CONTEXT, ADMIT a finding only
+// when its citing anchor is in the judgment set or authored by this run,
+// PROJECT to writable authority; actionable = the OUTGOING rows of writable
+// citers) and `lane_check` and `commit` share ONE predicate. The two findings
+// are E6 (a blank side whose endpoint has >= 2 lanes) and E4 (a declaration not
+// among its endpoint's tags); a blank side on a UNIQUE or LANE-LESS endpoint is
+// never a finding at all.
+//
+// MUTATION NOTES, both verified. Widen E6 in `shared/lane-checker.ts` back to
+// "either side is blank" (admit `derived` alongside `ambiguous`) and the
+// "unique endpoints commit" test below goes red on the preview.
+//
+// The external-citer exclusion is DOUBLY enforced and no single-line mutation
+// flips it, which is worth stating rather than leaving a reader to discover:
+// `evaluateWindowLanes`'s ADMIT filter (`judged`) and its PROJECT filter
+// (`projectLaneCheckerResultByScope` against the writable set) each suffice on
+// their own — dropping either alone leaves the test green. Dropping BOTH turns
+// it red, and not by printing the findings: the self-contradicting-evaluator
+// guard fires first ("SYSTEM / PROJECTION FAILURE"), because a run whose report
+// names findings its own filters exclude cannot have a coherent verdict.
+// ---------------------------------------------------------------------------
+
+describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writable citer", () => {
+  /**
+   * One task, TWO lanes, three turns. `t2 -> t1` is blank on both sides (E6 on
+   * whichever side is in the writable set), `t3 -> t1` declares a tag `t3` does
+   * not carry (E4). `t3` is the run's own turn in the in-range case and an
+   * outsider in the out-of-range one.
+   */
+  function seedAuditFixture(db: Database, contentSessionId: string) {
+    const sessionDbId = seedPullSession(db, contentSessionId);
+    const t1 = insertTypedTurn(db, sessionDbId, 1);
+    const t2 = insertTypedTurn(db, sessionDbId, 2);
+    const t3 = insertTypedTurn(db, sessionDbId, 3);
+    seedAmbiguousLaneHome(db, [t1, t2, t3]);
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          relation: "extends",
+          provenance: "asserted",
+          ...deriveSideTags([]),
+        },
+      ],
+      NOW,
+    );
+    // E4's row, written straight to storage: the declare route validates the
+    // tag against the endpoint, so an INVALID declaration cannot be produced
+    // through it — which is exactly why E4 exists as a finding over stock.
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'extends', 'judged', 'not-a-lane-of-mine', 'amb-one',
+               'use', '', ?)`,
+    ).run(t3, t1, NOW);
+    return { sessionDbId, t1, t2, t3 };
+  }
+
+  test("a run whose writable set owns both citers sees E6 and E4 in `lane_check` AND is refused by `commit` on the same two", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1, t2, t3 } = seedAuditFixture(db, "settlement-audit-both-faces");
+      const job = claimWindow(db, sessionDbId, 1, 3);
+      const writable = new Set([t1, t2, t3]);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const previewText = preview.content[0]!.text;
+          // FACE 1 — the preview.
+          expect(previewText).toContain("[E6]");
+          expect(previewText).toContain("[E4]");
+          expect(previewText).toContain(`S${sessionDbId}/T2`);
+          expect(previewText).toContain(`S${sessionDbId}/T3`);
+
+          // FACE 2 — the verdict, from a FRESH evaluation of the same
+          // definition. One definition, two evaluations (settlement-gate-
+          // taxonomy ticket 03), so the two can name different rows only if
+          // the graph moved between them — and nothing here moved it.
+          const refused = (await handlers.get("commit")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          const verdict = refused.content[0]!.text;
+          expect(verdict).toContain("Commit refused");
+          expect(verdict).toContain("[E6]");
+          expect(verdict).toContain("[E4]");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: writable,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writable, 1, 3),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("claimed");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("an EXTERNAL citer's incident row is never a finding on either face — the actionable set is the outgoing rows of WRITABLE citers", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const { sessionDbId, t1 } = seedAuditFixture(db, "settlement-audit-external-citer");
+      // The window owns T1 ALONE. Both defective rows are INCIDENT to it — it
+      // is the cited endpoint of each — but neither is an outgoing row of a
+      // writable citer, so neither is this run's to repair.
+      const job = claimWindow(db, sessionDbId, 1, 1);
+      const writable = new Set([t1]);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(preview.content[0]!.text).not.toContain("[E6]");
+          expect(preview.content[0]!.text).not.toContain("[E4]");
+
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: writable,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writable, 1, 1),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 1,
+      });
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+    } finally {
+      db?.close();
+    }
+  });
+
+  test("a whole window of UNDECLARED edges on uniquely-laned endpoints commits — there is nothing to choose between", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      seedTagContainers(db);
+      const sessionDbId = seedPullSession(db, "settlement-audit-unique-endpoints");
+      const t1 = insertTypedTurn(db, sessionDbId, 1);
+      const t2 = insertTypedTurn(db, sessionDbId, 2);
+      const t3 = insertTypedTurn(db, sessionDbId, 3);
+      // ONE lane, so every endpoint is uniquely laned and every blank side
+      // DERIVES it. Under the stored-side model each of these rows was a draft
+      // the run had to place; under resolution there is nothing to declare.
+      const segmentId = createSegment(db, {
+        title: "single lane home",
+        tags: ["single-home"],
+        nowEpoch: 100,
+      }).id;
+      insertLane(db, segmentId, "only-one", 100);
+      addSegmentMembers(db, segmentId, [t1, t2, t3], 100);
+      for (const turnId of [t1, t2, t3]) {
+        db.query("UPDATE turns SET tags = ? WHERE id = ?").run(
+          JSON.stringify(["single-home", "only-one"]),
+          turnId,
+        );
+      }
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: t2 },
+            cited: { kind: "turn", id: t1 },
+            relation: "extends",
+            provenance: "asserted",
+            ...deriveSideTags([]),
+          },
+          {
+            citing: { kind: "turn", id: t3 },
+            cited: { kind: "turn", id: t2 },
+            relation: "extends",
+            provenance: "asserted",
+            ...deriveSideTags([]),
+          },
+        ],
+        NOW,
+      );
+      const job = claimWindow(db, sessionDbId, 1, 3);
+      const writable = new Set([t1, t2, t3]);
+
+      const { toolImpl, handlers } = captureToolImpl();
+      const queryImpl = mock(() =>
+        (async function* () {
+          const preview = (await handlers.get("lane_check")!({})) as {
+            content: Array<{ text: string }>;
+          };
+          expect(preview.content[0]!.text).not.toContain("[E6]");
+          const committed = (await handlers.get("commit")!({
+            report: "no friction this window",
+          })) as { content: Array<{ text: string }> };
+          expect(committed.content[0]!.text).toContain("Committed");
+          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+        })(),
+      );
+
+      const runQuery = createNoteSettlementSdkQuery({
+        db,
+        dataRoot: "/tmp/claude-mnemo-settlement-sdk-query",
+        queryImpl: queryImpl as never,
+        createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+        toolImpl: toolImpl as never,
+        now: () => NOW,
+      });
+      await runQuery({
+        prompt: "settle",
+        systemPrompt: "system",
+        model: "claude-sonnet-5",
+        jobId: job.id,
+        claimGeneration: job.claimGeneration,
+        stage: job.stage,
+        sessionId: sessionDbId,
+        writableTurnIds: writable,
+        scopeProvenance: settlementScopeProvenanceFor(db, sessionDbId, writable, 1, 3),
+        contextBuiltAtEpoch: NOW,
+        windowStart: 1,
+        windowEnd: 3,
+      });
+
+      expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
+      // Nothing was written to make it commit: the two rows are still there,
+      // still with both sides blank.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
+      expect(getOutgoingEdges(db, { kind: "turn", id: t3 })).toHaveLength(1);
+    } finally {
+      db?.close();
+    }
   });
 });
