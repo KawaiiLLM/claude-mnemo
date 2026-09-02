@@ -21,6 +21,7 @@ import {
   IMPRESSION_GOLDEN_SAMPLE_THIN,
   renderImpressionTeaching,
 } from "../../src/worker/note-settlement-impression-teaching";
+import { renderEdgePassTeaching } from "../../src/worker/note-settlement-edge-pass-teaching";
 import { UNIFIED_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
 import {
   SETTLEMENT_READ_FIELD_BUDGETS,
@@ -188,7 +189,9 @@ describe("ticket 09 item 2 — the finalize and commit duty paragraphs state the
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
     const prompt = renderPromptFor(context);
 
-    const commitDuty = prompt.slice(prompt.indexOf("9. Write this session's own"));
+    // main-agent-edges ticket 06 renumbered the edge pass's steps (5-8).
+    const commitDuty = prompt.slice(prompt.indexOf("8. Write this session's own"));
+    expect(prompt.indexOf("8. Write this session's own")).toBeGreaterThan(-1);
     expect(commitDuty.slice(0, 700)).toContain("capped at 1000 characters");
     expect(commitDuty.slice(0, 700)).toContain("shorten below ~800");
   });
@@ -308,27 +311,74 @@ describe("first-settlement-feedback ticket 01 — the read step names the ADDRES
   });
 });
 
-describe("first-settlement-feedback ticket 01 — the edge pass places the edge AT WRITE", () => {
-  test("step 6 names the two-sided form, the both-or-neither rule, and E6 as the cost of a bare address", () => {
+/**
+ * MAIN-AGENT-EDGES TICKET 06 (spec D6) REVERSES first-settlement-feedback
+ * ticket 01's step-6 teaching. "PLACE EVERY EDGE AT WRITE" with the two-sided
+ * `{turn, tailTag, headTag}` entry, "A bare address writes a DRAFT" and "E6
+ * ERROR that blocks your commit" described the stored-side model; under the
+ * resolver (D2) a bare address IS the edge, a blank side derives wherever the
+ * endpoint's lane set is unique, and E6 is only the ambiguous endpoint —
+ * declared through `declare`, never re-placed by a retract-and-re-add round.
+ * The pass itself is the shared block (`renderEdgePassTeaching`), pinned
+ * sentence by sentence in `note-settlement-edge-pass-teaching.test.ts`; here
+ * the pins are the HOST's: step 5 names the deltas, step 6 hands over to the
+ * block, the block renders verbatim, and every retired sentence is absent from
+ * the RENDERED prompt.
+ */
+describe("main-agent-edges ticket 06 — PHASE 2 is the shared edge pass, and the stored-side teaching is gone", () => {
+  function prompt(): string {
     const sessionDbId = seedSession();
     seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
-    const prompt = renderPromptFor(context);
+    return renderPromptFor(context);
+  }
 
-    const step6 = prompt.slice(
-      prompt.indexOf("6. Work the worklist lane by lane"),
-      prompt.indexOf("7. Run ONE crossing pass"),
+  test("step 5 names the two read deltas among finalize's data, and step 6 hands over to the shared block", () => {
+    const text = prompt();
+    const step5 = text.slice(
+      text.indexOf("5. READ `finalize`'s own result"),
+      text.indexOf("6. Run the edge pass exactly as taught below"),
     );
-    // Job 171 wrote 66 bare edges, took 39 E6 errors on its first
-    // `lane_check`, and spent ~80 tool calls retracting and re-adding them.
-    expect(step6).toContain("PLACE EVERY EDGE AT WRITE");
-    expect(step6).toContain("`{turn, tailTag, headTag}` in the call that writes it");
-    expect(step6).toContain("`tailTag` the lane THIS turn writes from");
-    expect(step6).toContain("both sides or neither");
-    expect(step6).toContain("A bare address writes a DRAFT");
-    expect(step6).toContain("E6 ERROR that blocks your");
-    expect(step6).toContain("retract-and-re-add round");
+    expect(step5).toContain("the two READ DELTAS — the writable delta");
+    expect(step5).toContain("and the context delta");
+    const step6 = text.slice(
+      text.indexOf("6. Run the edge pass exactly as taught below"),
+      text.indexOf("THE EDGE PASS — DECLARE, FILL, REVIEW."),
+    );
+    expect(step6).toContain("read the delta union");
+    expect(step6).toContain("once, then DECLARE, FILL and REVIEW over the worklist");
+    expect(step6).toContain("ONE crossing pass over lanes that genuinely link");
+    // The block itself, verbatim, between step 6 and the lane_check step.
+    expect(text).toContain(renderEdgePassTeaching());
+    expect(text.indexOf(renderEdgePassTeaching())).toBeGreaterThan(
+      text.indexOf("6. Run the edge pass exactly as taught below"),
+    );
+    expect(text.indexOf(renderEdgePassTeaching())).toBeLessThan(
+      text.indexOf("7. You may call `lane_check`"),
+    );
+  });
+
+  test("the stored-side teaching is absent from the RENDERED prompt", () => {
+    const text = prompt();
+    for (const retired of [
+      "PLACE EVERY EDGE AT WRITE",
+      "`{turn, tailTag, headTag}` in the call that writes it",
+      "both sides or neither",
+      "A bare address writes a DRAFT",
+      "E6 ERROR that blocks your",
+      "retract-and-re-add round",
+      "recall that lane's",
+      "Before any edge write, recall the citing",
+      "reconcile pre-existing bare drafts",
+      "pre-existing bare drafts reconciled per pair",
+      "by retracting or re-placing the edge",
+    ]) {
+      expect({ retired, present: text.includes(retired) }).toEqual({ retired, present: false });
+    }
+    // What replaced the E4/E6 repair sentence.
+    expect(text).toContain("both are repaired");
+    expect(text).toContain("by a `declare` entry or a retraction, and both block your `commit`");
   });
 });
 

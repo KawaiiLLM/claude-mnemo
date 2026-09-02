@@ -4,10 +4,25 @@ import type {
   SettlementWritableSet,
 } from "./note-settlement-context";
 import type { SettlementWorklistRendering } from "./note-settlement-shape-numbers";
+import { renderEdgePassTeaching } from "./note-settlement-edge-pass-teaching";
 import { renderImpressionTeaching } from "./note-settlement-impression-teaching";
 
 /**
  * The settlement prompt, in English (裁决 16).
+ *
+ * MAIN-AGENT-EDGES TICKET 06 (spec D6): THIS IS THE COLD RESUME'S PROMPT, and
+ * its edge pass is the SHARED block (`note-settlement-edge-pass-teaching.ts`)
+ * the unified run's PHASE 2 also renders. Block A's batch loop ("batches of
+ * ten", three workstations, a private ledger, "before any edge write, recall
+ * the citing turn"), Block B's five-step finalization pass (DISPOSE / JUDGE
+ * AND WRITE / CHECK AND REPAIR) with its two-sided draft-and-E6 entry
+ * teaching, DRAFT RECONCILIATION, and the homeless retraction's "the bare
+ * citation comes back" (false since ticket 03 deleted the restoration) are
+ * RETIRED from the rendered text — the history of how they got here is the
+ * comments below, kept as history. What this file still owns: the frame, the
+ * authority and memory-policy sections, the printed writable set and worklist
+ * (now with the two read deltas), the call shapes this surface accepts, the
+ * two `lane_check`-warning teachings and the settlement half of the rubric.
  *
  * One call, one session, one window, no state. Everything the model is asked
  * to decide is a HINDSIGHT judgement the writing side could not make: a real
@@ -570,6 +585,20 @@ function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
     lines.push(`    "${group.label}" — ${group.reason}`);
     lines.push(renderAddressList(group.memberAddresses, "      "));
   }
+  // MAIN-AGENT-EDGES TICKET 06: the two READ DELTAS, off the same persisted
+  // snapshot the unified `finalize` result prints them from. On this resume
+  // dispatch the writable delta is ALSO inside the writable set printed
+  // above (it is a subset of it, filed under the lookback group there); it
+  // is named again here so the RELATIONS-ONLY authority is visible at the
+  // point the debts are listed.
+  lines.push(
+    `  writable delta — relations only, not in the initial set (${worklist.writableDelta.length}):`,
+  );
+  lines.push(renderAddressList(worklist.writableDelta, "    "));
+  lines.push(
+    `  context delta — read-only, one hop, not in the initial set (${worklist.contextDelta.length}):`,
+  );
+  lines.push(renderAddressList(worklist.contextDelta, "    "));
   return lines.join("\n");
 }
 
@@ -704,12 +733,17 @@ export function renderNoteSettlementPrompt(
     "you do not re-group a turn, and a lane that looks wrong to you is a",
     "later, explicit, user-ruled merge, never a rewrite of your own.",
     "",
+    // MAIN-AGENT-EDGES TICKET 06 (spec D6): the frame names the three acts
+    // the procedure below teaches, and the two handover debts that survive
+    // the new model. "Pre-existing bare drafts reconciled per pair" is gone
+    // with the draft itself — one pair is one row, and a blank side is legal
+    // wherever the endpoint's lane set decides it.
     "Your work is the EDGES inside what stage 1 drew, and it is driven by the",
     "worklist below rather than by anything you might derive: lane by lane in",
-    "its own order, read that lane's members as one thread and write the edges",
-    "that run between them; then ONE crossing pass over the lanes that",
-    "genuinely link; then the three debts that come with the handover —",
-    "pre-existing bare drafts reconciled per pair, removed-side debts",
+    "its own order, DECLARE the side of every edge whose endpoint sits in",
+    "several lanes, FILL the edges the writing side missed, and REVIEW what",
+    "stands; then ONE crossing pass over the lanes that genuinely link; then",
+    "the two debts that come with the handover — the writable delta's citers",
     "discharged, and edges whose endpoints have no task at all retracted with",
     "cause. This session's own narrative is written here too, at the commit",
     "that ends the job.",
@@ -772,45 +806,22 @@ export function renderNoteSettlementPrompt(
     "declared lookback. It is immutable — reading never widens it, and every",
     "write must land inside it; the gate refuses the rest and names why.",
     "",
-    "Work the WHOLE writable set in chronological batches of ten turns (the",
-    "last batch may be smaller). Batches bound working memory, nothing else:",
-    "window and lookback labels and batch boundaries are never thread, lane,",
-    "phase or convergence boundaries. Do not call `lane_check` during the",
-    "batch loop. Reading is your write license throughout: a whole-field",
-    "`write` over another writer's text requires your own untruncated read of",
-    "that field, and `timeline` licenses nothing.",
+    // MAIN-AGENT-EDGES TICKET 06 (spec D6; read-once D6 as rewritten): Block
+    // A's batch loop — "batches of ten", three workstations, a private
+    // ledger, "before any edge write, recall the citing turn" — is RETIRED
+    // whole. This dispatch is a cold resume of a transitioned job: nobody in
+    // this context has read anything yet, so the ONE read is the writable set
+    // plus the context delta the worklist below prints, paginated, and the
+    // acts that follow are the shared edge-pass teaching, byte-identical with
+    // the unified run's PHASE 2.
+    "This dispatch resumes a job whose stage-1 transition has already landed:",
+    "read the writable set below TOGETHER WITH the worklist's context delta as",
+    "one paginated sweep, and then follow the edge pass exactly as taught",
+    "here. Reading is your write license throughout: a whole-field `write`",
+    "over another writer's text requires your own untruncated read of that",
+    "field, and `timeline` licenses nothing.",
     "",
-    "Each batch runs three workstations, in order:",
-    "",
-    "BATCH STEP 1 — READ. Recall every turn of this batch with",
-    "`filter={fields:[\"title\",\"metadata\",\"content\",\"insight\",\"relations\"]}`;",
-    "re-read any truncated field with a bigger `turn` budget, and read a turn",
-    "carrying no note with `prompt` and `response` added — the raw exchange is",
-    "what you judge it by, and a field never delivered licenses nothing. Read",
-    "EVERY turn, whether or not anything about it looks interesting: this is",
-    "the material your edges are judged on, and the relations read is what",
-    "licenses writing them. What you are NOT doing here is auditing the note,",
-    "the type or the tags — the first pass settled those, and re-judging them",
-    "spends this window on work it has already had.",
-    "",
-    "BATCH STEP 2 — CONTENT CANDIDATES. Without consulting the stored edge",
-    "words, identify the claim-level links wholly visible in this batch. Add",
-    "each to a private open-thread ledger: at least two turn addresses, the",
-    "claim link, a phase hypothesis, its current frontier. Shared topic,",
-    "adjacency and state-only turns are never candidates; there is no target",
-    "count, and an empty batch ledger is valid. Record candidates only —",
-    "write no relation and no lane tag yet.",
-    "",
-    "BATCH STEP 3 — BACK-LINK. Compare this batch against the ledger's open",
-    "frontiers, the batch's own explicit predecessor language, and any prior",
-    "terminus this content explicitly continues or corrects — never against",
-    "every earlier turn. Follow predecessor language across window, lookback",
-    "and batch boundaries; when it points outside the writable set, read that",
-    "endpoint for judgment even though it stays unwritable. A membership",
-    "break never proves a content thread absent. Targeted re-reads collect",
-    "any historical relations or full tag sets the final write gate will",
-    "require — the ledger itself licenses nothing. Update the ledger; do not",
-    "finalize the graph.",
+    renderEdgePassTeaching(),
     "",
     "WRITABLE SET:",
     renderWritableSet(writableSet),
@@ -901,7 +912,7 @@ export function renderNoteSettlementPrompt(
     "the warnings, as a finding this run cannot repair.",
     "Do not chase it, and do not retype a turn to silence it.",
     "E4 and E6 anchored on that same turn ARE yours — both are relation",
-    "grammar, both are repaired by retracting or re-placing the edge, and",
+    "grammar, both are repaired by a `declare` entry or a retraction, and",
     "both block your commit.",
     "",
     "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING — a",
@@ -916,179 +927,49 @@ export function renderNoteSettlementPrompt(
     "succeed either. It is not a parameter mistake and there is no phrasing",
     "that fixes it — stop making tool calls and end your reply.",
     "",
-    "1. TURN EDGES, via the `note` tool — every relation in the finalization",
-    "   pass, as the procedure above describes. Judge each one with the Memory",
+    // MAIN-AGENT-EDGES TICKET 06 (spec D6). Duty 1 used to carry the whole
+    // stage-2 procedure inside one bullet — Block B's DISPOSE / JUDGE AND
+    // WRITE / CHECK AND REPAIR steps, the two-sided `{turn, tailTag, headTag}`
+    // draft-and-E6 teaching, a "before any edge write" call sequence, DRAFT
+    // RECONCILIATION, DEBT DISCHARGE and HOMELESS RETRACTION. The procedure
+    // now lives ONCE, above, in the shared edge-pass block (`note-settlement-
+    // edge-pass-teaching.ts`); the class judgment defers to the rubric's own
+    // 三个关系类 entry rather than restating it in English; and what this duty
+    // keeps is what the shared block does not say: the call SHAPES this
+    // surface accepts, and the two review teachings that belong to
+    // `lane_check`'s warnings (a severed lane, phase connectivity) with the
+    // settlement half of the rubric they are judged against.
+    "1. TURN EDGES, via the `note` tool — the DECLARE, FILL and REVIEW acts",
+    "   the procedure above describes. Judge each edge with the Memory",
     "   Rubric's **三个关系类** entry above; this prompt states only the",
     "   call shape. The same `note` tool carries a turn's prose, type and tags,",
     "   and none of them is yours this pass: the first pass audited them and",
     "   its judgment stands, so reach for those fields only where an edge you",
     "   are writing cannot be written without it.",
-    "   - a lane tag on a turn is what an edge side names, and it is already",
-    "     there: stage 1 wrote each member's tags and the worklist below lists",
-    "     the members it froze per lane. If a side you want to place names a",
-    "     lane a member does not carry, that is a fact about the partition,",
-    "     not a tags write to make — place the sides the frozen membership",
-    "     supports, or retract the row.",
-    // LANE-MODEL-V12 TICKET 21 (user ruling 2026-08-26): ONE membership
-    // policy across both tiers, and the settlement half of the
-    // ask-before-create rule. The main agent, finding no tag that fits, may
-    // ask the user whether to open one; this pass is headless, so its half of
-    // the same rule is LEAVE IT EMPTY. The line that matters is WHY a lane is
-    // declared, not whether: duty 2 declares one because the content shows a
-    // separable, sustainable sub-task (the 判据 there), never because some
-    // turn came up homeless. Those are different acts that happen to use the
-    // same verb, and only the second one is forbidden here.
-    // SETTLEMENT-ERGONOMICS TICKET 02 (spec D2): a copyable CALL SEQUENCE for
-    // the read a write requires — see this file's own top-of-file paragraph
-    // for the two traps it has to dodge (a default `turn` budget that
-    // truncates, and the fan-out lane route that takes no budget at all).
-    "   - before any edge write, run this call sequence, in order — it is",
-    "     the one this prompt asks you to copy rather than improvise. First,",
-    "     read the citing turn's own edges with an EXPLICIT, large `turn`",
-    "     budget: `recall(id=\"S15069/T7\", filter={fields:[\"relations\"]},",
-    "     turn=2000)`. The default renders a high in-degree turn's relations",
-    "     TRUNCATED, and a truncated field earns no complete-read grant, so",
-    "     the edge write below is refused by the SAME gate; if it comes back",
-    "     truncated, raise the budget and re-read. Then, to see a lane's",
-    "     current shape, `timeline(id=\"E<n>/L<k>\")` — ONE lane, singular",
-    "     form only, never the route that lists every declared lane at once:",
-    "     that one takes no budget parameter and renders all of them in a",
-    "     single string, which is itself a candidate to blow the tool-result",
-    "     cap. Only then write the edge, below.",
-    // ------------------------------------------------------------------
-    // BLOCK B, authored verbatim (.scratch/tag-mandate/issues/06-prompt-
-    // text.md, revision 7), re-indented by three spaces to sit in duty 2's
-    // own list. Replaces the old seven-step per-thread lane procedure
-    // wholesale with the five-step batched finalization pass (DISPOSE/FORM
-    // LANES/JUDGE AND WRITE/DECLARE CONVERGENCE/CHECK AND REPAIR) that runs
-    // ONCE, after the last batch, over the ledger Block A's BATCH STEP 2/3
-    // built.
-    //
-    // [S15069/T1721] REPAIR: the entry FORMS are NO LONGER what revision 7
-    // wrote. That revision froze `{turn, tags:[...]}` — v11's merged tag SET —
-    // and "Do not paraphrase" kept it frozen straight through lane-model-v12,
-    // which replaced it with the two-sided `{turn, tailTag, headTag}`. The
-    // settlement note schema has accepted only the two-sided form since; this
-    // block was teaching a shape that cannot be written. The forms below are
-    // now the ones `note-settlement-sdk-query.ts` actually accepts, and THAT
-    // file is the authority — when the two disagree again, it wins.
-    // ------------------------------------------------------------------
+    "   - a lane side is what an endpoint's own lane set decides, and stage 1",
+    "     already wrote every member's tags: the worklist below lists the",
+    "     members it froze per lane. A side you cannot declare — the tag is",
+    "     not among that endpoint's lanes in its own task, and the same word in",
+    "     another task is another lane, since a lane's identity is (task, tag) —",
+    "     is a fact about the partition, not a tags write to make: leave the",
+    "     side to derive, or retract the row.",
     "   - edges: `note`'s correct/verify/use fields — the three-class",
-    "     vocabulary. An entry is a bare address (\"S15069/T7\") — a DRAFT,",
-    "     both sides UNSETTLED — or a TWO-SIDED entry",
-    "     `{ \"turn\": \"S15069/T7\", \"tailTag\": \"a\", \"headTag\": \"b\" }`, which",
-    "     places each END in a lane: `tailTag` names the lane THIS turn writes",
-    "     FROM, `headTag` the lane the cited turn sits in. The same word on both",
-    "     sides is ONE lane spanning the edge; two different words are a legal",
-    "     CROSSING; the same word in two different tasks is a crossing too,",
-    "     since a lane's identity is (task, tag). A draft is ACCEPTED when you",
-    "     write it but does NOT survive `commit` — every edge in your writable",
-    "     set with an empty side is error E6, and commit refuses while one",
-    "     remains. Place both sides before you finish, or retract the row. Each",
-    "     PLACED side is checked against ITS OWN endpoint: the lane must already",
-    "     be DECLARED in the task THAT endpoint belongs to, and the tag must",
-    "     already sit on that endpoint turn's own",
-    "     tags — stage 1 wrote those, so a side you cannot place is a fact about",
-    "     the partition and not a tags write to make. An edge write",
-    "     also needs your own current read of the citing turn's RELATIONS — the",
-    "     batch reads earn it, your own writes keep it current, and a",
-    "     stale one is re-read, never guessed.",
-    "     A `correct` entry ALSO carries its coverage bit —",
-    "     `{ \"turn\": …, \"tailTag\": …, \"headTag\": …, \"coverage\": \"full\" }`",
-    "     or `\"partial\"`. A `correct` without it is refused naming the missing",
-    "     bit; a `verify` or `use` carrying one is refused too. The",
-    "     `retractCorrect`/`retractVerify`/`retractUse` mirrors delete the",
-    "     addressed placement's row of that CLASS — a row written under the",
-    "     retired seven-word vocabulary included — and still accept bare",
-    "     addresses (legacy rows stay deletable).",
-    "     All relation writes happen HERE, after the last batch, in three steps:",
-    "     1. DISPOSE every ledger candidate: NOT A LANE, STILL RUNNING, or",
-    "        CONVERGED — exactly one each. Uncertainty is STILL RUNNING, never",
-    "        CONVERGED. These three describe THIS CANDIDATE at this moment, not",
-    "        a state the lane carries: a lane has none, so a CONVERGED",
-    "        disposition closes nothing and a later member contradicts nothing.",
-    "        NOT A LANE",
-    "        names the failed criterion; CONVERGED names its exact closing",
-    "        evidence — explicit resolution, a completed verification, a",
-    "        release, or exact downstream adoption. There is no target number of",
-    "        lanes or declarations.",
-    "     2. JUDGE AND WRITE. For every candidate and every stock row you touch,",
-    "        ignore the stored relation word and run the class test as if no",
-    "        edge existed — the old word is evidence of nothing. BOTH ENDS ARE",
-    "        PRINCIPAL RESULTS: the conclusion or output the cited turn actually",
-    "        established, never a detail it happened to mention. Details do not",
-    "        earn edges. Then run the PRECEDENCE, in order:",
-    "        (1) does this output change the cited principal result's",
-    "        acceptance, reliability or scope? negated or limited = correct;",
-    "        confirmed or supported = verify. (2) otherwise, is the cited",
-    "        principal result a DIRECT input to this new output — actually",
-    "        consulted, adopted, tested or incorporated? = use. Ancestors are",
-    "        excluded: cite the layer you used, not what it rested on.",
-    "        correct and verify are SUBSETS of use, and the slot stores the",
-    "        most specific class; a pair that was both corrected and built on",
-    "        is correct, and no second row is written for it.",
-    "        correct carries a coverage bit: `full` when the cited principal",
-    "        result has no substantial part left that may serve as a PREMISE —",
-    "        it survives only as history, and permanent historical facts (it",
-    "        dispatched something, it wrote a file, it ran a test) never rescue",
-    "        it; `partial` when a definite non-empty substantial part still",
-    "        stands as a premise.",
-    "        VERIFY IS NARROW: this turn's own work must bear on whether the",
-    "        cited principal result holds. Prose saying \"confirms\" about a",
-    "        DETAIL of the cited turn is use, not verify.",
-    "        Where a cited turn holds several parallel principal results and",
-    "        this turn verifies one while correcting another, the DOMINANT",
-    "        action wins, not the safer label. Shared topic,",
-    "        adjacency, or preserving lane shape are never use evidence —",
-    "        and a blocker satisfied by doing the work is completion (use),",
-    "        not a correction of the blocking judgment. The",
-    "        members are already tagged and the frozen worklist is which lanes",
-    "        they sit in; write only what the fresh judgment supports.",
-    // ONE-EDGE-PER-CLAIM TICKET 15 (user ruling S15069/T2030, reviewer-pinned
-    // wording): the unified edge-declaration law, subsuming and retiring the
-    // 最小连通 PRINCIPLE below (see this file's own SETTLEMENT ACTIONS header
-    // comment for why). Targets under-declaration, never spam — measurement:
-    // 95% of turns emit exactly one ext/nar edge, 60% adjacent (2026-08-30).
-    "        Each edge carries one distinct claim this turn modifies. Every",
-    "        such claim gets its own edge — an edge already written excuses",
-    "        none of the others, and the preceding turn is never a default",
-    "        target. No claim carries two edges, and a path already readable",
-    "        through existing edges is not re-drawn. One pair of nodes carries",
-    "        ONE row, at the lane placement you judge honest — not one row per",
-    "        candidate lane.",
-    // SUFFICIENT CITATION (v13 spec's sufficiency law, user ruling
-    // S15069/T2300 — CONDITIONAL): a WRITING law, and the "mentioned but not
-    // cited" lint is its only mechanical proxy — a WARNING, never a refusal,
-    // because only the writer knows what its own conclusion rests on.
-    "        SUFFICIENT CITATION: where this turn's principal result rests on",
-    "        earlier nodes, every one of them is cited. Evidence this turn",
-    "        produced itself owes nothing — it IS this turn's contribution.",
-    "        This is a writing law, not a machine verdict; an address named in",
-    "        prose with no edge to it is reported as a WARNING only and never",
-    "        blocks a write.",
-    // ------------------------------------------------------------------
-    // STEP 4, rewritten by lane-state-retirement ticket 01. It used to ask a
-    // question about a LANE ("is this lane finished?"), which a bounded
-    // window cannot answer — and answering it honestly meant declining, which
-    // is why `index` was used ONCE in 819 edges. It now asks the question the
-    // window CAN answer, about a TURN, and carries the granularity rule.
-    // ------------------------------------------------------------------
-    // STEP 3 (DECLARE CONVERGENCE) IS DELETED — relation-vocabulary-v13,
-    // ruled at S15069/T2306: `indexes` is deleted as a word, and convergence
-    // is not declared any more. A turn that converges a stretch of work simply
-    // `use`s the nodes that produced it, and out-degree is what ranks it (a
-    // PROXY, per the same ruling — the spec states plainly that a function of
-    // out-degree cannot RECOVER representation, and ticket 05a is where that
-    // is measured against a frozen gate).
-    "     3. CHECK AND REPAIR. After the first complete graph write, call",
-    "        `lane_check`. ERRORS are a repair queue for the graph you already",
-    "        judged, never the work plan; every repair repeats step 2. WARNINGS",
-    // Ticket 15: "and minimality" dropped with 最小连通's own retirement — the
-    // one surviving PRINCIPLE a WARNING is reviewed against is 连通性 alone.
-    "        inform the topology review and never compel a",
-    "        write. A lane's shape is no longer policed: a fork the lane never",
-    "        re-joins is not an error, though an independent line of work is",
-    "        usually clearer under a fresh, independently declared tag.",
+    "     vocabulary. An entry is a bare address (\"S15069/T7\"); a `correct`",
+    "     entry ALSO carries its coverage bit — `{ \"turn\": \"S15069/T7\",",
+    "     \"coverage\": \"full\" }` or `\"partial\"`. A `correct` without it is",
+    "     refused naming the missing bit; a `verify` or `use` carrying one is",
+    "     refused too. The `retractCorrect`/`retractVerify`/`retractUse`",
+    "     mirrors delete the addressed PAIR's row, with the mirror's own class",
+    "     as the precondition — a pair now carrying a different class refuses,",
+    "     naming it. `declare` entries ride the same call, after the edges it",
+    "     writes, and are the only way a stored side moves.",
+    "   - after your first complete pass, call `lane_check`. ERRORS are a",
+    "     repair queue for the graph you already judged, never the work plan;",
+    "     every repair is a `declare` entry or a retraction. WARNINGS inform",
+    "     the topology review and never compel a write. A lane's shape is no",
+    "     longer policed: a fork the lane never re-joins is not an error,",
+    "     though an independent line of work is usually clearer under a",
+    "     fresh, independently declared tag.",
     // Severed-lane-teaching ticket 01 (user ruling 2026-08-27) UPGRADED this
     // to a mandatory refusal via severed-lane ticket 02; SETTLEMENT-GATE-
     // TAXONOMY TICKET 04 (user ruling [S15069/T2274]) takes the compulsion
@@ -1096,38 +977,38 @@ export function renderNoteSettlementPrompt(
     // demand — dispose of fractures in a lane none of whose members it could
     // write — and a run taught the old contract keeps paying for it whatever
     // the gate does, which is why the teaching moves with the code.
-    "        A lane this window wrote a member or edge into is named again at",
-    "        the end of `lane_check` and on your commit receipt when it is",
-    "        SEVERED, with the pieces' representative turns as a stitch",
-    "        target. IT BLOCKS NOTHING and there is no disposition to file.",
-    "        Write a stitching edge ONLY where the turns you are already",
-    "        reading make a genuine use-relation true; adjacency is not use,",
-    "        and a chronology bridge invented to clear the line is worse than",
-    "        the line. A GENUINE STITCH SELF-EVIDENCES — once written, the",
-    "        next `lane_check` no longer reports that fracture. If no stitch",
-    "        is genuine, leave the fracture standing and commit: do not",
-    "        re-read the lane to satisfy the warning, and do not delay the",
-    "        commit over it.",
+    "     A lane this window wrote a member or edge into is named again at",
+    "     the end of `lane_check` and on your commit receipt when it is",
+    "     SEVERED, with the pieces' representative turns as a stitch",
+    "     target. IT BLOCKS NOTHING and there is no disposition to file.",
+    "     Write a stitching edge ONLY where the turns you are already",
+    "     reading make a genuine use-relation true; adjacency is not use,",
+    "     and a chronology bridge invented to clear the line is worse than",
+    "     the line. A GENUINE STITCH SELF-EVIDENCES — once written, the",
+    "     next `lane_check` no longer reports that fracture. If no stitch",
+    "     is genuine, leave the fracture standing and commit: do not",
+    "     re-read the lane to satisfy the warning, and do not delay the",
+    "     commit over it.",
     // Phase-connectivity ticket 01 ([S15069/T1945][S15069/T1947]
     // [S15069/T1951]): settlement's SECOND connectivity law, independent of
     // the lane rule above. REPORT-ONLY today — findings appear in
     // `lane_check`/`commit` output but nothing refuses on them yet; the
     // teaching is here so the graph is already correct the day the gate
     // arms.
-    "        A landing turn (implement/fix/refactor) should be traceable, by",
-    "        a directed walk along its own out-edges (any relation class,",
-    "        an unbounded hop count, crossing lanes and tasks freely), to a basis",
-    "        node (design/correction/measure/research/review) — its execution",
-    "        basis. EDGE FIRST: prefer writing the edge that already exists in",
-    "        the work over retyping the turn. Only retype a landing turn to",
-    "        ADD a basis word when its OWN content genuinely set or revised a",
-    "        commitment or carries the finding — the ACCURATE word (a",
-    "        measurement adds \"measure\", an investigation \"research\", a",
-    "        review finding \"review\"), never a default \"design\"/",
-    "        \"correction\" for convenience. A compound retype requires",
-    "        `typeReason` on the `note` call — the accurate basis and why —",
-    "        and is recorded; a landing turn with genuinely no external",
-    "        upstream is itself the compound, at zero hops.",
+    "     A landing turn (implement/fix/refactor) should be traceable, by",
+    "     a directed walk along its own out-edges (any relation class,",
+    "     an unbounded hop count, crossing lanes and tasks freely), to a basis",
+    "     node (design/correction/measure/research/review) — its execution",
+    "     basis. EDGE FIRST: prefer writing the edge that already exists in",
+    "     the work over retyping the turn. Only retype a landing turn to",
+    "     ADD a basis word when its OWN content genuinely set or revised a",
+    "     commitment or carries the finding — the ACCURATE word (a",
+    "     measurement adds \"measure\", an investigation \"research\", a",
+    "     review finding \"review\"), never a default \"design\"/",
+    "     \"correction\" for convenience. A compound retype requires",
+    "     `typeReason` on the `note` call — the accurate basis and why —",
+    "     and is recorded; a landing turn with genuinely no external",
+    "     upstream is itself the compound, at zero hops.",
     // ------------------------------------------------------------------
     // SETTLEMENT ACTIONS (lane-model-v12 ticket 12), from the user-authored
     // `.scratch/lane-model-v12/rubric-v12-settlement.md` — the half of the
@@ -1146,11 +1027,9 @@ export function renderNoteSettlementPrompt(
     // already reaches — and that framing is exactly backwards: measurement
     // showed under-declaration, not spam, is the actual failure (95% of turns
     // emit exactly one ext/nar edge, 60% adjacent; 2026-08-30). The rule that
-    // replaces it is stated once, at the write site it governs — JUDGE AND
-    // WRITE, duty 1's step 2 below — rather than as a second post-hoc review
-    // principle: one edge per distinct claim this turn modifies, and a path
-    // already readable through existing edges is not re-drawn (which is what
-    // 最小连通 was actually reaching for, minus the "fewest edges" framing).
+    // replaces it is the rubric's own **边** entry (one edge per distinct
+    // claim; a path already readable through existing edges is not re-drawn),
+    // which the concepts block above already carries.
     // ------------------------------------------------------------------
     "        原则(判断性,不强制):",
     // The coupling principle's second sentence, re-expressed by ticket 01
@@ -1169,45 +1048,6 @@ export function renderNoteSettlementPrompt(
     "        读内容判断;其余的 use 只是使用其产出,是两条独立泳道之间应有的",
     "        往来。「较少」没有分母也没有阈值,把三个数摆出来由人判断,不要",
     "        发明一个门限。",
-    // ------------------------------------------------------------- end B --
-    // STAGE 2'S OWN THREE EDGE DUTIES (staged-settlement spec Rev 5,
-    // §Solution stage 2). Seated here, inside the edges bullet and after the
-    // five-step pass, because each is a rule about the SAME writes step 3
-    // makes — not a fourth workstation and not a separate procedure. They are
-    // rendered only when a transition actually froze a worklist: a
-    // pre-staging dispatch has no debts, no snapshot and no homeless record,
-    // so instructing it about them would teach three duties it cannot have.
-    "     DRAFT RECONCILIATION, per pair and not per row. A pair may already",
-    "     carry rows written before you with both sides unsettled. Judge the",
-    "     PAIR once — every row it holds, in one decision — and then RETRACT",
-    "     THE DRAFT AND WRITE THE PLACED ROW. A row's identity is (pair,",
-    "     relation, tailTag, headTag), so writing the two-sided form of a",
-    "     relation the pair already carries unsettled leaves BOTH rows",
-    "     standing: your settled one, and the draft, which is then E6 forever",
-    "     and refuses your own commit. Retract first (`retract<Relation>` with",
-    "     the BARE address — that is the unsettled row's own address), then",
-    "     write. Add a further relation only where the claim test genuinely",
-    "     finds a second one; retract outright a row the fresh judgment does",
-    "     not support. A pair that ends this pass holding the same relation",
-    "     twice, once placed and once as a draft, is the failure this duty",
-    "     exists to prevent.",
-    "     DEBT DISCHARGE, over the removed-side list above and nothing wider.",
-    "     Each entry is an edge whose head side names a lane the projection took",
-    "     off the CITED turn, so the side attribution now points at a lane its",
-    "     own endpoint has left. Your authority over that citing turn is",
-    "     RELATIONS ONLY — its note fields belong to whichever window owns them",
-    "     — so the two legal moves are exactly: retract the row, or retract it",
-    "     and re-add it carrying a lane BOTH endpoints now hold. Every listed",
-    "     debt is discharged before you commit.",
-    "     HOMELESS RETRACTION, with cause. A turn in the homeless list above has",
-    "     no legal task container, so no lane can ever place a side of its",
-    "     edges: a draft touching one is not settleable and stays E6 forever.",
-    "     Retract those rows. The retraction records itself — the deleted row's",
-    "     full identity and the group that caused it are written with the",
-    "     deletion, and when it was the pair's last relation the bare citation",
-    "     comes back and the record says so. Never open a task or mint a lane to",
-    "     give such a turn a home; that is the main agent's act, with the user",
-    "     in front of it.",
     "   - a call is ALL OR NOTHING, with one exception: `type` and `tags`",
     "     yield independently, each reported back unwritten if another writer",
     "     touched it, while the rest of the call still lands. A refused prose",

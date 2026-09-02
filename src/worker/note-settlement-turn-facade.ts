@@ -1412,12 +1412,16 @@ export function evaluateSettlementTurnWrite(
       return {
         ok: false,
         message:
+          // MAIN-AGENT-EDGES TICKET 06: the two repairs named are the two the
+          // tools actually offer — a stored side moves through `declare` (D4),
+          // never through a re-attach, and the cause names both closures.
           `${ref} is writable to this dispatch for its RELATIONS ONLY — it is here because this ` +
-          "job's own lane removal invalidated an edge it cites, and discharging that debt is the " +
-          `whole of the authority that grants. ${refusedFields.join(", ")} ${
+          "job's own stage-1 tag writes left an edge it cites owing a lane side (a removed lane, " +
+          "or an endpoint now in several lanes), and discharging that debt is the whole of the " +
+          `authority that grants. ${refusedFields.join(", ")} ${
             refusedFields.length === 1 ? "belongs" : "belong"
           } to whichever window owns this turn's fields, not to this one. Retract the edge, or ` +
-          "re-place its sides with a {turn, tailTag, headTag} entry.",
+          "declare its side with a `declare` entry.",
       };
     }
   }

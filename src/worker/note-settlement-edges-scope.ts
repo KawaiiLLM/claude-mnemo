@@ -1,5 +1,9 @@
 import type { Database } from "bun:sqlite";
 
+import {
+  emptySettlementReadDeltas,
+  type SettlementReadDeltas,
+} from "../db/note-settlement-snapshots";
 import type { SettlementProvenanceIndex } from "../db/write-gate";
 import type { SettlementScopeProvenance } from "./note-settlement-context";
 import {
@@ -34,6 +38,8 @@ export interface SettlementEdgesScope {
   worklist: SettlementFrozenScope["worklist"];
   debts: SettlementFrozenScope["debts"];
   laneMembers: SettlementFrozenScope["laneMembers"];
+  /** Ticket 06: the two stage-2 read lists; empty until a transition froze them. */
+  readDeltas: SettlementReadDeltas;
 }
 
 /**
@@ -83,6 +89,7 @@ export function installSettlementEdgesScope(
     worklist: frozen?.worklist ?? [],
     debts: frozen?.debts ?? [],
     laneMembers: frozen?.laneMembers ?? new Map(),
+    readDeltas: frozen?.readDeltas ?? emptySettlementReadDeltas(),
   };
   if (holder) {
     holder.current = scope;

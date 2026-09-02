@@ -284,7 +284,9 @@ describe("no teaching surface still names a retired relation vocabulary or the p
     );
     expect(MNEMO_TOOL_DESCRIPTIONS.note).not.toContain("are settlement's whole business");
     expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("correct/verify/use:");
-    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("ALL THREE classes accept either");
+    // main-agent-edges ticket 06: ONE entry form — a bare address — for all
+    // three; the two-sided draft form left with the resolution model.
+    expect(SETTLEMENT_NOTE_TOOL_DESCRIPTION).toContain("ALL THREE classes accept it");
     expect(MEMORY_RUBRIC_CONCEPTS_TEXT).toContain("**三个关系类**");
   });
 
