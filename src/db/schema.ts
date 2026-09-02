@@ -1795,14 +1795,72 @@ const MEMORY_EDGE_SIDE_TAGS_DDL = `
 // action, not only for a direct DELETE — verified against this project's own
 // engine, not assumed — so deleting a session cascades to its turns (existing
 // FK) and each cascaded turn still fires memory_edges_prune_deleted_turn.
-const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+//
+// SETTLEMENT-READ-ONCE TICKET 00 (spec D0): THE PRUNE ALSO STAMPS.
+// `checkRelationsGate` promises that an edge write is refused when the citing
+// turn's outgoing rows changed under the writer by ANY path. Deleting a CITED
+// turn is the path no TypeScript guard can cover: this trigger removes every
+// surviving citer's `Y→X` row, and it fires for a direct SQL DELETE and for an
+// ON DELETE CASCADE alike — which is exactly why the stamp has to live where
+// the prune lives rather than in the deletion APIs above it. With it here,
+// "every mutator of a turn's outgoing rows stamps" is literally true, with no
+// bypass left.
+//
+// Three properties of the body below, in order:
+//
+//  1. THE STAMPS RUN BEFORE THE DELETE. A trigger body executes in order, so
+//     the citer set is read while the rows it is derived from still exist.
+//  2. ONE SEQUENCE FOR THE WHOLE EVENT. `write_gate_sequence` is bumped once
+//     (self-seeding, exactly as `nextWriteGateSequence` does it) and every
+//     citer's stamp carries that number: one deletion is one revision, not N.
+//     A bare bump with no stamp behind it decides nothing — staleness is
+//     measured against STAMPS, never against the counter — so bumping on a
+//     turn with no citers is harmless and keeps the body branch-free.
+//  3. SURVIVORS ONLY. `citing_id <> OLD.id` drops the deleted turn's own
+//     outgoing rows, and the `EXISTS` over `turns` drops a citer that is
+//     itself being cascaded away in the same statement sequence: a stamp on a
+//     row nobody can read again is cruft, and "surviving citer" is the rule
+//     the spec states.
+//
+// The writer id is `trigger:prune`, reserved in db/write-gate.ts
+// (`PRUNE_TRIGGER_WRITER`) so the rejection message names the path and the
+// tests can pin it. `strftime` is the only clock a trigger has; the column it
+// feeds is epoch SECONDS, which is what every TypeScript caller writes too.
+const MEMORY_EDGES_PRUNE_DELETED_TURN_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
     BEGIN
+      INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+        ON CONFLICT(id) DO UPDATE SET value = value + 1;
+
+      INSERT INTO write_gate_stamps
+        (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+      SELECT DISTINCT
+             'turn',
+             e.citing_id,
+             'relations',
+             'trigger:prune',
+             (SELECT value FROM write_gate_sequence WHERE id = 1),
+             CAST(strftime('%s', 'now') AS INTEGER)
+        FROM memory_edges e
+       WHERE e.cited_kind = 'turn'
+         AND e.cited_id = OLD.id
+         AND e.citing_kind = 'turn'
+         AND e.citing_id <> OLD.id
+         AND EXISTS (SELECT 1 FROM turns t WHERE t.id = e.citing_id)
+      ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+        writer = excluded.writer,
+        write_sequence = excluded.write_sequence,
+        written_at_epoch = excluded.written_at_epoch;
+
       DELETE FROM memory_edges
       WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
          OR (cited_kind = 'turn' AND cited_id = OLD.id);
     END;
+`;
+
+const MEMORY_EDGE_ENDPOINT_TRIGGERS_DDL = `
+  ${MEMORY_EDGES_PRUNE_DELETED_TURN_DDL}
 
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_segment
     AFTER DELETE ON segments
@@ -4719,6 +4777,45 @@ export function initializeSchema(db: Database): void {
   // Strictly after `ensureSegmentImpressionColumns`: this sweep READS
   // `segments.impression_origin`, the column that call is what guarantees.
   retireUntenantedSegmentContentFromSearch(db);
+  // Settlement-read-once ticket 00 (spec D0). Strictly after every `turns`
+  // rebuild above: each of those drops and recreates this trigger from the
+  // shared constant, so a database still owing one would have it replaced by
+  // that recreation anyway — running here means the FINAL state is the
+  // stamping body no matter which of the two paths got there. Idempotent.
+  ensureMemoryEdgesPruneStampsRelations(db);
+}
+
+/**
+ * Settlement-read-once ticket 00 (spec D0): give an EXISTING database the
+ * stamping half of `memory_edges_prune_deleted_turn`.
+ *
+ * `CREATE TRIGGER IF NOT EXISTS` is the reason this migration has to exist at
+ * all: every database opened before this ticket already carries a trigger of
+ * that name, so the declaration in `SCHEMA_SQL` sees it, does nothing, and the
+ * delete-only body survives — the exact shape of silent non-migration this
+ * codebase keeps paying for. The stored SQL text in `sqlite_master` is what
+ * says which body is installed, so that is what this reads.
+ *
+ * A DROP + CREATE rather than a rebuild: a trigger holds no data, so replacing
+ * one costs nothing and can lose nothing. It runs inside a transaction so a
+ * failure between the two statements cannot leave the database with the prune
+ * missing entirely — a state in which deleting a turn would strand every edge
+ * pointing at it.
+ */
+function ensureMemoryEdgesPruneStampsRelations(db: Database): void {
+  const existing = db
+    .query<{ sql: string | null }, []>(
+      `SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'memory_edges_prune_deleted_turn'`,
+    )
+    .get();
+  if (existing?.sql?.includes("write_gate_stamps")) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    db.exec("DROP TRIGGER IF EXISTS memory_edges_prune_deleted_turn");
+    db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
+  });
 }
 
 /**
@@ -6869,15 +6966,11 @@ ${carriedColumnDdl}
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
           ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
       `);
-      db.exec(`
-        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
-          AFTER DELETE ON turns
-          BEGIN
-            DELETE FROM memory_edges
-            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
-               OR (cited_kind = 'turn' AND cited_id = OLD.id);
-          END;
-      `);
+      // The trigger comes back from the SHARED constant, never a second copy
+      // of its body: settlement-read-once ticket 00 gave it a stamping half,
+      // and a rebuild that recreated the pre-ticket text would silently
+      // un-ship that half for any database this migration touches.
+      db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
       // Dropped with the old table like every other trigger on `turns`, and
       // recreated here for the same reason (ticket 15): `retireTopicRegistry`'s
       // fold runs after this rebuild and rewrites `tags` in bulk.
@@ -7075,15 +7168,11 @@ ${carriedColumnDdl}
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
           ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
       `);
-      db.exec(`
-        CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
-          AFTER DELETE ON turns
-          BEGIN
-            DELETE FROM memory_edges
-            WHERE (citing_kind = 'turn' AND citing_id = OLD.id)
-               OR (cited_kind = 'turn' AND cited_id = OLD.id);
-          END;
-      `);
+      // The trigger comes back from the SHARED constant, never a second copy
+      // of its body: settlement-read-once ticket 00 gave it a stamping half,
+      // and a rebuild that recreated the pre-ticket text would silently
+      // un-ship that half for any database this migration touches.
+      db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
       db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
 
       // Inside the transaction, for the reason spelled out in full at

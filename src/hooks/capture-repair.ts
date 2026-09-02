@@ -3,6 +3,10 @@ import type { Database } from "bun:sqlite";
 import { reindexTurnFromDb } from "../db/search";
 import { getMaxPromptNumber } from "../db/turns";
 import {
+  COMPACT_REPAIR_WRITER,
+  stampTurnRelationsRevision,
+} from "../db/write-gate";
+import {
   rewindSessionScanCursor,
   updateSessionScanCursor,
 } from "../db/sessions";
@@ -229,9 +233,22 @@ function convertOccupiedTurnToMarker(
 
   // Outgoing only. Rows citing this turn (`cited_id = ?`) are other turns'
   // provenance, not this row's, and survive.
-  db.query<unknown, [number]>(
-    "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?",
-  ).run(turnId);
+  const pruned = db
+    .query<unknown, [number]>(
+      "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?",
+    )
+    .run(turnId);
+
+  // Settlement-read-once ticket 00 (spec D0): the third TypeScript mutator of
+  // a turn's outgoing rows that stamped nothing. This one empties the set
+  // wholesale, so a run holding a grant read before the repair would write an
+  // edge onto a turn whose every relation it believes still stands. Stamped
+  // only when rows actually went — an occupied-turn conversion of a turn that
+  // cited nothing changes no set and must not send other readers back for a
+  // re-read that would show them what they already have.
+  if (pruned.changes > 0) {
+    stampTurnRelationsRevision(db, turnId, COMPACT_REPAIR_WRITER, nowEpoch);
+  }
 
   // The cleared row must not keep answering recall with its old extraction, so
   // it is re-indexed from what it now holds (a bare `/compact` marker) rather

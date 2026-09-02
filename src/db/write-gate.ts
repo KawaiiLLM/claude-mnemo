@@ -987,6 +987,38 @@ export function checkCompleteReadFreshness(
 export const RELATIONS_GATE_FIELD = "relations";
 
 /**
+ * Settlement-read-once D0: the reserved writer ids the mutators that have no
+ * identity of their own stamp under, one per PATH. Kept here beside
+ * `stampTurnRelationsRevision` rather than at each mutator so the set is
+ * enumerable in one place and a rejection message can be read back to the
+ * path that caused it.
+ *
+ * Why named ids and not `ANONYMOUS_WRITER`: the refusal a stale grant produces
+ * says who moved the rows, and "unknown" tells a writer nothing it can act on.
+ * A lane fold, a lane clear, a compact repair and the prune trigger are four
+ * different things to have happened to a turn's outgoing set, and each of the
+ * four is what its own test pins.
+ *
+ * These are deliberately NOT the acting caller's writer id even when one
+ * exists (a `remember(merge)` call has a session writer): under the gate's
+ * rule 1 a stamp bearing the caller's OWN id would let that caller keep
+ * writing edges on a set its own structural verb just rewrote underneath it.
+ * The conservative direction is the one this file always takes — an extra
+ * re-read costs a round trip, a missed one costs a silent loss.
+ */
+export const LANE_MERGE_WRITER = "lane:merge";
+export const LANE_CLEAR_WRITER = "lane:clear";
+export const COMPACT_REPAIR_WRITER = "compact:repair";
+/**
+ * The one writer id no TypeScript path ever stamps: `memory_edges_prune_deleted_turn`
+ * (db/schema.ts) writes it from inside the trigger body, so a direct SQL
+ * DELETE and an ON DELETE CASCADE stamp the surviving citers exactly as an
+ * API-level deletion would. Declared here so the trigger's own reserved
+ * string has a single definition the tests and the message readers share.
+ */
+export const PRUNE_TRIGGER_WRITER = "trigger:prune";
+
+/**
  * Bumps a citing turn's relations revision — called from INSIDE the same write
  * transaction as every attach/retract, on every path (peer round P1-8: "every
  * attach/retract stamps"). `writer` may be `null` for a caller with no identity
@@ -1035,6 +1067,30 @@ export function relationsReadRemedy(address: string): string {
  * revision has by construction read the set (it passed this same check to get
  * there) and knows what its own write did, so a second mutation in the same run
  * is not sent back for a re-read.
+ *
+ * SETTLEMENT-READ-ONCE D0 (USER RULING T2404): DELIVERED, NOT DELIVERED WHOLE.
+ * What this gate asks of the completeness ledger is that a row EXISTS with a
+ * sequence after the turn's last relations stamp; it does not read `complete`.
+ * The four states the renderer distinguishes map onto that one row:
+ *
+ *   - `complete`               — row(true), grants;
+ *   - `cut` (some atoms shown, the budget stopped the rest) — row(false), GRANTS;
+ *   - an empty set the render actually evaluated — row(true), grants;
+ *   - `dropped` (the field never rendered a byte) — NO ROW, refused.
+ *
+ * A cut set is still a set the writer looked at: the premises an edge claim
+ * rests on — is this pair already carried, is this lane already terminated —
+ * are answered by what the reader SAW, and a reader who saw the first
+ * eighteen of twenty atoms saw a set, not nothing. "Dropped" is the case that
+ * still refuses, and it refuses for the original reason: nothing was shown.
+ * Because the distinction is now load-bearing, the recorder that draws it
+ * (`mcp/format.ts`'s `recordTurnFieldCompleteness`, which used to write
+ * `complete=false` for a wholly dropped field) SHIPS WITH this relaxation —
+ * the relaxation alone would turn every dropped field into a grant.
+ *
+ * Staleness is unchanged, and an older post-stamp row is not withdrawn by a
+ * later drop: the run did see the set, and a render that later failed to
+ * reach the field says nothing about the earlier one that did.
  */
 export function checkRelationsGate(
   db: Database,
@@ -1054,7 +1110,7 @@ export function checkRelationsGate(
     turnId,
     RELATIONS_GATE_FIELD,
   );
-  if (!completeness || !completeness.complete) {
+  if (!completeness) {
     return {
       ok: false,
       reason: "incomplete-read",

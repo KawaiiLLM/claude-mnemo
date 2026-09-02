@@ -18,6 +18,11 @@ import {
   TagNamespaceCollisionError,
 } from "./tag-namespace";
 import { liveTurnSql } from "./turn-liveness";
+import {
+  LANE_CLEAR_WRITER,
+  LANE_MERGE_WRITER,
+  stampTurnRelationsRevision,
+} from "./write-gate";
 
 /**
  * Lane registry (lane-declaration spec Rev 2, D1). A lane is a DECLARED
@@ -738,6 +743,21 @@ export function mergeLaneTag(
     "UPDATE memory_edges SET tail_tag = ?, head_tag = ? WHERE id = ?",
   );
 
+  // Settlement-read-once ticket 00 (spec D0): every citing TURN whose outgoing
+  // rows this fold rewrites or deletes, collected as the mutations are decided
+  // and stamped once, at the end, inside this same transaction. Both halves of
+  // the fold change the set a reader was shown — a casualty removes a row
+  // outright, a survivor's side rewrite changes the row's identity key — so
+  // both go in. `citingKind !== "turn"` cannot carry a relation under v12's
+  // turn-scoped CHECK, and a bare row has no side tags to rewrite, so the
+  // filter is the schema's own shape rather than a judgment.
+  const relationsMoved = new Set<number>();
+  const noteCitingTurn = (row: LaneMergeEdgeRow): void => {
+    if (row.citingKind === "turn") {
+      relationsMoved.add(row.citingId);
+    }
+  };
+
   const collisions: LaneMergeCollision[] = [];
   const survivors: LaneMergeRewrite[] = [];
   for (const bucket of groups.values()) {
@@ -775,6 +795,7 @@ export function mergeLaneTag(
       // at a lane through an edge that no longer exists.
       dropSideTagRows.run(dropped.id);
       deleteEdge.run(dropped.id);
+      noteCitingTurn(dropped.entry.row);
     }
   }
 
@@ -784,6 +805,7 @@ export function mergeLaneTag(
       continue;
     }
     edgeSidesRewritten += survivor.sidesRewritten;
+    noteCitingTurn(survivor.row);
     updateEdgeSides.run(survivor.tailTag, survivor.headTag, survivor.row.id);
     dropSideTagRows.run(survivor.row.id);
     if (survivor.tailTag !== "") {
@@ -792,6 +814,19 @@ export function mergeLaneTag(
     if (survivor.headTag !== "") {
       insertSideTagRow.run(survivor.row.id, "head", survivor.headTag);
     }
+  }
+
+  // --- 2a. the relations revision (settlement-read-once ticket 00, D0) -----
+  // `checkRelationsGate` promises that an edge write is refused when the
+  // citing turn's outgoing rows moved under the writer BY ANY PATH. Before
+  // this ticket only `note` and the settlement turn facade kept that promise;
+  // this raw-SQL fold rewrote and deleted rows and stamped nothing, so a run
+  // holding a grant read before the fold could still write on a set the fold
+  // had changed. Stamped under a reserved id rather than the caller's own so
+  // the caller does not out-rank its own structural verb (see
+  // `LANE_MERGE_WRITER`).
+  for (const turnId of relationsMoved) {
+    stampTurnRelationsRevision(db, turnId, LANE_MERGE_WRITER, nowEpoch);
   }
 
   // --- 2b. the impression (lane-impressions ticket 07, ruling T2269) --------
@@ -1097,6 +1132,19 @@ export function clearLane(
       emptiedByCiting.set(citingKey, bucket);
     }
     bucket.targets.push({ kind: row.citedKind as EdgeNodeKind, id: row.citedId });
+  }
+
+  // --- 2a. the relations revision (settlement-read-once ticket 00, D0) -----
+  // Same promise `mergeLaneTag` above now keeps, and the stronger case for
+  // it: this path DELETES a citing turn's relation rows outright, so a run
+  // still holding a pre-clear grant would write an edge on a set it believes
+  // still has a terminus. Stamped BEFORE step 3's bare-row restoration, which
+  // acts on the same citing turns and needs no second stamp — one revision
+  // per event, not per row.
+  for (const bucket of emptiedByCiting.values()) {
+    if (bucket.citing.kind === "turn") {
+      stampTurnRelationsRevision(db, bucket.citing.id, LANE_CLEAR_WRITER, nowEpoch);
+    }
   }
 
   // --- 3. D5b: restore a bare row for a pair the deletion emptied whose ---

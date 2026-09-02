@@ -710,12 +710,40 @@ export function capRenderToTokenBudget(
   budgetTokens: number | undefined,
   signal?: TruncationSignal,
 ): string {
+  return capRenderWithOutcome(rendered, budgetTokens, signal).text;
+}
+
+/**
+ * Settlement-read-once ticket 00 (spec D0): what `capRenderToTokenBudget`
+ * returns, plus HOW FAR DOWN THE BLOCK it got — the number of source lines
+ * that contributed at least one byte to `text` (the last of them possibly
+ * only in part). The exported wrapper above drops the count, so every
+ * existing caller is untouched; `renderNode` keeps it, because "did this
+ * render deliver a byte of `relations`" is the difference between a `cut`
+ * field (which grants an edge write) and a `dropped` one (which does not),
+ * and that question cannot be answered by comparing the two strings.
+ *
+ * Counting lines rather than re-scanning the output for the truncation
+ * marker is deliberate: a body line whose own text happened to equal the
+ * marker would make a string scan lie, and this is a gate input.
+ */
+interface RenderCapOutcome {
+  text: string;
+  keptSourceLines: number;
+}
+
+function capRenderWithOutcome(
+  rendered: string,
+  budgetTokens: number | undefined,
+  signal?: TruncationSignal,
+): RenderCapOutcome {
+  const wholeLineCount = () => rendered.split("\n").length;
   if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
-    return rendered;
+    return { text: rendered, keptSourceLines: wholeLineCount() };
   }
 
   if (estimateTokens(rendered) <= budgetTokens) {
-    return rendered;
+    return { text: rendered, keptSourceLines: wholeLineCount() };
   }
 
   const lines = rendered.split("\n");
@@ -732,7 +760,7 @@ export function capRenderToTokenBudget(
     if (remaining <= 0) {
       markTruncated(signal);
       kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-      return kept.join("\n");
+      return { text: kept.join("\n"), keptSourceLines: index };
     }
 
     if (lineTokens <= remaining) {
@@ -749,18 +777,21 @@ export function capRenderToTokenBudget(
     }
     markTruncated(signal);
     kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-    return kept.join("\n");
+    // A partial line still DELIVERED bytes of its source line, so it counts;
+    // an empty partial (the remaining budget did not reach the first word)
+    // delivered nothing and does not.
+    return { text: kept.join("\n"), keptSourceLines: partial ? index + 1 : index };
   }
 
   if (kept.length === lines.length) {
     // Every line fit once the marker's own cost was accounted for — nothing
     // was actually cut, so no marker is owed.
-    return rendered;
+    return { text: rendered, keptSourceLines: lines.length };
   }
 
   markTruncated(signal);
   kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-  return kept.join("\n");
+  return { text: kept.join("\n"), keptSourceLines: kept.length - 1 };
 }
 
 /**
@@ -1183,11 +1214,39 @@ function renderTurnChildren(
  * ladder's own verdict before recording anything (see
  * `recordTurnFieldCompleteness`).
  */
+/**
+ * Settlement-read-once ticket 00 (spec D0/D2): where a selected `relations`
+ * field ended up in the assembled body, which is what decides whether the
+ * whole-turn ladder DELIVERED it. Four shapes, and only the last two need a
+ * line number:
+ *
+ *   - `absent`  — the field was not selected, so this render says nothing
+ *                 about it (unchanged: no completeness row is pushed);
+ *   - `empty`   — selected, and the set itself is empty. Nothing rendered
+ *                 because there was nothing to render, so delivery is
+ *                 "did the ladder reach the END of the block" — the field
+ *                 sits last, so that is exactly `capped === body`;
+ *   - `elided`  — selected, the set is NOT empty, and zero atom lines
+ *                 survived the field's OWN budget. Never delivered: the
+ *                 reader saw no atom;
+ *   - `atoms`   — selected, at least one atom line was assembled, starting
+ *                 one line after `labelLine` (the `- relations:` header).
+ */
+type TurnRelationsPlacement =
+  | { kind: "absent" }
+  | { kind: "empty" }
+  | { kind: "elided" }
+  | { kind: "atoms"; labelLine: number };
+
 function formatTurnBody(
   turn: FormattedTurn,
   fields: TurnRenderFields,
   options: RenderNodeOptions,
-): { text: string; ownComplete: Map<RecallTurnField, boolean> } {
+): {
+  text: string;
+  ownComplete: Map<RecallTurnField, boolean>;
+  relations: TurnRelationsPlacement;
+} {
   const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
@@ -1277,18 +1336,27 @@ function formatTurnBody(
   // `insight`/`files_*` above it, but its own lines already open with a
   // glyph (`→`/`←`) that IS the ruled format — `pushBullets`' own `- ` prefix
   // would double up on it, so this pushes the pre-formatted lines directly.
+  let relations: TurnRelationsPlacement = fields.has("relations")
+    ? { kind: "empty" }
+    : { kind: "absent" };
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
     const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
     ownComplete.set("relations", cut.complete);
     if (cut.lines.length > 0) {
+      relations = { kind: "atoms", labelLine: lines.length };
       lines.push(`${fieldIndent}- relations:`);
       for (const line of cut.lines) {
         lines.push(`${bulletIndent}${line}`);
       }
+    } else {
+      // A non-empty set whose own budget left room for not one atom. The
+      // reader saw nothing of it, so this is a DROP however small the cut
+      // that caused it (spec D0: "dropped" is "not seen").
+      relations = { kind: "elided" };
     }
   }
 
-  return { text: lines.join("\n"), ownComplete };
+  return { text: lines.join("\n"), ownComplete, relations };
 }
 
 /**
@@ -1340,11 +1408,28 @@ function recordTurnFieldCompleteness(
   bodyComplete: boolean,
   signal: TruncationSignal | undefined,
   ownComplete: ReadonlyMap<RecallTurnField, boolean>,
+  relationsDelivered: boolean,
 ): void {
   const fieldComplete = (field: RecallTurnField): boolean =>
     (ownComplete.get(field) ?? true) && bodyComplete;
 
   for (const field of GATED_TURN_FIELDS) {
+    // Settlement-read-once ticket 00 (spec D0): `relations` is the one gated
+    // field whose ledger row means DELIVERY rather than completeness, because
+    // `checkRelationsGate` no longer reads `complete` — the row's existence IS
+    // the grant. A field the ladder never reached must therefore write NO ROW
+    // at all; writing `complete=false`, which is what this loop did before the
+    // relaxation, would hand a grant to a render that showed nothing. The row
+    // still carries the ordinary `complete` value when one is written, for the
+    // D2 footer and for any future reader that wants the distinction.
+    //
+    // Nothing is CLEARED here either: an older row recorded after the turn's
+    // last stamp stands, because that earlier render did deliver the set and a
+    // later drop does not un-see it (`recordFieldCompleteness`' "later wins"
+    // only overwrites what this pass actually pushes).
+    if (field === "relations" && !relationsDelivered) {
+      continue;
+    }
     // Ticket 10: `type`/`tags` have no `RecallTurnField` slot of their own —
     // they ride inside `metadata`'s single line (`composeTurnMetadata`
     // above), so their completeness is gated on metadata's OWN selection
@@ -1369,6 +1454,34 @@ function recordTurnFieldCompleteness(
   }
 }
 
+/**
+ * Settlement-read-once ticket 00 (spec D0): did the whole-turn ladder put a
+ * byte of the turn's `relations` ATOMS in front of the reader?
+ *
+ * The `- relations:` header on its own is not delivery — a reader who got
+ * "- relat…" and the truncation marker saw a label, not a set — so the test is
+ * that a line PAST the header survived. The last surviving line may itself be
+ * a partial atom; that still counts, and it is the `cut` state D0 rules grants
+ * on: some atoms rendered, the budget stopped the rest.
+ */
+function relationsWereDelivered(
+  relations: TurnRelationsPlacement,
+  capped: RenderCapOutcome,
+  body: string,
+): boolean {
+  switch (relations.kind) {
+    case "absent":
+    case "elided":
+      return false;
+    case "empty":
+      // The field renders LAST, so an empty set was reached exactly when the
+      // ladder reached the end of the block.
+      return capped.text === body;
+    case "atoms":
+      return capped.keptSourceLines > relations.labelLine + 1;
+  }
+}
+
 export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): string {
   const budget = options.turnBudget ?? DEFAULT_TURN_TOKEN_BUDGET;
 
@@ -1381,16 +1494,21 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): s
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const { text: body, ownComplete } = formatTurnBody(node.value, fields, options);
-      const capped = capRenderToTokenBudget(body, budget, options.signal);
+      const { text: body, ownComplete, relations } = formatTurnBody(
+        node.value,
+        fields,
+        options,
+      );
+      const capped = capRenderWithOutcome(body, budget, options.signal);
       recordTurnFieldCompleteness(
         node.value.id,
         fields,
-        capped === body,
+        capped.text === body,
         options.signal,
         ownComplete,
+        relationsWereDelivered(relations, capped, body),
       );
-      return capped;
+      return capped.text;
     }
     case "observation":
       return capRenderToTokenBudget(

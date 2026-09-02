@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import {
+  getIncomingEdges,
   getOutgoingEdges,
   pairKey,
   reconcileCitedPairs,
@@ -205,6 +206,21 @@ export const RETRACTION_FIELD_ENTRIES: ReadonlyArray<
     [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass] as const,
 );
 
+/**
+ * The degree caps (settlement-read-once spec D0, USER RULING T2404): at most
+ * this many RELATION-CARRYING atoms out of any one citing turn, and this many
+ * into any one cited turn. With both, a node's direct edge set is at most 40
+ * atoms — which is what lets the `relations` field be SIZED (spec D1) instead
+ * of hoping. Production carries no violator (read-only, 2026-09-02: max
+ * outgoing 18, max incoming 7), so this bounds new work rather than
+ * invalidating stored rows.
+ *
+ * The COUNT is what is bounded, not the rendered width: lane tags are
+ * canonical but unbounded in length, so a wide legal atom can still make the
+ * field `cut` — which D2 reports and which, by D0, still grants.
+ */
+export const MAX_TURN_RELATION_DEGREE = 20;
+
 const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
   malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
   unresolved: "does not resolve to a turn or segment",
@@ -233,6 +249,12 @@ const RELATION_REJECTION_TEXT: Record<TurnRelationRejectionReason, string> = {
     'is a `correct` edge with no coverage bit — add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
   "coverage-not-allowed":
     "carries a coverage bit, and only `correct` has one — `verify` and `use` make no claim about how much of the cited result survives",
+  // Settlement-read-once ticket 00 (USER RULING T2404). The message names the
+  // node the cap is being counted on, because a call refused for a CITED
+  // turn's incoming degree is a different repair from one refused for the
+  // citing turn's own outgoing degree, and neither is fixed by re-sending.
+  "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap — retract one before adding another; nothing in this call was written`,
+  "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap — nothing in this call was written`,
 };
 
 /**
@@ -594,7 +616,11 @@ export type TurnRelationRejectionReason =
   /** relation-vocabulary-v13 ticket 02: a `correct` entry with no FULL/PARTIAL bit. */
   | "coverage-required"
   /** relation-vocabulary-v13 ticket 02: a `verify`/`use` entry carrying a bit only `correct` has. */
-  | "coverage-not-allowed";
+  | "coverage-not-allowed"
+  /** Settlement-read-once ticket 00: the CITING turn would end this call over the outgoing cap. */
+  | "outgoing-degree-cap"
+  /** Settlement-read-once ticket 00: a CITED turn would end this call over the incoming cap. */
+  | "incoming-degree-cap";
 
 export interface TurnRelationRejection {
   /** The CLASS the caller asked for (`correct`/`verify`/`use`), which is what its own message names back at it. */
@@ -770,6 +796,109 @@ function storedRelationRowKeys(db: Database, citing: CitingNode): Set<string> {
   );
 }
 
+/** Bare existence rows carry no relation word and are not atoms — D0 counts atoms. */
+function countRelationAtoms(edges: readonly MemoryEdge[]): number {
+  return edges.filter((edge) => edge.relation !== null).length;
+}
+
+/** `db/lanes.ts`'s `resolveTurnAddress`, re-stated rather than imported: that module already imports THIS one. */
+function turnAddress(db: Database, turnId: number): string {
+  const row = db
+    .query<{ sessionId: number; promptNumber: number }, [number]>(
+      `SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?`,
+    )
+    .get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn ${turnId}`;
+}
+
+/**
+ * The ONE place the caps are enforced (spec D0: "enforced ONCE in the shared
+ * `attachTurnRelations`"). Both write faces — `note` and the settlement turn
+ * facade — reach the graph through that function, so one check here is one
+ * check everywhere; a second copy at either tool surface would be the drift
+ * this ticket exists to prevent.
+ *
+ * It counts PROSPECTIVE post-call degrees, which is why it runs where it does:
+ *
+ *   - AFTER the caller's own address/legality dedupe, so the same claim sent
+ *     twice in one call is one atom;
+ *   - AFTER this call's retractions, which is free — both faces retract before
+ *     they attach, so the rows this reads are already the post-retraction set,
+ *     and "retract one, attach one" at the cap succeeds;
+ *   - EXCLUDING restatements (`alreadyStored`), because re-asserting a stored
+ *     atom adds nothing to any degree.
+ *
+ * The whole call is refused with zero writes — this returns before
+ * `writeMemoryEdges` is reached — and every offending endpoint is named at
+ * once, so one repair call fixes the batch rather than discovering the cap one
+ * turn at a time.
+ */
+function checkRelationDegreeCaps(
+  db: Database,
+  citing: CitingNode,
+  inputs: readonly WriteEdgeInput[],
+  alreadyStored: ReadonlySet<string>,
+): TurnRelationRejection[] {
+  const additions = inputs.filter(
+    (input) =>
+      !alreadyStored.has(
+        relationRowKey(citing, input.cited, input.relation, {
+          // The same defaulting `writeMemoryEdges` applies on the way in, so
+          // an input with no side named keys identically to the row it would
+          // become — otherwise a restatement would read as an addition and
+          // the cap would refuse a call that adds nothing.
+          tailTag: input.tailTag ?? UNSETTLED_SIDE_TAG,
+          headTag: input.headTag ?? UNSETTLED_SIDE_TAG,
+        }),
+      ),
+  );
+  if (additions.length === 0) {
+    return [];
+  }
+
+  const rejections: TurnRelationRejection[] = [];
+  const classOf = (input: WriteEdgeInput): RelationClass =>
+    (input.relationClass || "use") as RelationClass;
+
+  if (citing.kind === "turn") {
+    const stored = countRelationAtoms(getOutgoingEdges(db, citing));
+    if (stored + additions.length > MAX_TURN_RELATION_DEGREE) {
+      rejections.push({
+        relation: classOf(additions[0]!),
+        raw: turnAddress(db, citing.id),
+        reason: "outgoing-degree-cap",
+      });
+    }
+  }
+
+  const addedPerCited = new Map<number, WriteEdgeInput[]>();
+  for (const input of additions) {
+    if (input.cited.kind !== "turn") {
+      continue;
+    }
+    const bucket = addedPerCited.get(input.cited.id);
+    if (bucket) {
+      bucket.push(input);
+    } else {
+      addedPerCited.set(input.cited.id, [input]);
+    }
+  }
+  for (const [citedId, added] of addedPerCited) {
+    const stored = countRelationAtoms(
+      getIncomingEdges(db, { kind: "turn", id: citedId }),
+    );
+    if (stored + added.length > MAX_TURN_RELATION_DEGREE) {
+      rejections.push({
+        relation: classOf(added[0]!),
+        raw: turnAddress(db, citedId),
+        reason: "incoming-degree-cap",
+      });
+    }
+  }
+
+  return rejections;
+}
+
 /**
  * Edge-mechanism-revision D1 (ticket 02): a relation is declared on its own,
  * with NO reference to what the citing turn's prose says. The spec's own
@@ -885,6 +1014,15 @@ export function attachTurnRelations(
   }
 
   const alreadyStored = storedRelationRowKeys(db, citing);
+
+  // Settlement-read-once ticket 00 (spec D0): the degree caps, checked HERE —
+  // after the dedupe above and before the first row is written, so a refusal
+  // costs nothing and lands nothing.
+  const overCap = checkRelationDegreeCaps(db, citing, inputs, alreadyStored);
+  if (overCap.length > 0) {
+    return { written: [], restated: [], rejected: overCap };
+  }
+
   // [S15069/T1728]: `rejected`, not just `written`. This destructure used to
   // take the written rows alone and return `rejected: []` unconditionally,
   // which was harmless only because every rejection the storage layer can
