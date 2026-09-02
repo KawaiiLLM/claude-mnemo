@@ -4,7 +4,7 @@
 
 **Blocked by:** None.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2435 at a2ea1c61 (merged abdbb7ba)**: tsc 0, 4803/0/266 (−14 = the deleted C1/C3/C4 tests, +sentinel block, net as reported), guards clean; my own grep over src/, plugin/skills/, docs/ finds no control identifier or "C1"/"C3"/"C4" literal outside the sentinel test; C2 remains (6 references). Deletion ticket: verification is grep + green + the surviving control, no mutation probe of my own beyond the agent's three sentinel probes.
 
 - [x] Grep proves no reference remains in `src/`, `plugin/skills/`, docs; the CLI's remaining controls (if any) still run.
 
