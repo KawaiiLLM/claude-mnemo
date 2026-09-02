@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkdpf23" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkdxr61" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1196,6 +1196,169 @@ function loadDeclaredLaneTags(db, segmentId) {
   );
 }
 
+// src/db/edge-side-resolution.ts
+var UNDECLARED_SIDE_TAG = "";
+var NO_FACTS = Object.freeze({ segmentId: null, lanes: [] });
+function edgeSideEndpointId(edge, side) {
+  return side === "tail" ? edge.citingId : edge.citedId;
+}
+function edgeSideStoredTag(edge, side) {
+  return side === "tail" ? edge.tailTag : edge.headTag;
+}
+function resolveEdgeSide(edge, side, endpointLaneFacts) {
+  const endpointId = edgeSideEndpointId(edge, side);
+  const facts = endpointLaneFacts.get(endpointId) ?? NO_FACTS;
+  const storedTag = edgeSideStoredTag(edge, side);
+  const cardinality = facts.lanes.length;
+  const base = { storedTag, endpointId, laneCardinality: cardinality };
+  if (storedTag !== UNDECLARED_SIDE_TAG) {
+    if (facts.segmentId !== null && facts.lanes.includes(storedTag)) {
+      return { ...base, outcome: "declared", lane: { segmentId: facts.segmentId, tag: storedTag } };
+    }
+    return { ...base, outcome: "invalid", lane: null };
+  }
+  if (cardinality === 1 && facts.segmentId !== null) {
+    return { ...base, outcome: "derived", lane: { segmentId: facts.segmentId, tag: facts.lanes[0] } };
+  }
+  if (cardinality >= 2) {
+    return { ...base, outcome: "ambiguous", lane: null };
+  }
+  return { ...base, outcome: "none", lane: null };
+}
+function resolveEdgeSides(edge, endpointLaneFacts) {
+  return {
+    tail: resolveEdgeSide(edge, "tail", endpointLaneFacts),
+    head: resolveEdgeSide(edge, "head", endpointLaneFacts)
+  };
+}
+function loadEndpointLaneFacts(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  const facts = /* @__PURE__ */ new Map();
+  if (ids.length === 0) {
+    return facts;
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const owningSegments = new Map(
+    db.query(
+      `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
+           FROM segment_members
+          WHERE turn_id IN (${placeholders})
+          GROUP BY turn_id`
+    ).all(...ids).map((row) => [row.turnId, row.segmentId])
+  );
+  const hasLanesTable = db.query(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`
+  ).all().length > 0;
+  const declaredBySegment = /* @__PURE__ */ new Map();
+  const declaredFor = (segmentId) => {
+    let declared = declaredBySegment.get(segmentId);
+    if (declared === void 0) {
+      declared = hasLanesTable ? new Set(
+        db.query(
+          `SELECT tag FROM lanes WHERE segment_id = ?`
+        ).all(segmentId).map((row) => row.tag)
+      ) : /* @__PURE__ */ new Set();
+      declaredBySegment.set(segmentId, declared);
+    }
+    return declared;
+  };
+  for (const row of db.query(
+    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids)) {
+    const segmentId = owningSegments.get(row.id);
+    if (segmentId === void 0) {
+      facts.set(row.id, { segmentId: null, lanes: [] });
+      continue;
+    }
+    const declared = declaredFor(segmentId);
+    facts.set(row.id, {
+      segmentId,
+      lanes: parseStoredTags(row.tags).filter((tag) => declared.has(tag))
+    });
+  }
+  for (const id of ids) {
+    if (!facts.has(id)) {
+      facts.set(id, { segmentId: null, lanes: [] });
+    }
+  }
+  return facts;
+}
+function parseStoredTags(raw) {
+  if (raw === null) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// src/db/note-settlement-pre-resolutions.ts
+var PRE_RESOLUTIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_pre_side_resolutions (
+    job_id INTEGER NOT NULL REFERENCES note_settlement_jobs(id) ON DELETE CASCADE,
+    edge_row_id INTEGER NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
+    citing_id INTEGER NOT NULL,
+    cited_id INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK (
+      outcome IN ('declared', 'derived', 'ambiguous', 'none', 'invalid')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    -- FIRST-WRITE-WINS lives in this key plus the writer's INSERT OR IGNORE:
+    -- the durability requirement (R10-7) is that a repeated stage-1 call cannot
+    -- overwrite the state the run inherited, and a primary key is the only form
+    -- of that rule a crash cannot lose.
+    PRIMARY KEY (job_id, edge_row_id, side)
+  );
+`;
+var PRE_RESOLUTIONS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_pre_side_resolutions_job
+    ON note_settlement_pre_side_resolutions(job_id);
+`;
+var PRE_RESOLUTIONS_READY = /* @__PURE__ */ new WeakSet();
+function ensureNoteSettlementPreResolutionTable(db) {
+  if (PRE_RESOLUTIONS_READY.has(db)) {
+    return;
+  }
+  const table = db.query(
+    `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get();
+  if (!table) {
+    return;
+  }
+  db.exec(PRE_RESOLUTIONS_DDL);
+  db.exec(PRE_RESOLUTIONS_INDEX_DDL);
+  PRE_RESOLUTIONS_READY.add(db);
+}
+function recordPreSideResolutions(db, jobId, rows, preFacts, nowEpoch) {
+  ensureNoteSettlementPreResolutionTable(db);
+  if (rows.length === 0) {
+    return;
+  }
+  const insert = db.query(
+    `INSERT OR IGNORE INTO note_settlement_pre_side_resolutions
+       (job_id, edge_row_id, side, citing_id, cited_id, outcome, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const row of rows) {
+    for (const side of ["tail", "head"]) {
+      insert.run(
+        jobId,
+        row.id,
+        side,
+        row.citingId,
+        row.citedId,
+        resolveEdgeSide(row, side, preFacts).outcome,
+        nowEpoch
+      );
+    }
+  }
+}
+
 // src/db/write-gate.ts
 function sessionWriterId(sessionDbId) {
   return `session:${sessionDbId}`;
@@ -1385,105 +1548,6 @@ var RELATION_REJECTION_TEXT = {
   "stale-class": "is not the class this pair carries any more \u2014 read the edge again before acting on it"
 };
 
-// src/db/edge-side-resolution.ts
-var UNDECLARED_SIDE_TAG = "";
-var NO_FACTS = Object.freeze({ segmentId: null, lanes: [] });
-function edgeSideEndpointId(edge, side) {
-  return side === "tail" ? edge.citingId : edge.citedId;
-}
-function edgeSideStoredTag(edge, side) {
-  return side === "tail" ? edge.tailTag : edge.headTag;
-}
-function resolveEdgeSide(edge, side, endpointLaneFacts) {
-  const endpointId = edgeSideEndpointId(edge, side);
-  const facts = endpointLaneFacts.get(endpointId) ?? NO_FACTS;
-  const storedTag = edgeSideStoredTag(edge, side);
-  const cardinality = facts.lanes.length;
-  const base = { storedTag, endpointId, laneCardinality: cardinality };
-  if (storedTag !== UNDECLARED_SIDE_TAG) {
-    if (facts.segmentId !== null && facts.lanes.includes(storedTag)) {
-      return { ...base, outcome: "declared", lane: { segmentId: facts.segmentId, tag: storedTag } };
-    }
-    return { ...base, outcome: "invalid", lane: null };
-  }
-  if (cardinality === 1 && facts.segmentId !== null) {
-    return { ...base, outcome: "derived", lane: { segmentId: facts.segmentId, tag: facts.lanes[0] } };
-  }
-  if (cardinality >= 2) {
-    return { ...base, outcome: "ambiguous", lane: null };
-  }
-  return { ...base, outcome: "none", lane: null };
-}
-function resolveEdgeSides(edge, endpointLaneFacts) {
-  return {
-    tail: resolveEdgeSide(edge, "tail", endpointLaneFacts),
-    head: resolveEdgeSide(edge, "head", endpointLaneFacts)
-  };
-}
-function loadEndpointLaneFacts(db, turnIds) {
-  const ids = [...new Set(turnIds)];
-  const facts = /* @__PURE__ */ new Map();
-  if (ids.length === 0) {
-    return facts;
-  }
-  const placeholders = ids.map(() => "?").join(",");
-  const owningSegments = new Map(
-    db.query(
-      `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
-           FROM segment_members
-          WHERE turn_id IN (${placeholders})
-          GROUP BY turn_id`
-    ).all(...ids).map((row) => [row.turnId, row.segmentId])
-  );
-  const hasLanesTable = db.query(
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`
-  ).all().length > 0;
-  const declaredBySegment = /* @__PURE__ */ new Map();
-  const declaredFor = (segmentId) => {
-    let declared = declaredBySegment.get(segmentId);
-    if (declared === void 0) {
-      declared = hasLanesTable ? new Set(
-        db.query(
-          `SELECT tag FROM lanes WHERE segment_id = ?`
-        ).all(segmentId).map((row) => row.tag)
-      ) : /* @__PURE__ */ new Set();
-      declaredBySegment.set(segmentId, declared);
-    }
-    return declared;
-  };
-  for (const row of db.query(
-    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
-  ).all(...ids)) {
-    const segmentId = owningSegments.get(row.id);
-    if (segmentId === void 0) {
-      facts.set(row.id, { segmentId: null, lanes: [] });
-      continue;
-    }
-    const declared = declaredFor(segmentId);
-    facts.set(row.id, {
-      segmentId,
-      lanes: parseStoredTags(row.tags).filter((tag) => declared.has(tag))
-    });
-  }
-  for (const id of ids) {
-    if (!facts.has(id)) {
-      facts.set(id, { segmentId: null, lanes: [] });
-    }
-  }
-  return facts;
-}
-function parseStoredTags(raw) {
-  if (raw === null) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 // src/db/impressions.ts
 function mapImpressionRow(row) {
   return row ? {
@@ -1503,28 +1567,135 @@ function readLaneImpression(db, segmentId, tag) {
   );
 }
 
-// src/db/lane-disposition.ts
-function recordLaneTouch(db, record2) {
-  db.query(
-    `INSERT OR IGNORE INTO lane_run_touches
-       (job_id, touch_kind, entity_id, lane_tag, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(record2.jobId, record2.kind, record2.entityId, record2.laneTag, record2.createdAtEpoch);
-}
-function recordLaneReadReceipt(db, receipt) {
-  db.query(
-    `INSERT INTO lane_read_receipts
-       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    receipt.readerId,
-    receipt.segmentId,
-    receipt.laneTag,
-    JSON.stringify(receipt.membershipTurnIds),
-    JSON.stringify(receipt.renderedTurnIds),
-    receipt.sequence,
-    receipt.createdAtEpoch
+// src/db/settlement-job-invalidation.ts
+function invalidateOverlappingSettlementJobs(db, turnIds, options) {
+  if (!hasTable(db, "note_settlement_jobs")) {
+    return [];
+  }
+  const affected = expandToIncidentCiters(db, turnIds);
+  if (affected.length === 0) {
+    return [];
+  }
+  const candidates = /* @__PURE__ */ new Set();
+  const placeholders = affected.map(() => "?").join(",");
+  for (const row of db.query(
+    `SELECT DISTINCT j.id AS id
+         FROM note_settlement_jobs j
+         JOIN turns t ON t.session_id = j.session_id
+        WHERE t.id IN (${placeholders})
+          AND t.prompt_number BETWEEN j.window_start AND j.window_end`
+  ).all(...affected)) {
+    candidates.add(row.id);
+  }
+  for (const [table, column] of [
+    ["note_settlement_writable_turns", "turn_id"],
+    ["note_settlement_lane_members", "turn_id"],
+    ["note_settlement_claim_scope", "turn_id"]
+  ]) {
+    if (!hasTable(db, table)) {
+      continue;
+    }
+    for (const row of db.query(
+      `SELECT DISTINCT job_id AS id FROM ${table} WHERE ${column} IN (${placeholders})`
+    ).all(...affected)) {
+      candidates.add(row.id);
+    }
+  }
+  if (options.excludeJobId !== void 0) {
+    candidates.delete(options.excludeJobId);
+  }
+  if (candidates.size === 0) {
+    return [];
+  }
+  const hasStageColumns = hasColumn(db, "note_settlement_jobs", "stage");
+  const readJob = db.query(
+    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
+            claim_generation AS claimGeneration
+       FROM note_settlement_jobs WHERE id = ?`
   );
+  const resetStatement = db.query(
+    `UPDATE note_settlement_jobs
+        SET status = 'pending',
+            claimed_at_epoch = NULL,
+            claim_generation = claim_generation + 1,
+            ${hasStageColumns ? "stage = 'topics', transition_seq = NULL, stage1_metrics = NULL," : ""}
+            updated_at_epoch = ?
+      WHERE id = ?
+        AND status IN ('pending', 'claimed', 'failed')`
+  );
+  const invalidated = [];
+  for (const jobId of [...candidates].sort((a, b) => a - b)) {
+    const job = readJob.get(jobId);
+    if (!job || job.status !== "pending" && job.status !== "claimed" && job.status !== "failed") {
+      continue;
+    }
+    if (resetStatement.run(options.nowEpoch, jobId).changes === 0) {
+      continue;
+    }
+    clearSettlementJobTransitionScratch(db, jobId);
+    invalidated.push({
+      jobId,
+      previousStatus: job.status,
+      previousStage: job.stage ?? "topics",
+      claimGeneration: job.claimGeneration + 1
+    });
+  }
+  return invalidated;
+}
+function clearSettlementJobTransitionScratch(db, jobId) {
+  for (const table of [
+    "note_settlement_writable_turns",
+    "note_settlement_worklist",
+    "note_settlement_removed_side_debts",
+    "note_settlement_lane_members",
+    "note_settlement_pre_side_resolutions",
+    "homeless_retraction_audits",
+    "homeless_groups"
+  ]) {
+    if (!hasTable(db, table)) {
+      continue;
+    }
+    db.query(`DELETE FROM ${table} WHERE job_id = ?`).run(jobId);
+  }
+  if (hasTable(db, "impression_debts")) {
+    db.query(
+      `UPDATE impression_debts
+          SET claimed_at_epoch = NULL, claimed_by_job_id = NULL
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`
+    ).run(jobId);
+  }
+}
+function expandToIncidentCiters(db, turnIds) {
+  const ids = [...new Set(turnIds)].filter((id) => Number.isInteger(id));
+  if (ids.length === 0) {
+    return [];
+  }
+  if (!hasTable(db, "memory_edges")) {
+    return ids.sort((a, b) => a - b);
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const affected = new Set(ids);
+  for (const row of db.query(
+    `SELECT DISTINCT me.citing_id AS citingId
+         FROM memory_edges me
+         JOIN turns tc ON tc.id = me.citing_id
+         JOIN turns td ON td.id = me.cited_id
+        WHERE me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+          AND (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
+          AND ${relationClassBearingSql("me")}
+          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...ids, ...ids)) {
+    affected.add(row.citingId);
+  }
+  return [...affected].sort((a, b) => a - b);
+}
+function hasTable(db, name) {
+  return db.query(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`
+  ).get(name) !== null;
+}
+function hasColumn(db, table, column) {
+  return db.query(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
 }
 
 // src/db/normalize-incident-attribution.ts
@@ -1535,7 +1706,7 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
     clearedDeclarations: [],
     deletedEdges: [],
     stampedCiterIds: [],
-    touchedLanes: []
+    invalidatedJobIds: []
   };
   if (ids.length === 0) {
     return empty;
@@ -1562,6 +1733,26 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
   }
   const facts = loadEndpointLaneFacts(db, [...endpointIds]);
   const moved = new Set(ids);
+  if (ctx.settlementJobId !== void 0) {
+    const preFacts = new Map(facts);
+    if (ctx.previousLaneFacts !== void 0) {
+      for (const [turnId, endpointFacts] of ctx.previousLaneFacts) {
+        preFacts.set(turnId, endpointFacts);
+      }
+    }
+    recordPreSideResolutions(db, ctx.settlementJobId, incident, preFacts, ctx.nowEpoch);
+  }
+  const invalidatedJobIds = /* @__PURE__ */ new Set();
+  const defaultOnAmbiguous = (edge) => {
+    const invalidated = invalidateOverlappingSettlementJobs(db, [edge.citingId], {
+      nowEpoch: ctx.nowEpoch,
+      ...ctx.settlementJobId !== void 0 ? { excludeJobId: ctx.settlementJobId } : {}
+    });
+    for (const job of invalidated) {
+      invalidatedJobIds.add(job.jobId);
+    }
+    return invalidated.length > 0 || ctx.settlementJobId !== void 0 ? "keep" : "delete";
+  };
   const clearSide = {
     tail: db.query(`UPDATE memory_edges SET tail_tag = '' WHERE id = ?`),
     head: db.query(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`)
@@ -1595,12 +1786,7 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
   const clearedDeclarations = [];
   const deletedEdges = [];
   const stampedCiterIds = /* @__PURE__ */ new Set();
-  const touched = /* @__PURE__ */ new Map();
-  const onAmbiguous = ctx.onAmbiguous ?? (() => "delete");
-  const touch = (lane) => {
-    if (lane === null) return;
-    touched.set(`${lane.segmentId}:${lane.tag}`, lane);
-  };
+  const onAmbiguous = ctx.onAmbiguous ?? defaultOnAmbiguous;
   for (const row of incident) {
     const live = { ...row };
     let deleted = false;
@@ -1608,15 +1794,11 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
       if (deleted) break;
       const endpointId = side === "tail" ? row.citingId : row.citedId;
       if (!moved.has(endpointId)) continue;
-      if (ctx.previousLaneFacts !== void 0) {
-        touch(resolveEdgeSide(row, side, ctx.previousLaneFacts).lane);
-      }
       const resolved = resolveEdgeSide(live, side, facts);
       const storedTag = edgeSideStoredTag(live, side);
       if (storedTag !== UNDECLARED_SIDE_TAG) {
         const reason = resolved.outcome === "invalid" ? "invalid" : resolved.laneCardinality < 2 ? "redundant" : null;
         if (reason === null) {
-          touch(resolved.lane);
           continue;
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
@@ -1694,31 +1876,16 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
         }
         continue;
       }
-      touch(after.lane);
     }
   }
   for (const citerId of [...stampedCiterIds].sort((a, b) => a - b)) {
     stampTurnRelationsRevision(db, citerId, ctx.writer, ctx.nowEpoch);
   }
-  const touchedLanes = [...touched.values()].sort(
-    (a, b) => a.segmentId - b.segmentId || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0)
-  );
-  if (ctx.jobId !== void 0) {
-    for (const lane of touchedLanes) {
-      recordLaneTouch(db, {
-        jobId: ctx.jobId,
-        kind: "lane",
-        entityId: lane.segmentId,
-        laneTag: lane.tag,
-        createdAtEpoch: ctx.nowEpoch
-      });
-    }
-  }
   return {
     clearedDeclarations,
     deletedEdges,
     stampedCiterIds: [...stampedCiterIds].sort((a, b) => a - b),
-    touchedLanes
+    invalidatedJobIds: [...invalidatedJobIds].sort((a, b) => a - b)
   };
 }
 
@@ -2753,7 +2920,7 @@ function writeMembershipTags(db, input) {
   }
   const index = segmentTagIndex(db);
   const refusals = [];
-  const previousLaneFacts = input.callerNormalizesAttribution ? void 0 : loadEndpointLaneFacts(db, writes.map((write) => write.turnId));
+  const previousLaneFacts = input.settlementJobId === void 0 || input.callerNormalizesAttribution ? void 0 : loadEndpointLaneFacts(db, writes.map((write) => write.turnId));
   for (const write of writes) {
     const target = derivedTarget(index, write.tags);
     if (operation === "normal") {
@@ -2829,7 +2996,8 @@ function writeMembershipTags(db, input) {
   const attribution = normalizeIncidentAttribution(db, changedTurnIds, {
     writer: input.normalizationWriter ?? input.writer ?? ANONYMOUS_WRITER,
     nowEpoch,
-    previousLaneFacts
+    previousLaneFacts,
+    ...input.settlementJobId !== void 0 ? { settlementJobId: input.settlementJobId } : {}
   });
   return { ok: true, operation, changedTurnIds, membership, attribution };
 }
@@ -3536,13 +3704,13 @@ var LaneMigrationOrderError = class extends Error {
     this.name = "LaneMigrationOrderError";
   }
 };
-function hasTable(db, table) {
+function hasTable2(db, table) {
   return db.query(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
   ).get(table) !== null;
 }
 function hasAnyRow(db, table) {
-  if (!hasTable(db, table)) {
+  if (!hasTable2(db, table)) {
     return false;
   }
   return db.query(`SELECT 1 AS x FROM ${table} LIMIT 1`).get() !== null;
@@ -3554,7 +3722,7 @@ function isLaneRegistrySettled(db) {
   return LANE_REGISTRY_PHASE_RECEIPTS.every((name) => hasMigrationReceipt(db, name));
 }
 function assertPreLaneModelV12EdgeShape(db) {
-  if (!hasTable(db, "memory_edges")) {
+  if (!hasTable2(db, "memory_edges")) {
     return;
   }
   const columns = new Set(
@@ -3660,8 +3828,8 @@ function runLaneModelV12SelfEdgeRetraction(db, nowEpoch = Math.floor(Date.now() 
          WHERE citing_kind = cited_kind AND citing_id = cited_id
          ORDER BY id`
     ).all();
-    const clearTagIndex = hasTable(db, "memory_edge_tags") ? db.query("DELETE FROM memory_edge_tags WHERE edge_row_id = ?") : null;
-    const clearSideTagIndex = hasTable(db, "memory_edge_side_tags") ? db.query(
+    const clearTagIndex = hasTable2(db, "memory_edge_tags") ? db.query("DELETE FROM memory_edge_tags WHERE edge_row_id = ?") : null;
+    const clearSideTagIndex = hasTable2(db, "memory_edge_side_tags") ? db.query(
       "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?"
     ) : null;
     const deleteEdge = db.query("DELETE FROM memory_edges WHERE id = ?");
@@ -3787,7 +3955,7 @@ function runLaneModelV12VocabularyMerge(db, nowEpoch = Math.floor(Date.now() / 1
     const clearSideTags = twoSided ? db.query(
       "UPDATE memory_edges SET tail_tag = '', head_tag = '' WHERE id = ?"
     ) : null;
-    const clearSideTagIndex = hasTable(db, "memory_edge_side_tags") ? db.query(
+    const clearSideTagIndex = hasTable2(db, "memory_edge_side_tags") ? db.query(
       "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?"
     ) : null;
     const merged = [];
@@ -5674,7 +5842,7 @@ var SEGMENT_FACET_STALE_TRIGGERS_DDL = `
       WHERE id IN (SELECT segment_id FROM segment_members WHERE turn_id = NEW.id);
     END;
 `;
-function hasTable2(db, table) {
+function hasTable3(db, table) {
   return db.query(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
   ).get(table) !== null;
@@ -6091,7 +6259,7 @@ function ensureMemoryEdgesIndexesRename(db) {
   }
 }
 function memoryEdgesTagSetIdentityIsStale(db) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return false;
   }
   return !db.query("SELECT name FROM pragma_table_info('memory_edges')").all().some((row) => row.name === "id");
@@ -6256,7 +6424,7 @@ function twoSidedIdentityKey(tuple2) {
   ].join("\0");
 }
 function ensureMemoryEdgesLaneModelV12TwoSidedTags(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return;
   }
   if (!memoryEdgesTwoSidedTagsIsStale(db)) {
@@ -6442,7 +6610,7 @@ function ensureMemoryEdgesLaneModelV12TwoSidedTags(db, nowEpoch = Math.floor(Dat
 }
 var LANE_MODEL_V12_MERGED_TAG_SET_RETIRED_RECEIPT = "lane-model-v12-me-merged-tag-set-retired";
 function memoryEdgesHasMergedTagSet(db) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return false;
   }
   return db.query("SELECT name FROM pragma_table_info('memory_edges')").all().some((row) => row.name === "tags");
@@ -6453,7 +6621,7 @@ function countMemoryEdgeSideTagRows(db) {
   ).get()?.count ?? 0;
 }
 function ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return;
   }
   if (!memoryEdgesHasMergedTagSet(db)) {
@@ -6500,7 +6668,7 @@ function ensureMemoryEdgesLaneModelV12MergedTagSetRetired(db, nowEpoch = Math.fl
       }
       const rowsBefore = countMemoryEdges(db);
       const sideIndexRowsBefore = countMemoryEdgeSideTagRows(db);
-      const mergedIndexRows = hasTable2(db, "memory_edge_tags") ? db.query(
+      const mergedIndexRows = hasTable3(db, "memory_edge_tags") ? db.query(
         "SELECT COUNT(*) AS count FROM memory_edge_tags"
       ).get()?.count ?? 0 : 0;
       db.exec(
@@ -6577,7 +6745,7 @@ function memoryEdgesRelationTurnScopedIsSettled(db) {
   return hasMigrationReceipt(db, MEMORY_EDGES_RELATION_TURN_SCOPED_RECEIPT);
 }
 function ensureMemoryEdgesRelationTurnScoped(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return;
   }
   if (memoryEdgesRelationTurnScopedIsSettled(db)) {
@@ -6680,24 +6848,24 @@ function ensureMemoryEdgesRelationTurnScoped(db, nowEpoch = Math.floor(Date.now(
   }
 }
 function ensureLaneReadMemberCoverageReceipts(db) {
-  if (!hasTable2(db, "lane_read_receipts")) {
+  if (!hasTable3(db, "lane_read_receipts")) {
     return;
   }
-  if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+  if (!hasColumn2(db, "lane_read_receipts", "page_coverage")) {
     return;
   }
   runWriteTransaction(db, () => {
-    if (!hasTable2(db, "lane_read_receipts")) {
+    if (!hasTable3(db, "lane_read_receipts")) {
       return;
     }
-    if (!hasColumn(db, "lane_read_receipts", "page_coverage")) {
+    if (!hasColumn2(db, "lane_read_receipts", "page_coverage")) {
       return;
     }
     db.exec("DROP TABLE IF EXISTS lane_read_receipts");
   });
 }
 function ensureLaneDispositionJustificationEvidence(db) {
-  if (!hasTable2(db, "lane_disposition_justifications")) {
+  if (!hasTable3(db, "lane_disposition_justifications")) {
     return;
   }
   addColumnIfMissing(
@@ -6729,7 +6897,7 @@ function ensureMemoryEdgesRelationClassColumns(db) {
 }
 var MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT = "relation-vocabulary-v13-relation-class-backfill";
 function classifyLegacyMemoryEdgeRelations(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "memory_edges")) {
     return;
   }
   if (hasMigrationReceipt(db, MEMORY_EDGES_RELATION_CLASS_BACKFILL_RECEIPT)) {
@@ -6778,7 +6946,7 @@ function countUnsettledEdges(db) {
   ).get()?.count ?? 0;
 }
 function ensureMemoryEdgesSchema(db) {
-  const isFirstCreation = !hasTable2(db, "memory_edges");
+  const isFirstCreation = !hasTable3(db, "memory_edges");
   if (!isFirstCreation) {
     ensureMemoryEdgesPairIdentity(db);
     ensureMemoryEdgesRelationVocabulary(db);
@@ -6804,7 +6972,7 @@ function ensureMemoryEdgesSchema(db) {
   }
 }
 function migrateTurnCitationsToEdges(db) {
-  if (!hasTable2(db, "turn_citations") || !hasTable2(db, "memory_edges")) {
+  if (!hasTable3(db, "turn_citations") || !hasTable3(db, "memory_edges")) {
     return 0;
   }
   const rows = db.query(
@@ -6853,7 +7021,7 @@ function migrateTurnCitationsToEdges(db) {
   return countMemoryEdges(db) - before;
 }
 function retireLegacyTurnCitationsTable(db) {
-  if (!hasTable2(db, "turn_citations")) {
+  if (!hasTable3(db, "turn_citations")) {
     return;
   }
   migrateTurnCitationsToEdges(db);
@@ -6933,7 +7101,7 @@ function ensureMemoryEdgesPruneStampsRelations(db) {
 var MEMBERSHIP_CUTOVER_MIGRATION_WRITER = "migration:membership-cutover";
 var MEMBERSHIP_CUTOVER_RECEIPT = "settlement-read-once-membership-cutover";
 function cutoverNamedTaskMembershipTags(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "segment_members") || !hasTable2(db, "segments") || !hasTable2(db, "turns")) {
+  if (!hasTable3(db, "segment_members") || !hasTable3(db, "segments") || !hasTable3(db, "turns")) {
     return;
   }
   if (hasMigrationReceipt(db, MEMBERSHIP_CUTOVER_RECEIPT)) {
@@ -7024,7 +7192,7 @@ function ensureNoteDebtReasonVocabulary(db) {
     }
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
-    const carried = hasColumn(
+    const carried = hasColumn2(
       db,
       "note_debt_pre_closed_reason",
       "reminded_at_epoch"
@@ -7283,7 +7451,7 @@ function ensureWriteGateEpochColumns(db) {
   );
 }
 function ensureShadowNoteWriterOriginColumn(db) {
-  if (!hasColumn(db, "shadow_notes", "writer_origin")) {
+  if (!hasColumn2(db, "shadow_notes", "writer_origin")) {
     db.exec(
       "ALTER TABLE shadow_notes ADD COLUMN writer_origin TEXT NOT NULL DEFAULT 'agent'"
     );
@@ -7415,7 +7583,7 @@ function ensureSegmentImpressionColumns(db) {
 }
 var SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT = "retired-text-leaves-retrieval-segment-content";
 function retireUntenantedSegmentContentFromSearch(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  if (!hasTable2(db, "segments") || !hasTable2(db, "memory_fts")) {
+  if (!hasTable3(db, "segments") || !hasTable3(db, "memory_fts")) {
     return;
   }
   if (hasMigrationReceipt(db, SEGMENT_CONTENT_TENANCY_REINDEX_RECEIPT)) {
@@ -7639,7 +7807,7 @@ function foldTopicNamesIntoSegmentTags(db) {
   }
 }
 function topicRegistryStillPresent(db) {
-  return hasColumn(db, "segments", "topic_id");
+  return hasColumn2(db, "segments", "topic_id");
 }
 function retireTopicRegistry(db) {
   if (!topicRegistryStillPresent(db)) {
@@ -7805,7 +7973,7 @@ function ensureSearchIndexSchema(db) {
   const row = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'"
   ).get();
-  const isCurrent = row !== null && row.sql.includes("trigram") && EXPECTED_FTS_COLUMNS.every((column) => hasColumn(db, "memory_fts", column));
+  const isCurrent = row !== null && row.sql.includes("trigram") && EXPECTED_FTS_COLUMNS.every((column) => hasColumn2(db, "memory_fts", column));
   if (isCurrent) {
     return;
   }
@@ -7814,7 +7982,7 @@ function ensureSearchIndexSchema(db) {
   rebuildSearchIndex(db);
 }
 function ensureSessionProjectIndex(db) {
-  if (hasColumn(db, "sessions", "created_at_epoch")) {
+  if (hasColumn2(db, "sessions", "created_at_epoch")) {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_project_created_at
         ON sessions(project, created_at_epoch DESC)
@@ -7822,7 +7990,7 @@ function ensureSessionProjectIndex(db) {
     db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
     return;
   }
-  if (hasColumn(db, "sessions", "started_at_epoch")) {
+  if (hasColumn2(db, "sessions", "started_at_epoch")) {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
         ON sessions(project, started_at_epoch DESC)
@@ -7830,7 +7998,7 @@ function ensureSessionProjectIndex(db) {
   }
 }
 function ensureTurnPromptIdIndex(db) {
-  if (!hasColumn(db, "turns", "content_prompt_id")) {
+  if (!hasColumn2(db, "turns", "content_prompt_id")) {
     return;
   }
   db.exec(`
@@ -7872,7 +8040,7 @@ var CONDITIONAL_TURNS_COLUMNS = [
 ];
 function presentConditionalTurnsColumns(db) {
   return CONDITIONAL_TURNS_COLUMNS.filter(
-    (column) => hasColumn(db, "turns", column.name)
+    (column) => hasColumn2(db, "turns", column.name)
   );
 }
 function assertNoUnexpectedTurnsColumns(db, knownColumns, droppedColumns, rebuildName) {
@@ -8041,13 +8209,13 @@ ${carriedColumnDdl}
   }
 }
 function retireTurnCitesRecordedColumn(db) {
-  if (!hasColumn(db, "turns", "cites_recorded")) {
+  if (!hasColumn2(db, "turns", "cites_recorded")) {
     return;
   }
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     runWriteTransaction(db, () => {
-      if (!hasColumn(db, "turns", "cites_recorded")) {
+      if (!hasColumn2(db, "turns", "cites_recorded")) {
         return;
       }
       const carriedColumns = presentConditionalTurnsColumns(db);
@@ -8188,7 +8356,7 @@ function isDuplicateColumnError(error48) {
   return /duplicate column name/i.test(message);
 }
 function addColumnIfMissing(db, table, column, definition) {
-  if (hasColumn(db, table, column)) {
+  if (hasColumn2(db, table, column)) {
     return false;
   }
   try {
@@ -8200,7 +8368,7 @@ function addColumnIfMissing(db, table, column, definition) {
   }
   return true;
 }
-function hasColumn(db, table, column) {
+function hasColumn2(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
   return rows.some((row) => row.name === column);
 }
@@ -8256,12 +8424,12 @@ function hasLegacySchema(db) {
     "content"
   ];
   const hasLegacyObservationColumns = observationsLegacyColumns.some(
-    (column) => hasColumn(db, "observations", column)
+    (column) => hasColumn2(db, "observations", column)
   );
   const isMissingCurrentObservationColumns = observationsCurrentColumns.some(
-    (column) => !hasColumn(db, "observations", column)
+    (column) => !hasColumn2(db, "observations", column)
   );
-  return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || hasLegacyObservationColumns && isMissingCurrentObservationColumns;
+  return sessionsLegacyColumns.some((column) => hasColumn2(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn2(db, "turns", column)) || hasLegacyObservationColumns && isMissingCurrentObservationColumns;
 }
 function resetSchema(db) {
   db.exec("DROP TRIGGER IF EXISTS rule_events_validate_source");
@@ -10151,6 +10319,23 @@ function loadLaneTagsForTurns(db, turnIds) {
     resolved.set(row.id, resolveLaneTags(owningSegments.get(row.id), row.tags));
   }
   return resolved;
+}
+
+// src/db/lane-disposition.ts
+function recordLaneReadReceipt(db, receipt) {
+  db.query(
+    `INSERT INTO lane_read_receipts
+       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    receipt.readerId,
+    receipt.segmentId,
+    receipt.laneTag,
+    JSON.stringify(receipt.membershipTurnIds),
+    JSON.stringify(receipt.renderedTurnIds),
+    receipt.sequence,
+    receipt.createdAtEpoch
+  );
 }
 
 // src/db/segment-rank.ts

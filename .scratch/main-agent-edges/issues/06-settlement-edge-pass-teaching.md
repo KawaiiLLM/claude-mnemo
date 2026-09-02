@@ -2,12 +2,14 @@
 
 **What to build:** spec D6's teaching; replaces read-once ticket 05. Stage 2 finds the main agent's edges present; it declares ambiguous sides, fills what was missed, reviews (retract, `lane_check`, debts, impressions, commit). `finalize` computes and prints, inside the transition transaction after all stage-1 writes: `finalWritableIds = frozenWritableIds ∪ derivedDebtCiters`; `writableDelta = finalWritableIds − initialWritableIds` (relation-only authority for derived-side citers); `declarationEndpointIds = endpoints(live outgoing rows whose citer ∈ finalWritableIds)`; `contextDelta = (⋃ laneMembers(post-write) ∪ declarationEndpointIds) − initialWritableIds − writableDelta` — one hop. Stage 2 reads the union once (paginated), then nothing until the gate names a changed turn. The old "recall members with relations" / "before any edge write recall the citing turn" / stage-2 "batches of ten" sentences go (`note-settlement-prompt.ts` included). Multi-lane citing turns: one placement per pair, both sides named, decided once over the worklist.
 
-**Blocked by:** 04.
+**Blocked by:** None — 04 landed on main (735666db).
 
-**Status:** ready-for-agent (after 04)
+**Status:** ready-for-agent
 
 - [ ] Delta tests: an initial-set address never appears in a delta; a lane member added by stage 1 and a remote cited endpoint each appear in `contextDelta` once and are read once; a `contextDelta` member refuses a relation write; a `writableDelta` member accepts one and refuses a note-field write.
 - [ ] Teaching pinned; retired sentences absent from rendered text.
+
+- [ ] **Revert probe (standing acceptance step for this batch):** for every teaching sentence you replace and every formula you implement, revert it to the pre-ticket text/behaviour, run the suite, and name in the report WHICH test went red. A `toContain` on a sentence is not a pin of the behaviour it teaches. Verify each mutation applied before trusting its output; md5-restore after.
 
 ## Constraints
 

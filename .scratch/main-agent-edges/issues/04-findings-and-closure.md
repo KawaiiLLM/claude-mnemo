@@ -207,3 +207,31 @@ bump, no push.
 2. `lane_run_touches` rows belonging to an invalidated job are NOT cleared. They are the durable
    AUTHORSHIP ledger the judgment set re-admits on, and leaving them over-reports what the re-run is
    judged on rather than under-reporting it. Also not in the spec's clear list.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `fd0b6265` no-ff (`735666db`); one conflict, comment-only, in the shape-numbers test where the
+worker's 3 → 2 correction met main's `aac14341` — main's comment kept, the assertion was already 2 on
+both sides. Bundles rebuilt. `npx tsc --noEmit` 0; guards green; control-byte sweep over the two new
+modules and the new test: none. Full `bun test` **4770 / 0 / 269** against 4751/0/268 — exactly the
+worker's +19 and its one new file.
+
+My probes, on sites the worker's eleven did not touch:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `settlement-job-invalidation.ts`: the acting job's self-exemption removed | RED ×5 — a run invalidates itself and every closure test collapses |
+| I2 | `note-settlement-pre-resolutions.ts`: the POST-bad check dropped (grant on any post outcome) | RED ×5 |
+| I3 | `note-settlement-dispatch.ts:526` (`createNoteSettlementDispatch`): claim-scope write dropped | RED ×1 |
+| I3b | `note-settlement-dispatch.ts:978` (`createUnifiedNoteSettlementDispatch`): claim-scope write dropped | **GREEN** — the unified shape's persisted claim scope has no test that can fail |
+
+I3b is the peer's pattern again (the report says "claim-time scope persisted by BOTH dispatch shapes";
+one shape is pinned, the other is not). Routed to ticket 02b, which already owns this batch's
+tests-that-cannot-fail. Accepted otherwise. F3 deleted per T2419 and F3b closed by construction with the
+merge-receipt half implemented — both as the peer asked.
+
+Two rulings the worker stated rather than assumed, both accepted as written and surfaced to the user:
+an invalidation does not refund `attempts`/`retry_at_epoch`; an invalidated job's `lane_run_touches`
+rows are kept (over-reporting the re-run's judgment set rather than under-reporting it).
