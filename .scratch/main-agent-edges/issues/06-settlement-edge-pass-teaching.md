@@ -1,0 +1,19 @@
+# 06 — Settlement's edge pass: declare, fill, review — and the delta formulas
+
+**What to build:** spec D6's teaching; replaces read-once ticket 05. Stage 2 finds the main agent's edges present; it declares ambiguous sides, fills what was missed, reviews (retract, `lane_check`, debts, impressions, commit). `finalize` computes and prints, inside the transition transaction after all stage-1 writes: `finalWritableIds = frozenWritableIds ∪ derivedDebtCiters`; `writableDelta = finalWritableIds − initialWritableIds` (relation-only authority for derived-side citers); `declarationEndpointIds = endpoints(live outgoing rows whose citer ∈ finalWritableIds)`; `contextDelta = (⋃ laneMembers(post-write) ∪ declarationEndpointIds) − initialWritableIds − writableDelta` — one hop. Stage 2 reads the union once (paginated), then nothing until the gate names a changed turn. The old "recall members with relations" / "before any edge write recall the citing turn" / stage-2 "batches of ten" sentences go (`note-settlement-prompt.ts` included). Multi-lane citing turns: one placement per pair, both sides named, decided once over the worklist.
+
+**Blocked by:** 04.
+
+**Status:** ready-for-agent (after 04)
+
+- [ ] Delta tests: an initial-set address never appears in a delta; a lane member added by stage 1 and a remote cited endpoint each appear in `contextDelta` once and are read once; a `contextDelta` member refuses a relation write; a `writableDelta` member accepts one and refuses a note-field write.
+- [ ] Teaching pinned; retired sentences absent from rendered text.
+
+## Constraints
+
+- `~/.claude-mnemo/` is production data and STRICTLY READ-ONLY; measure on a `cp -c` clone of the scratchpad copy.
+- NEVER `git stash` / `checkout` / `checkout-index` / `restore` / `reset` / `clean`. Restore from your own `cp` copies, md5-verified.
+- Explicit pathspecs on every `git add`. No raw control bytes. `grep -c anthropic-ai plugin/scripts/worker.cjs` stays `0`.
+- Every teaching sentence added or removed is pinned by a test a mutation drives red. ≥3 mutation probes of your own, RED, md5-restored — and a probe whose mutation did not apply is not a probe.
+- Dispose of every applicable line of `../acceptance-matrix.md` in your report.
+- [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
