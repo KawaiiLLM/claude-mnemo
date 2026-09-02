@@ -19,3 +19,5 @@
 - Every teaching sentence added or removed is pinned by a test a mutation drives red. ≥3 mutation probes of your own, RED, md5-restored — and a probe whose mutation did not apply is not a probe.
 - Dispose of every applicable line of `../acceptance-matrix.md` in your report.
 - [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
+
+**Pinned (T2432, P3):** this ticket carries the raw-word release gate — a test grepping the seven words over `src/` with an explicit allowlist for historical migration literals in `schema.ts`/`lanes.ts`; it must fail on any other occurrence.

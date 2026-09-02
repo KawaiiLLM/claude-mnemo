@@ -17,3 +17,5 @@
 - Every teaching sentence added or removed is pinned by a test a mutation drives red. ≥3 mutation probes of your own, RED, md5-restored — and a probe whose mutation did not apply is not a probe.
 - Dispose of every applicable line of `../acceptance-matrix.md` in your report.
 - [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
+
+**Pinned (T2432, P1):** `declareEdgeSides` and retraction address the PAIR `(citing, cited)`; `class` is an optional CAS precondition — supplied and mismatched → refuse naming the current class; omitted → no check.

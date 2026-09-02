@@ -101,6 +101,19 @@ Report on the production clone: counts per step (normalised turns, folded rows, 
 
 `src/cli/lane-controls-cli.ts`'s C1 (blank sides), C3 (lane-less endpoints) and C4 (sampled side audit) were diagnostics over the stored-side model. E6 accounting lives in `lane_check`; lane-less edges are legal; declarations are few and validated at write. The three controls are deleted with their tests; nothing replaces them.
 
+
+## Pinned shared decisions (S15069/T2432) — binding on every ticket, decided once here
+
+The peer flagged four decisions that span tickets and would otherwise be made twice. Pinned:
+
+P1. **Declaration address = the PAIR `(citing, cited)`.** `declareEdgeSides` and retraction address the pair; `class` is an OPTIONAL CAS precondition: when supplied and it does not match the row's current class, refuse naming the current class ("stale: the pair is now `verify`"); when omitted, the row's class is whatever it is. Ticket 03 implements; ticket 04 consumes.
+
+P2. **Post-normalisation is ONE seam, `normalizeIncidentAttribution(db, turnIds, ctx)` in `src/db/`, written by ticket 02** (it owns the lane lifecycle verbs and structural touches) and CONSUMED by every attribution-changing verb: it re-resolves every incident side of the given endpoints and, in the caller's transaction, clears declarations at cardinality < 2, clears invalid declarations, updates the side index, stamps each changed citer's relations revision, persists old/new qualified lane touches, and for a newly `ambiguous` side calls `ctx.onAmbiguous(edge)` — ticket 02 ships that hook with the DELETE-and-receipt behaviour; ticket 04 adds the live-job branch (`invalidateOverlappingSettlementJobs`) in front of it. Nobody re-derives this logic elsewhere.
+
+P3. **The raw-word release gate lives in ticket 01** (the ticket that drops the column): a test that greps the seven words over `src/` and fails on anything outside an explicit allowlist of historical migration literals (`schema.ts`, `lanes.ts`). Tickets 02 (readers), 03 (writes/retraction), 07 (renderer) each dispose of their own consumers and list them; 01 proves the union.
+
+P4. **Impression anchor invalidation (`note-settlement-impressions.ts` ~405–428) is owned by ticket 02** and keys on class `correct` of EITHER coverage — the old predicate treated both `override` and `narrows` as invalidating, and `correct/full` + `correct/partial` is exactly that set, so semantics are preserved; the sentence "impression lane touches read tags, not words" in D2 refers to the TOUCH machinery and is corrected to name this reader separately.
+
 ## Consequences for the read-once batch
 
 00 stands and gains the addendum (fresh-turn exception; caps unchanged — logical = physical after the fold). 01–04 keep their cores; 01 re-measures the `relations` atom width after 06's marks. **05** rewrites teaching to declare → fill → review and its deltas to formulas computed after all stage-1 writes inside the finalize transition: `finalWritableIds = frozenWritableIds ∪ derivedDebtCiters`; `writableDelta = finalWritableIds − initialWritableIds`; `declarationEndpointIds = endpoints(live outgoing rows whose citer ∈ finalWritableIds)`; `contextDelta = (⋃ laneMembers(post-write) ∪ declarationEndpointIds) − initialWritableIds − writableDelta`; one hop. **06** becomes a semantic rewrite: sides show declared / derived / ambiguous / none / invalid; no legacy marks exist. **07** measures by provenance.

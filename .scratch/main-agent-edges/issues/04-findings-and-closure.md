@@ -18,3 +18,5 @@
 - Every teaching sentence added or removed is pinned by a test a mutation drives red. ≥3 mutation probes of your own, RED, md5-restored — and a probe whose mutation did not apply is not a probe.
 - Dispose of every applicable line of `../acceptance-matrix.md` in your report.
 - [ ] `npx tsc --noEmit` clean (excludes `tests/`; typecheck new tests separately); full `bun test` once with every delta accounted; `npm run build`; stale-bundle and release-artifacts guards green; `git diff --check` clean. No version bump, no push.
+
+**Pinned (T2432, P1/P2):** consume, do not re-derive — declaration is pair-addressed with class as an optional CAS precondition (ticket 03); post-normalisation is ticket 02's `normalizeIncidentAttribution` seam, and this ticket only adds the live-job branch (`invalidateOverlappingSettlementJobs`) in front of its `onAmbiguous` delete-and-receipt hook.
