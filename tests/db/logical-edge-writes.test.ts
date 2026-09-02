@@ -600,6 +600,92 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
           .all(edgeId),
       ).toEqual([{ side: "tail", tag: "#alpha" }]);
     });
+
+    // -----------------------------------------------------------------------
+    // 03b F5 (peer implementation review escape): `endpointLaneTags` resolves
+    // an endpoint's OWN segment before intersecting with its declared lanes
+    // — the same two-step `lane-edge-gate.ts`'s `collectEdgeSideFacts` does
+    // for the attach path (see that module's own doc comment for why the
+    // split is one reader per side rather than a re-derivation). Every case
+    // above uses ONE segment, so none of them can tell "correctly scoped to
+    // the endpoint's own task" apart from "answers by literal word alone,
+    // whichever segment declared it first" — the two only diverge once the
+    // SAME lane word is declared in two different segments, which is what
+    // this fixture adds.
+    // -----------------------------------------------------------------------
+
+    describe("a lane word declared in two different tasks (03b F5)", () => {
+      test("an endpoint declares the shared word under its OWN task, not the other one's", () => {
+        const otherSegmentId = createSegment(db, {
+          title: "the other task",
+          tags: ["task-two"],
+          nowEpoch: NOW,
+        }).id;
+        // The SAME word, "#alpha", declared again — under a different segment.
+        insertLane(db, otherSegmentId, "#alpha", NOW);
+        insertLane(db, otherSegmentId, "#epsilon", NOW);
+        const otherCited = seedTurn(4, ["task-two", "#alpha", "#epsilon"]);
+        attach(citing, [{ relationClass: "use", targets: [address(otherCited)] }], NOW + 2);
+
+        // `citing` is a task-one member; `otherCited` a task-two one. The
+        // shared word resolves against OTHER-CITED's own task (task-two),
+        // where it is genuinely one of its two lanes — so this declares.
+        const result = declareEdgeSides(
+          db,
+          { citingTurnId: citing, citedTurnId: otherCited, headTag: "#alpha" },
+          "settlement",
+          NOW + 3,
+        );
+        expect(result.ok).toBe(true);
+        expect(result.changed).toBe(true);
+        expect(outgoing(citing).find((edge) => edge.cited.id === otherCited)!.headTag).toBe(
+          "#alpha",
+        );
+      });
+
+      test("a declaration naming the OTHER task's lane refuses as `invalid-declaration`, not the endpoint's own", () => {
+        const otherSegmentId = createSegment(db, {
+          title: "the other task",
+          tags: ["task-two"],
+          nowEpoch: NOW,
+        }).id;
+        // "#alpha" is declared here too, but this endpoint never carries it —
+        // its own two lanes are "#delta"/"#epsilon".
+        insertLane(db, otherSegmentId, "#alpha", NOW);
+        insertLane(db, otherSegmentId, "#delta", NOW);
+        insertLane(db, otherSegmentId, "#epsilon", NOW);
+        const otherCited = seedTurn(5, ["task-two", "#delta", "#epsilon"]);
+        attach(citing, [{ relationClass: "use", targets: [address(otherCited)] }], NOW + 2);
+
+        // Naming task-one's "#alpha" for a task-two endpoint: it is a real,
+        // declared lane word SOMEWHERE, but not one this endpoint is in.
+        const result = declareEdgeSides(
+          db,
+          { citingTurnId: citing, citedTurnId: otherCited, headTag: "#alpha" },
+          "settlement",
+          NOW + 3,
+        );
+        expect(result.ok).toBe(false);
+        expect(result.refusal).toEqual({
+          reason: "invalid-declaration",
+          side: "head",
+          tag: "#alpha",
+          endpoint: address(otherCited),
+        });
+        expect(outgoing(citing).find((edge) => edge.cited.id === otherCited)!.headTag).toBe("");
+
+        // And the SAME endpoint declares its own, real lane without incident
+        // — the refusal above was about the WORD's task, not the endpoint.
+        const own = declareEdgeSides(
+          db,
+          { citingTurnId: citing, citedTurnId: otherCited, headTag: "#delta" },
+          "settlement",
+          NOW + 4,
+        );
+        expect(own.ok).toBe(true);
+        expect(own.changed).toBe(true);
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

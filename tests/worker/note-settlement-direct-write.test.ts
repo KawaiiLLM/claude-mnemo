@@ -18,10 +18,13 @@ import { getLane, insertLane } from "../../src/db/lanes";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
-import { claimWriterId } from "../../src/db/write-gate";
+import { claimWriterId, getFieldStamp } from "../../src/db/write-gate";
 import { recallMemory } from "../../src/mcp/recall";
 import { createSettlementDirectWriteEngine } from "../../src/worker/note-settlement-direct-write";
-import type { SettlementTurnFacadeContext } from "../../src/worker/note-settlement-turn-facade";
+import {
+  settlementTurnWriteInputSchema,
+  type SettlementTurnFacadeContext,
+} from "../../src/worker/note-settlement-turn-facade";
 import { ERA_GRANT_COLUMN } from "../../src/segment-era";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -1272,5 +1275,82 @@ describe("staged settlement — the write fence is the full (job, generation, st
       }).content[0]!.text,
     ).toContain("Landed review");
     expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 03b F6 (peer implementation review escape): the ONE exception in
+// `writeMemoryEdges` (memory-edges.ts ~802-811) that fills a legacy row's
+// `relation_class`/`relation_coverage` columns with the class it ALREADY
+// reads as through `edgeRelationClass` — a materialization, never a
+// correction. `attachTurnRelations` (citations.ts) buckets it under
+// `restated` (it is neither a new pair nor in `promoted`), so the facade
+// never counts it toward `written` and the caller's relations-revision stamp
+// (`stampTurnRelationsRevision`, gated on `written.length > 0`) is never
+// touched. Driven through the REAL public route this time — the settlement
+// `note` shape's own zod parse (`settlementTurnWriteInputSchema`), then
+// `evaluateSettlementTurnWrite`, then the direct-write engine's rollback
+// wrapper — rather than at the storage primitive alone.
+// ---------------------------------------------------------------------------
+
+describe("a materialization-only fill reports restated and stamps nothing (03b F6)", () => {
+  test("a legacy row's class is filled in, but the write reads as a no-op restatement, not a new attach", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedTurn(sessionDbId, 1);
+    const t2 = seedTurn(sessionDbId, 2);
+    // A legacy row: a pre-v13 storage word (`extends`) with NO relation_class
+    // filled in — `edgeRelationClass` already reads this as `use` through the
+    // legacy table (shared/relation-class.ts's `LEGACY_RELATION_CLASS`), so a
+    // reader sees the same class before and after this test's write.
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', '', '', ${NOW})`,
+    ).run(t1, t2);
+
+    const job = claimWindow(sessionDbId, 1, 2);
+    const context = baseContext(job, { reviewableTurnIds: new Set([t1]) });
+    // Peer round P1-8's relations read, the same one a real run makes before
+    // it writes an edge.
+    recallMemory(db, {
+      id: `S${sessionDbId}/T1`,
+      filter: { fields: ["relations"] },
+      readerId: claimWriterId(job.id, job.claimGeneration, job.stage),
+    });
+    const before = getFieldStamp(db, "turn", t1, "relations")?.writeSequence ?? null;
+
+    const engine = createSettlementDirectWriteEngine({ db, context, now: () => NOW });
+    // THE PUBLIC ROUTE (F2/F6 shared infrastructure): the settlement `note`
+    // shape's own zod parse first, exactly as the SDK's `leasedTool` wrapper
+    // parses every call's `arguments` before the handler ever sees them —
+    // not `evaluateSettlementTurnWrite` called on a hand-typed object that
+    // skips the schema a live call would actually go through.
+    const parsed = settlementTurnWriteInputSchema.parse({
+      turn: `S${sessionDbId}/T1`,
+      use: [`S${sessionDbId}/T2`],
+    });
+    const receipt = engine.writeNote(parsed);
+
+    // The receipt: "already present", never "Landed N relation(s)" — a
+    // materialization is not new work a writer should read as landed.
+    expect(receipt.content[0]!.text).toContain(
+      "1 relation(s) already present, nothing added.",
+    );
+    expect(receipt.content[0]!.text).not.toContain("Landed 1 relation");
+
+    // The column actually materialized on the stored row (the write did
+    // something, just not a claim change)...
+    const row = getOutgoingEdges(db, { kind: "turn", id: t1 })[0]!;
+    expect(row.relation).toBe("extends");
+    expect(row.relationClass).toBe("use");
+
+    // ...but the citing turn's relations revision did not move: a reader who
+    // last saw this set as complete is still current, because nothing about
+    // the CLAIM changed under it. A mutation dropping the `written.length > 0`
+    // guard (stamping on every attach call, restatements included) would
+    // bump this and fail the assertion below.
+    const after = getFieldStamp(db, "turn", t1, "relations")?.writeSequence ?? null;
+    expect(after).toBe(before);
   });
 });
