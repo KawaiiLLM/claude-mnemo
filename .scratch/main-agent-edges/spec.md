@@ -136,4 +136,5 @@ Lanes by the main agent; changing the three classes; the impression's form; the 
 6. **Settlement edge pass = declare, fill, review** — D6 teaching (replaces read-once 05's stage-2 teaching) + the delta formulas.
 7. **Relations renderer, semantic rewrite** — D2 marks (replaces read-once 06 where they differ).
 8. **Controls retired** — D10.
+11. **Console shows three classes** — `console-api.ts` serves class/coverage/resolved sides; `console-shell.html` filters, colours, legend and detail by class; no word, no `indexes` branch. Blocked by 02; before 01.
 9. **Measure by provenance** — D8.
