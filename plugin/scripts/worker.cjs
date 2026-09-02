@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkbpyoe" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkc1tyk" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -20447,7 +20447,7 @@ var MEMORY_RUBRIC_CONCEPTS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E00\u90E8
 - \u6CF3\u9053\u6CA1\u6709\u72B6\u6001:\u5B83\u5C31\u662F\u5B83\u7684\u6210\u5458,\u4EE5\u53CA\u58F0\u660E\u5C5E\u4E8E\u5B83\u7684\u8FB9\u3002
 - \u4E00\u4E2A\u8282\u70B9\u53EF\u4EE5\u5C5E\u4E8E\u591A\u6761\u6CF3\u9053\u3002
 
-**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u7ED3\u7B97\u4E66\u5199\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002\u540C\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9,\u5B58\u5728\u5B83\u5199\u4E0B\u65F6\u5224\u65AD\u8BDA\u5B9E\u7684\u90A3\u4E2A\u6CF3\u9053\u4F4D\u7F6E\u4E0A,\u4E0D\u6309\u5019\u9009\u6CF3\u9053\u9010\u4E2A\u5F00\u884C\u3002
+**\u8FB9**:\u4E24\u4E2A\u8282\u70B9\u4E4B\u95F4\u7684\u4E00\u4E2A\u5173\u7CFB,\u7531\u5F15\u7528\u65B9\u6307\u5411\u88AB\u5F15\u7528\u65B9 \u2014\u2014 \u8BFB\u4F5C**\u5F15\u7528\u65B9\u8FD0\u7528\u88AB\u5F15\u7528\u65B9**\u3002\u8FB9\u7684\u4E24\u7AEF\u5404\u5E26\u4E00\u4E2A\u6CF3\u9053 tag:\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A,\u88AB\u5F15\u7528\u65B9\u4E00\u7AEF\u4E00\u4E2A\u3002**\u8FB9\u7531\u5F15\u7528\u65B9\u8FD9\u4E00\u8F6E\u5199\u4E0B,\u7ED3\u7B97\u8865\u6F0F\u4E0E\u590D\u6838\u3002**\u6BCF\u6761\u8FB9\u53EA\u643A\u5E26\u5F15\u7528\u65B9\u8FD9\u4E2A turn \u4FEE\u6539\u7684\u4E00\u4E2A\u4E3B\u5F20:\u8FD9\u6837\u7684\u6BCF\u4E2A\u4E3B\u5F20\u90FD\u5404\u6709\u4E00\u6761\u8FB9 \u2014\u2014 \u5DF2\u7ECF\u5199\u4E0B\u7684\u4E00\u6761\u8FB9,\u4E0D\u4E3A\u5176\u4F59\u4E3B\u5F20\u514D\u8D23,\u524D\u4E00\u4E2A turn \u4E5F\u4ECE\u4E0D\u662F\u9ED8\u8BA4\u7684\u5F15\u7528\u76EE\u6807;\u540C\u4E00\u4E2A\u4E3B\u5F20\u4E0D\u5360\u4E24\u6761\u8FB9,\u5DF2\u7ECF\u80FD\u7ECF\u7531\u65E2\u6709\u8FB9\u8BFB\u5230\u7684\u8DEF\u5F84,\u4E0D\u91CD\u590D\u753B\u3002\u540C\u4E00\u5BF9\u8282\u70B9\u4E4B\u95F4\u53EA\u6709\u4E00\u6761\u8FB9,\u5B58\u5728\u5B83\u5199\u4E0B\u65F6\u5224\u65AD\u8BDA\u5B9E\u7684\u90A3\u4E2A\u6CF3\u9053\u4F4D\u7F6E\u4E0A,\u4E0D\u6309\u5019\u9009\u6CF3\u9053\u9010\u4E2A\u5F00\u884C\u3002
 
 **\u4E09\u4E2A\u5173\u7CFB\u7C7B**(\u8BFB\u5230\u65F6\u8FD9\u6837\u7406\u89E3)\u3002\u8FB9\u7684\u4E24\u7AEF\u90FD\u662F\u8282\u70B9\u7684**\u4E3B\u7ED3\u679C** \u2014\u2014 \u88AB\u5F15\u8282\u70B9\u771F\u6B63\u7ACB\u4E0B\u7684\u7ED3\u8BBA\u6216\u4EA7\u51FA,\u4E0D\u662F\u5B83\u987A\u5E26\u63D0\u5230\u7684\u67D0\u4E2A\u7EC6\u8282;\u7EC6\u8282\u4E0D\u6323\u8FB9\u3002\u4E00\u4E2A turn \u53EF\u4EE5\u6709\u51E0\u4E2A\u5E76\u5217\u7684\u4E3B\u7ED3\u679C,\u5C31\u50CF\u5B83\u53EF\u4EE5\u5C5E\u4E8E\u51E0\u6761\u6CF3\u9053\u3002
 
@@ -20498,13 +20498,17 @@ var MEMORY_RUBRIC_MAIN_ACTIONS_TEXT = `# Memory Rubric v12 \u2014 \u7B2C\u4E8C\u
 
 \u53EA\u6CE8\u5165\u4E3B agent\u3002**\u8FD9\u4E00\u90E8\u5206\u53EA\u51FA\u73B0\u7948\u4F7F\u53E5,\u4E0D\u91CD\u590D\u7B2C\u4E00\u90E8\u5206\u7684\u5B9A\u4E49\u3002**
 
-\u4F60\u5199\u7684\u662F\u6BCF\u4E00\u8F6E\u7684\u7B14\u8BB0:title\u3001content\u3001insight\u3001type\u3001tags\u3002**\u8FB9\u4E0E\u6CF3\u9053\u7684\u58F0\u660E\u5F52\u7ED3\u7B97,\u4EFB\u52A1\u7684\u5F52\u5C5E\u7531 tags \u81EA\u52A8\u51B3\u5B9A\u3002**
+\u4F60\u5199\u7684\u662F\u6BCF\u4E00\u8F6E\u7684\u7B14\u8BB0:title\u3001content\u3001insight\u3001type\u3001tags,\u4EE5\u53CA\u8FD9\u4E00\u8F6E\u7684\u8FB9\u3002**\u6CF3\u9053\u7684\u58F0\u660E\u5F52\u7ED3\u7B97,\u4EFB\u52A1\u7684\u5F52\u5C5E\u7531 tags \u81EA\u52A8\u51B3\u5B9A\u3002**
 
 ---
 
 ## \u8BB0\u5F55 \u2014\u2014 \u7BA1\u597D\u6BCF\u4E00\u8F6E
 
 **\u5199\u4EC0\u4E48\u7531\u4EA7\u51FA\u51B3\u5B9A,\u4E0D\u7531\u82B1\u7684\u529B\u6C14\u51B3\u5B9A\u3002** \u5224\u636E\u662F\u5220\u9664\u6D4B\u8BD5:\u5220\u6389\u8FD9\u4E00\u8F6E,\u662F\u5426\u4E0D\u635F\u5931\u4EFB\u4F55\u51B3\u5B9A\u3001\u8FDB\u5C55\u6216\u8FDE\u8D2F\u6027 \u2014\u2014 \u662F,\u5C31 skip\u3002**\u7528\u6237\u7684\u88C1\u51B3\u3001\u7EA0\u6B63\u3001\u5426\u51B3,\u4EE5\u53CA\u4EFB\u4F55\u542B\u7ED3\u8BBA\u3001\u88AB\u5426\u9009\u9879\u6216\u6559\u8BAD\u7684\u8F6E\u6B21,\u6C38\u8FDC\u4E0D skip\u3002**
+
+**\u5199\u4E0B\u8FD9\u4E00\u8F6E\u7528\u5230\u3001\u4FEE\u6B63\u6216\u9A8C\u8BC1\u4E86\u54EA\u4E9B\u66F4\u65E9\u7684 turn\u3002** \u6307\u5411\u88AB\u5F15 turn \u7684\u4E3B\u7ED3\u679C,\u7EC6\u8282\u4E0D\u5199;\u4E00\u5BF9\u8282\u70B9\u53EA\u5199\u4E00\u6761\u8FB9,\u51E0\u7C7B\u540C\u65F6\u6210\u7ACB\u65F6\u53D6\u6700\u5177\u4F53\u7684\u90A3\u4E00\u7C7B(correct > verify > use)\u3002
+
+**\u8FB9\u4E0A\u4E0D\u5199\u6CF3\u9053 \u2014\u2014 \u5F52\u5C5E\u7531\u7ED3\u7B97\u5224\u5B9A\u3002** \u4E00\u4E2A turn \u81F3\u591A 20 \u6761\u51FA\u8FB9\u300120 \u6761\u5165\u8FB9\u3002
 
 **tags \u4ECE\u5F53\u524D\u4EFB\u52A1\u7684 tag \u4E0E\u4EFB\u52A1\u5185\u5DF2\u58F0\u660E\u7684\u6CF3\u9053\u91CC\u9009,\u6CA1\u6709\u5408\u9002\u7684\u5C31\u7559\u7A7A\u3002** \u5F52\u4EFB\u52A1\u4E0E\u5F52\u6CF3\u9053\u662F\u540C\u4E00\u6761\u89C4\u5219\u7684\u4E24\u7EA7,\u4E0D\u662F\u4E24\u4EF6\u4E8B:\u5408\u9002\u5C31\u5199,\u4E0D\u5408\u9002\u5C31\u4E0D\u5199\u3002\u7559\u7A7A\u662F\u5E38\u6001,\u4E0D\u662F\u5931\u8D25\u3002
 
@@ -20617,9 +20621,14 @@ function renderImpressionTeaching() {
     'SUPERSESSION: joining a dead path to the work that killed it with "then",',
     '"later" or a bare semicolon reads as chronology, and was measured reading',
     "exactly that way \u2014 five of five readers took the dead path for live",
-    "frontier. Your own OVERRIDE edges are the mechanical source of truth for",
-    "what a later decision killed; the losing side of one may never sit in a live",
-    "clause without its marker.",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3): "your own" was true only while
+    // settlement was the sole edge writer. `computeAnchorInvalidations`
+    // (`note-settlement-impressions.ts`) has always scoped by WRITABLE TURN,
+    // never by provenance, so a `correct/full` the main agent wrote on a turn
+    // in this window counts exactly as much — and now such rows exist.
+    "frontier. The window's CORRECT/FULL edges are the mechanical source of",
+    "truth for what a later decision killed, whoever wrote them; the losing",
+    "side of one may never sit in a live clause without its marker.",
     "",
     "The opposite repair is also wrong, and it is the one this form falls into:",
     "DELETING the history so only live work remains buys the reader's clarity by",
@@ -20656,8 +20665,10 @@ function renderImpressionTeaching() {
     "only: the lines are prefix-coupled, and a partial patch leaves a half-new",
     "state.",
     "",
-    "One thing is not a judgment call: an anchor your own edges CORRECTED in",
-    "FULL this window forces you to revise or delete the sentence that rests on",
+    // TICKET 05 again: the same provenance-blind reading. The refusal fires
+    // on any `correct/full` edge whose CITER is in the writable set.
+    "One thing is not a judgment call: an anchor CORRECTED in",
+    "FULL by any edge in this window forces you to revise or delete the sentence that rests on",
     "it. A lane whose anchors you fully corrected may not be retained. A",
     "`correct` with coverage `partial` is a nudge \u2014 reread the sentence;",
     "nothing is mechanically required.",
@@ -20799,10 +20810,18 @@ function renderNoteSettlementPrompt(context, writableSet, worklist, impressionAd
     // prompt that licenses in its task frame what its authority paragraph
     // and its tools refuse teaches the run to spend its context on work that
     // can only end in a parameter error.
-    "You are the HINDSIGHT pass over this window. Write the EDGES between the",
-    "turns in your writable set: you can see how each turn's claims actually",
-    "turned out, which decision a later turn overturned and which arc a turn",
-    "belongs to \u2014 none of which the writing side could know at the time. The",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3/D6): the writing side records what
+    // it used, corrected or verified as it goes, so this pass no longer
+    // ORIGINATES the window's edges — it DECLARES, FILLS and REVIEWS. Only
+    // the frame sentence changes here; ticket 06 rewrites the procedure and
+    // the duties around it.
+    "You are the HINDSIGHT pass over this window. Each turn's writer already",
+    "recorded the edges it knew about; your work is to DECLARE the lane side",
+    "of an edge whose endpoint sits in several lanes, FILL the edges that were",
+    "missed, and REVIEW what stands: you can see how each turn's claims",
+    "actually turned out, which decision a later turn overturned and which arc",
+    "a turn belongs to \u2014 none of which the writing side could know at the",
+    "time. The",
     "notes and types themselves are already audited; a backfill window's are",
     "as freshly written as an ordinary one's, because stage 1 has just been",
     "over every turn here either way. What differs is only how much edge work",
@@ -21623,8 +21642,15 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "which lines need a lane that does not exist yet, and which lines have",
     "nowhere legal to live at all.",
     "",
+    // MAIN-AGENT-EDGES TICKET 05 (spec D3/D6): same revision as the staged
+    // stage-2 prompt's frame — the writing side records what it used,
+    // corrected or verified as it goes, so this pass DECLARES, FILLS and
+    // REVIEWS rather than originating. Frame sentence only; ticket 06 owns
+    // the procedure and the duties.
     "EDGE PASS (after `finalize` succeeds) \u2014 the HINDSIGHT question the topic",
-    "pass cannot ask: write the EDGES between the turns in your writable set.",
+    "pass cannot ask. Each turn's writer already recorded the edges it knew",
+    "about; you DECLARE the lane side of an edge whose endpoint sits in several",
+    "lanes, FILL the edges that were missed, and REVIEW what stands.",
     "You can see how each turn's claims actually turned out, which decision a",
     "later turn overturned, and which arc a turn belongs to \u2014 none of which the",
     "writing side could know at the time. Driven by the worklist `finalize`",

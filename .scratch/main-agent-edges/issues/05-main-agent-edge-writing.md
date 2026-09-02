@@ -4,7 +4,7 @@
 
 **Blocked by:** 03.
 
-**Status:** LANDED (tsc 0; 4800 pass / 0 fail / 267 files, +6 net accounted; `npm run build`, stale-bundle and release-artifacts guards green; 8 mutation probes RED and md5-restored). Peer implementation review requested.
+**Status:** LANDED (tsc 0; 4800 pass / 0 fail / 267 files, +6 net accounted; `npm run build`, stale-bundle and release-artifacts guards green; 8 mutation probes RED and md5-restored). Peer implementation review requested. **VERIFIED S15069/T2439 at cd2d67cf (merged 2040b84f, no conflicts)**: tsc 0, 4729/0/267 (+6), guards clean; `边由结算书写` gone from the rubric (0 hits), the new sentence present. My probes (real mutations): the one-edge-per-pair clause dropped from the rubric → RED (2, incl. the byte pin); the note description's "NEVER read as an edge" weakened → RED (1). Accepted deviation: the concepts-half sentence was changed to 「边由引用方这一轮写下,结算补漏与复核」 because it ships into the same SessionStart block as the new duty; the two stale stored-side clauses beside it (`边的两端各带一个泳道 tag…`, `…诚实的那个泳道位置上…`) are named for ticket 07/06 adjudication. Settlement-prompt hunks (four, named) left for ticket 06 to absorb. One transient unreproduced 4799/1 run reported honestly by the worker.
 
 - [x] Rubric sentences pinned; a mutation that drops the duty is red; the settlement teaching's "边由结算书写" sentence and its relatives revised to the new division (settlement declares, fills, reviews).
 

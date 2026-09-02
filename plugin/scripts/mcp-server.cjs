@@ -12751,7 +12751,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtkbpyoe" : "dev";
+    BUILD_ID = true ? "0.29.0-mtkc1tyk" : "dev";
   }
 });
 
@@ -40958,13 +40958,26 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // lane-model-v12 ticket 08 read that ruling's "边整块归结算" as licence to
   // DELETE the seven relation parameters and their `retract…` mirrors from
   // this schema. The ruling's own words say the opposite — "工具上保留这些
-  // 能力" ("the tools KEEP these capabilities") — so this ticket restores the
-  // parameters at the capability they had before. What the ruling actually
-  // narrows is GUIDANCE, not capability: the description below still teaches
-  // only the common path (five fields), states that an edge is normally
-  // settlement's hindsight call, and never claims the parameters are
-  // unavailable — they simply are not the routine tool.
-  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool ordinarily writes five fields \u2014 title, content, insight, type, tags. Edges (correct/verify/use and their retract\u2026 mirrors) are settlement's whole business normally \u2014 a hindsight judgment over the finished window \u2014 so you will rarely need them; the parameters stay here for when you do. A prose `S15069/T332` still records that this turn REFERS to that one; it states no relation.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
+  // 能力" ("the tools KEEP these capabilities") — so that ticket restored the
+  // parameters at the capability they had before, while the GUIDANCE still
+  // sent a caller away from them.
+  //
+  // MAIN-AGENT-EDGES TICKET 05 (spec D3) retires that guidance too. Edge
+  // writing is the main agent's again — production measured settlement's
+  // hindsight edges citing the immediately previous turn 47.9% of the time
+  // against the main agent era's 37.7%, so the hindsight the old sentence
+  // sold was buying no range — and settlement's pass becomes declare / fill /
+  // review. The description below therefore says the OPPOSITE of what it said
+  // between those two tickets: six things, edges routine.
+  //
+  // AND THE PROSE FORM IS NOT A GRAPH MECHANISM. Ticket 03 left the effective
+  // citation reader parsing the inline `[T<dbid>]` grammar alone, so a
+  // qualified `S<n>/T<m>` in prose reaches no reader that builds edges. The
+  // sentence that used to hedge ("it states no relation") now says plainly
+  // that prose is for a human reader and an edge is the graph — the
+  // distinction a caller would otherwise resolve by writing prose and
+  // believing it counted.
+  note: "Write or correct a turn's note. `turn` is `S<session>/T<prompt>`: the injected \"mnemo current turn\" line and the backlog-relief block are the ONLY sources of a note address \u2014 never recall one from memory, never invent one. Timing: (1) note only FINISHED turns, never the one in progress; (2) a batch of note/skip calls alone opens when backlog relief appears, or to fix a note already written \u2014 never just to write one turn's note early; (3) a batch opens a turn, never ends one \u2014 only text after the last tool call renders, so a trailing note call eats the reply before it.\nskip: true with `turn` alone, when a future retriever would find nothing unique \u2014 check: deleting it costs no decision, progress, or coherence. Content gone and not recovered is skipped, never invented. Never skip a user decision, correction, veto, or any turn with a conclusion, rejected option, or lesson.\nCite turns only as S15069/T332, ids seen in injected context; never include <private> content.\nThis tool writes SIX things \u2014 title, content, insight, type, tags, and this turn's EDGES. correct/verify/use (with their retract\u2026 mirrors) are ROUTINE here: name the earlier turns this turn used, corrected or verified. Settlement no longer originates them \u2014 it declares an ambiguous lane side, fills what you missed and reviews. A prose `S15069/T332` is a pointer for a human reader: it is NEVER read as an edge, so a turn you built on needs an entry above.\nWhat a field should SAY is the Memory Rubric's (SessionStart); this call enforces address shape, the tag vocabulary and your read grant. Tool-call markup (`<parameter`, `<invoke`, \u2026) in a field is rejected, nothing stored. Every field is written in English. A first note for a turn needs both title and content. Every parameter below carries its own contract.",
   // ticket 02 (ADR-0001/0002/0005): `remember` is the segment's write surface
   // — 记住 (semantic, cross-session), sibling to `note`'s 记录 (episodic,
   // per-turn). Revives the retired 0.x tool name, now scoped to segments only.
