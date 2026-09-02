@@ -11,7 +11,7 @@ import { insertLane } from "../../src/db/lanes";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
-import { laneToken } from "../../src/shared/lane-interpretation";
+import { DEFAULT_SEGMENT, laneToken } from "../../src/shared/lane-interpretation";
 import { interimLegacyRelation } from "../../src/shared/relation-class";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 import {
@@ -42,7 +42,7 @@ import {
   type ConsoleApiResult,
   type ConsoleRequestContext,
 } from "../../src/worker/console-api";
-import { laneEdge } from "../support/lane-edge-fixtures";
+import { laneEdge, resolveLaneEdges } from "../support/lane-edge-fixtures";
 
 /**
  * The `/api/console/*` route handlers (memory-console spec API Contract;
@@ -107,8 +107,21 @@ describe("toConsoleApiResponse", () => {
 
 // --------------------------------------------------------- fake reader ----
 
+/**
+ * A hand-built lane-check run, as the fixtures below WRITE it: its edges are
+ * `laneEdge`'s input (a `tags` shorthand or explicit `tailTag`/`headTag`), not
+ * the run's real `LaneCheckerEdgeInput` — `makeFakeReader` normalizes and
+ * resolves them on the way in (see its `runLaneCheck` seam).
+ */
+type FakeLaneCheckRun = Omit<ConsoleLaneCheckRun, "edges"> & {
+  edges: readonly (Parameters<typeof laneEdge>[0] & { relationClass?: string; relationCoverage?: string })[];
+};
+type FakeReaderOverrides = Omit<Partial<ConsoleReader>, "runLaneCheck"> & {
+  runLaneCheck?: (scope: Parameters<ConsoleReader["runLaneCheck"]>[0]) => FakeLaneCheckRun;
+};
+
 /** Every method throws by default — a test that hits an unstubbed method fails loudly rather than silently returning `undefined`. */
-function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
+function makeFakeReader(overrides: FakeReaderOverrides = {}): ConsoleReader {
   const unimplemented = (name: string) => () => {
     throw new Error(`fake reader: ${name} not stubbed for this test`);
   };
@@ -128,10 +141,27 @@ function makeFakeReader(overrides: Partial<ConsoleReader> = {}): ConsoleReader {
     // bun strips types rather than checking them, so nothing else would catch
     // it. A fixture that sets the sides EXPLICITLY (a cross-lane edge) keeps
     // exactly what it set.
+    //
+    // ... and then RESOLVED (main-agent-edges ticket 02b): the run's edge
+    // shape is `LaneCheckerEdgeInput`, whose per-side outcome the payload
+    // reads with no tag fallback. The endpoint facts come from the fake run's
+    // OWN `result.lanes` — the membership the fixture already states, per
+    // `(segment, tag)` — projected through the real resolver, so a fixture
+    // cannot assert an outcome its own lanes contradict.
     runLaneCheck: overrides.runLaneCheck
       ? (scope) => {
           const run = overrides.runLaneCheck!(scope);
-          return { ...run, edges: run.edges.map((edge) => laneEdge(edge)) };
+          const turns = run.turns.map((turn) => ({
+            ...turn,
+            laneTags: run.result.lanes
+              .filter(
+                (lane) =>
+                  lane.key.segment === (turn.segment ?? DEFAULT_SEGMENT) &&
+                  lane.members.some((member) => member.id === turn.id),
+              )
+              .map((lane) => lane.key.tag),
+          }));
+          return { ...run, edges: resolveLaneEdges(turns, run.edges.map((edge) => laneEdge(edge))) };
         }
       : unimplemented("runLaneCheck"),
     loadTurnDisplayFields: overrides.loadTurnDisplayFields ?? unimplemented("loadTurnDisplayFields"),
@@ -156,7 +186,7 @@ const EMPTY_VOCABULARY_CONFORMANCE = {
   outOfVocabularyEdges: { count: 0, entries: [] },
 } as const;
 
-function emptyLaneCheckRun(overrides: Partial<ConsoleLaneCheckRun> = {}): ConsoleLaneCheckRun {
+function emptyLaneCheckRun(overrides: Partial<FakeLaneCheckRun> = {}): FakeLaneCheckRun {
   return {
     result: {
       lanes: [],
@@ -807,7 +837,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
   // T1 dead): deterministic enough to pin every additive field's exact
   // value, not just "at least one is truthy" (the big fixture test's own
   // weaker style, kept for the single-source pin's own different purpose).
-  function twoTurnLaneRun(): ConsoleLaneCheckRun {
+  function twoTurnLaneRun(): FakeLaneCheckRun {
     return emptyLaneCheckRun({
       // `segment: "E1"` on both turns matches the fake lane's own
       // `key.segment` below — in a REAL `runLaneCheck` result this is always
@@ -969,11 +999,14 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     expect(body.turns[0].laneMemberships).toEqual([]);
   });
 
-  test("an attributed edge carries the lane payload's own token on BOTH sides; an unattributed edge carries null lane and null tag on both, with `none` as the reason", () => {
+  test("a declared edge carries the lane payload's own token on BOTH sides; an undeclared edge between the lane's members DERIVES it; an undeclared side on a lane-less turn is null lane, null tag, `none`", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => ({
         ...twoTurnLaneRun(),
+        // A third turn in NO lane (absent from the run's `lanes`), so one
+        // undeclared side has nothing to derive.
+        turns: [...twoTurnLaneRun().turns, { id: 3, type: ["design"], order: [0, 3], segment: "E1" }],
         edges: [
           {
             citingId: 2,
@@ -991,19 +1024,28 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
             relationCoverage: "",
             tags: [],
           },
+          {
+            citingId: 3,
+            citedId: 1,
+            relation: "verifies",
+            relationClass: "verify",
+            relationCoverage: "",
+            tags: [],
+          },
         ],
       }),
       loadTurnDisplayFields: () => new Map(),
     });
-    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
+    const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=3"), CTX);
     const body = result.body as any;
     const laneToken_: string = body.lanes[0].token;
     const settled = body.edges.find((e: any) => e.relationClass === "correct");
-    const unsettled = body.edges.find((e: any) => e.relationClass === "use");
+    const derived = body.edges.find((e: any) => e.relationClass === "use");
+    const laneless = body.edges.find((e: any) => e.relationClass === "verify");
     // Class and coverage are two SEPARATE fields — never one `correct(full)`
     // token the shell would have to split apart to reach either channel.
     expect(settled.relationCoverage).toBe("full");
-    expect(unsettled.relationCoverage).toBe("");
+    expect(derived.relationCoverage).toBe("");
     expect(settled.tail).toEqual({ lane: laneToken_, tag: "focus", how: "declared" });
     expect(settled.head).toEqual({ lane: laneToken_, tag: "focus", how: "declared" });
     // The retired fields must not come back under their old names.
@@ -1014,8 +1056,14 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     expect("headTag" in settled).toBe(false);
     expect("tailLaneToken" in settled).toBe(false);
     expect("headLaneToken" in settled).toBe(false);
-    expect(unsettled.tail).toEqual({ lane: null, tag: null, how: "none" });
-    expect(unsettled.head).toEqual({ lane: null, tag: null, how: "none" });
+    // Both endpoints sit in {focus} alone: each undeclared side derives it
+    // (main-agent-edges D2), and the payload says so — the SAME token, a
+    // different `how`.
+    expect(derived.tail).toEqual({ lane: laneToken_, tag: "focus", how: "derived" });
+    expect(derived.head).toEqual({ lane: laneToken_, tag: "focus", how: "derived" });
+    // T3 is in no lane: its side has nothing to derive and names none.
+    expect(laneless.tail).toEqual({ lane: null, tag: null, how: "none" });
+    expect(laneless.head).toEqual({ lane: laneToken_, tag: "focus", how: "derived" });
   });
 
   // lane-model-v12 spec, problem 2: "一条从 lane A 指向 lane B 的边只能写成
@@ -1108,7 +1156,7 @@ describe("GET /api/console/graph — ticket 11's own pinned failure case (peer):
   // terminus of all three lanes and this test would have no per-lane contrast
   // left to make. X's own re-declaration is how a terminus legitimately leaves
   // R in exactly one lane, which is the fact the payload must keep per-lane.
-  function threeLaneRun(): ConsoleLaneCheckRun {
+  function threeLaneRun(): FakeLaneCheckRun {
     return emptyLaneCheckRun({
       turns: [
         { id: 1, type: ["design"], order: [0, 1], segment: "E1" },
@@ -2192,7 +2240,7 @@ describe("bound constants (verbatim)", () => {
 // checker-load.ts `segmentKeyFor`), which is what these fixtures use — not
 // the "E1" shorthand the older hand-built fixtures above happen to carry.
 describe("GET /api/console/graph — turn address form", () => {
-  function threeTurnRun(): ConsoleLaneCheckRun {
+  function threeTurnRun(): FakeLaneCheckRun {
     return emptyLaneCheckRun({
       turns: [
         { id: 10, type: ["design"], order: [1, 4], segment: "7" },

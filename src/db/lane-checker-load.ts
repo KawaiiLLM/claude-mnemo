@@ -1,6 +1,11 @@
 import type { Database } from "bun:sqlite";
 
-import type { LaneCheckerTurnInput, LaneMemberTotal, LaneSegmentFacts } from "../shared/lane-checker";
+import type {
+  LaneCheckerEdgeInput,
+  LaneCheckerTurnInput,
+  LaneMemberTotal,
+  LaneSegmentFacts,
+} from "../shared/lane-checker";
 import {
   canonicalTagSet,
   DEFAULT_SEGMENT,
@@ -338,7 +343,7 @@ export interface LaneCheckProjection {
    * stance below is actually protecting.
    */
   turns: LaneCheckerTurnInput[];
-  edges: LaneEdgeInput[];
+  edges: LaneCheckerEdgeInput[];
   /** The lanes this projection widened to cover — informational only, never fed back into the core (the core re-derives lanes from `turns`/`edges` itself). */
   involvedLaneKeys: LaneKey[];
   /**
@@ -351,7 +356,7 @@ export interface LaneCheckProjection {
    * and merging an out-of-vocabulary relation into the shared `edges` array
    * would have widened THAT caller's graph too, not just the checker's own.
    */
-  outOfVocabularyEdges: LaneEdgeInput[];
+  outOfVocabularyEdges: LaneCheckerEdgeInput[];
   /**
    * D9 proliferation (lane-declaration ticket 09, peer P1-11) — THE one place
    * the segment-wide counts come from. Per REAL segment this scope asked
@@ -1083,7 +1088,7 @@ function parseTurnTags(raw: string | null): readonly string[] | undefined {
 }
 
 /** Row -> the core's input shape. The two side columns are the whole lane surface since ticket 09 retired the merged set (spec D1 — `''` on a side means UNSETTLED, never a lane named `''`). */
-function toEdgeInput(row: EdgeLiteRow, resolver: ProjectionSideResolver): LaneEdgeInput {
+function toEdgeInput(row: EdgeLiteRow, resolver: ProjectionSideResolver): LaneCheckerEdgeInput {
   const tail = resolver.resolve(row, "tail");
   const head = resolver.resolve(row, "head");
   return {
@@ -1583,7 +1588,7 @@ export function loadLaneCheckScope(db: Database, scope: LaneCheckScope): LaneChe
     .sort((a, b) => a.id - b.id);
 
   sideResolver.prime([...edgeMap.values()].flatMap((row) => [row.citingId, row.citedId]));
-  const edges: LaneEdgeInput[] = [...edgeMap.values()]
+  const edges: LaneCheckerEdgeInput[] = [...edgeMap.values()]
     .map((row) => toEdgeInput(row, sideResolver))
     .sort((a, b) => {
       if (a.citingId !== b.citingId) return a.citingId - b.citingId;

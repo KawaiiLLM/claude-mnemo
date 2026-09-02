@@ -1,6 +1,7 @@
 import type { LaneCheckScope } from "../db/lane-checker-load";
 import { DEFAULT_SEGMENT, laneToken } from "../shared/lane-interpretation";
-import type { LaneEdgeInput, LaneSideOutcome } from "../shared/lane-interpretation";
+import type { LaneSideOutcome } from "../shared/lane-interpretation";
+import type { LaneCheckerEdgeInput } from "../shared/lane-checker";
 import type {
   LaneComponentReport,
   LaneStatsReport,
@@ -1612,19 +1613,17 @@ export function handleGraphRoute(
   // not the stored declaration), HOW it got there (`tailOutcome`/
   // `headOutcome`), and the endpoint whose SEGMENT qualifies that lane.
   //
-  // The outcome is what makes `lane: null` legible. A loader that supplied no
-  // outcome (a pure fixture — `LaneEdgeInput` types both as optional) is read
-  // exactly as it always meant: a tag present is a `declared` side, a tag
-  // absent is `none`. That fallback keeps every pre-resolution fixture
-  // rendering what it rendered before, and no real DB path takes it.
+  // The outcome is what makes `lane: null` legible. It is REQUIRED on the
+  // run's edge shape (`LaneCheckerEdgeInput`): the tag-present-means-declared
+  // fallback a pure fixture used to be read through is gone (main-agent-edges
+  // ticket 02b), so a fixture resolves its edges before handing them here.
   const edgeSide = (
-    edge: LaneEdgeInput,
+    edge: LaneCheckerEdgeInput,
     side: "tail" | "head",
   ): ConsoleGraphEdgeSide => {
     const tag = side === "tail" ? edge.tailTag : edge.headTag;
     const turnId = side === "tail" ? edge.citingId : edge.citedId;
-    const supplied = side === "tail" ? edge.tailOutcome : edge.headOutcome;
-    const how: LaneSideOutcome = supplied ?? (tag === "" ? "none" : "declared");
+    const how: LaneSideOutcome = side === "tail" ? edge.tailOutcome : edge.headOutcome;
     // A lane is named ONLY by an attributing outcome. `ambiguous`/`invalid`
     // name none by construction (the resolver leaves their lane null), and
     // reading the tag anyway would let an `invalid` declaration re-enter the

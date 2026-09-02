@@ -11,11 +11,14 @@ import {
   type LaneTurnInput,
 } from "../../src/shared/lane-checker";
 import { renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
-import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures";
+import { laneEdge, resolveLaneEdges, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures";
 
 /**
  * `checkLanes`, with every fixture turn first given the lane tags ITS OWN
- * SIDE of the fixture's edges names (`withEdgeClaimedLaneTags`).
+ * SIDE of the fixture's edges names (`withEdgeClaimedLaneTags`), and every
+ * fixture edge then RESOLVED against those turns (`resolveLaneEdges`) the way
+ * the DB loader resolves a projection's — because the checker takes only
+ * resolved edges (main-agent-edges ticket 02b deleted its blank-tag fallback).
  *
  * Membership is a NODE fact since lane-model-v12 ticket 10 — a turn belongs
  * to the lanes its own tags name, never to the lanes its edges name — so a
@@ -26,17 +29,25 @@ import { laneEdge, withEdgeClaimedLaneTags } from "../support/lane-edge-fixtures
  * implied. A test whose subject IS membership states `laneTags` on its turns
  * explicitly and passes them straight through; the ticket's own
  * counter-example lives in `tests/shared/lane-interpretation.test.ts`.
+ *
+ * The fixture's edge tags are STORED declarations. What that means for the
+ * error classes, under resolution: a stored tag the endpoint carries is
+ * `declared`; one it does not carry is `invalid` (E4); a blank side derives
+ * the lane of a one-lane endpoint, is `none` on a lane-less one, and is
+ * `ambiguous` — E6 — only on an endpoint in TWO or more lanes, which a fixture
+ * states with `laneTags`.
  */
 function checkLanes(
   turns: readonly LaneCheckerTurnInput[],
   edges: readonly LaneEdgeInput[],
-  knownOutOfVocabularyEdges?: readonly LaneEdgeInput[],
+  knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
   segmentFacts?: Parameters<typeof runCheckLanes>[3],
 ): ReturnType<typeof runCheckLanes> {
+  const projected = withEdgeClaimedLaneTags(turns, edges);
   return runCheckLanes(
-    withEdgeClaimedLaneTags(turns, edges),
-    edges,
-    knownOutOfVocabularyEdges,
+    projected,
+    resolveLaneEdges(projected, edges),
+    resolveLaneEdges(projected, knownOutOfVocabularyEdges),
     segmentFacts,
   );
 }
@@ -217,25 +228,43 @@ describe("golden fixture — S15069 T900-1001 lane simulation (12 lanes, hand-ju
   // and its fact is a warning now.) Any discrepancy on E3/E4 here is a
   // STOP-AND-REPORT, never a golden adjustment.
   //
-  // TICKET 20 ADDS THE ONE CLASS THIS CORPUS DOES TRIP: E6, the DRAFT edge.
+  // TICKET 20 ADDED THE ONE CLASS THIS CORPUS DOES TRIP: E6, the DRAFT edge.
   // 77 of its 125 edges carry no lane on either side — this is a snapshot of
   // production taken while the tag mandate was still being withdrawn, so an
-  // unattributed edge was the ordinary state — and every one of them is now a
-  // row settlement owes a decision. That number is a MEASUREMENT of the corpus,
-  // not a threshold: it is exactly the count of fixture edges with an empty
-  // side, asserted from the fixture itself right below so the two can never
-  // drift apart into a hand-maintained constant.
-  test("the golden fixture's only errors are E6 DRAFT edges — every settled row conforms", () => {
+  // unattributed edge was the ordinary state. Under the pre-resolution
+  // predicate every one of them was a finding. main-agent-edges D6 NARROWED
+  // E6 to the `ambiguous` side — a blank side whose endpoint sits in two or
+  // more lanes — so a blank side on a one-lane endpoint DERIVES that lane and
+  // a blank side on a lane-less endpoint is legal, and neither is a finding.
+  // On this corpus, with membership projected from each turn's own edges,
+  // that leaves ONE: T902's `consume` of T900, whose head sits on T900 — the
+  // corpus's one endpoint in several lanes. The expected list is computed
+  // from the fixture's own endpoint facts right below (an independent
+  // reading of the same rule), so the two can never drift apart into a
+  // hand-maintained constant.
+  test("the golden fixture's only errors are E6 DRAFT edges on a MULTI-LANE endpoint — every settled row conforms, and the 76 other drafts resolve", () => {
     const draftEdges = fixtureEdges.filter((e) => e.tailTag === "" || e.headTag === "");
     expect(draftEdges).toHaveLength(77);
+    // The rule, restated from the endpoint facts alone: a blank side is a
+    // finding iff its endpoint's projected lane set has two or more entries.
+    const lanesOf = new Map(
+      withEdgeClaimedLaneTags(fixtureTurns, fixtureEdges).map((t) => [t.id, t.laneTags ?? []]),
+    );
+    const expected = draftEdges.flatMap((e) => {
+      const sides: ("tail" | "head")[] = [];
+      if (e.tailTag === "" && lanesOf.get(e.citingId)!.length >= 2) sides.push("tail");
+      if (e.headTag === "" && lanesOf.get(e.citedId)!.length >= 2) sides.push("head");
+      return sides.length === 0 ? [] : [{ citingId: e.citingId, citedId: e.citedId, sides }];
+    });
+    expect(expected).toEqual([{ citingId: 902, citedId: 900, sides: ["head"] }]);
     expect([...new Set(result.errors.map((e) => e.class))]).toEqual(["E6"]);
-    expect(result.errors).toHaveLength(draftEdges.length);
-    // Every draft on this corpus is FULLY unsettled: the half-settled shape
-    // ticket 08 refused at the write gate could not be written when the
-    // snapshot was taken, so E6's two-sides arm is what the corpus exercises.
-    for (const error of result.errors) {
-      expect(error.class === "E6" && error.unsettledSides).toEqual(["tail", "head"]);
-    }
+    expect(
+      result.errors.map((e) => ({
+        citingId: e.class === "E6" ? e.citingId : null,
+        citedId: e.class === "E6" ? e.citedId : null,
+        sides: e.class === "E6" ? e.unsettledSides : null,
+      })),
+    ).toEqual(expected);
     // Not vacuous: the fixture really does carry attributed edges and turn
     // tags for E4 to judge, and E4 stays silent on all of them.
     expect(fixtureEdges.some((e) => e.tailTag !== "" || e.headTag !== "")).toBe(true);
@@ -390,12 +419,23 @@ describe("report 3 — the three coupling groups, exact on a three-lane fixture"
     }
   });
 
-  test("an UNSETTLED edge between two lanes' members is not coupling — it is settlement's debt", () => {
-    // The same T5 -> T2 link with neither side settled. It couples nothing
-    // (report 3 stays zero) and shows up as attribution debt instead.
-    const unsettled = checkLanes(turns, [...edges.slice(0, 3), edge(5, "grounds", 2, [])]);
-    expect(couplingCounts(unsettled, "a")).toEqual([0, 0, 0]);
-    expect(couplingCounts(unsettled, "c")).toEqual([0, 0, 0]);
+  test("an UNDECLARED edge between two lanes' members DERIVES the crossing; one whose endpoint is in two lanes couples nothing and is settlement's debt", () => {
+    // The same T5 -> T2 link with neither side declared. T5 sits in {c}
+    // alone and T2 in {a} alone, so each side derives its endpoint's one
+    // lane (main-agent-edges D2) and the row IS the c->a crossing — the
+    // same count the declared form above produced, with no writer saying so.
+    const derived = checkLanes(turns, [...edges.slice(0, 3), edge(5, "grounds", 2, [])]);
+    expect(couplingCounts(derived, "a")).toEqual([0, 0, 1]);
+    expect(couplingCounts(derived, "c")).toEqual([0, 0, 1]);
+    // Put T2 into a second lane and the head side has nothing to derive: it
+    // resolves `ambiguous`, couples nothing, and is E6 instead.
+    const ambiguous = checkLanes(
+      turns.map((turn) => (turn.id === 2 ? { ...turn, laneTags: ["z"] } : turn)),
+      [...edges.slice(0, 3), edge(5, "grounds", 2, [])],
+    );
+    expect(couplingCounts(ambiguous, "a")).toEqual([0, 0, 0]);
+    expect(couplingCounts(ambiguous, "c")).toEqual([0, 0, 0]);
+    expect(ambiguous.errors.map((e) => `${e.class}:${e.anchorId}`)).toEqual(["E6:5"]);
   });
 
   test("the same literal tag in TWO segments is two lanes, so an edge between them is a crossing", () => {
@@ -467,14 +507,22 @@ describe("report 2 — connectivity over the lane's OWN claiming edges", () => {
   // a GLOBAL, tag-agnostic stance+consume+grounds graph, so an UNTAGGED edge
   // between two members counted as connectivity. It cannot now: the domain is
   // "two sides both name this lane", and an unsettled edge names nothing.
-  test("an UNSETTLED edge between two members no longer connects them", () => {
-    const turns = [
+  test("an UNDECLARED edge between two members connects them only when both sides RESOLVE to the lane", () => {
+    // Both members in {u} alone: each blank side derives u (main-agent-edges
+    // D2), so the undeclared edge is the lane's own and connects them.
+    const unique = [
       { id: 1, type: ["design"], laneTags: ["u"] },
       { id: 2, type: ["design"], laneTags: ["u"] },
     ];
-    expect(findComponent(checkLanes(turns, [edge(2, "extends", 1, [])]), "u")?.componentCount).toBe(2);
-    // The SAME edge, settled to the lane on both sides, connects them.
-    expect(findComponent(checkLanes(turns, [edge(2, "extends", 1, ["u"])]), "u")?.componentCount).toBe(1);
+    expect(findComponent(checkLanes(unique, [edge(2, "extends", 1, [])]), "u")?.componentCount).toBe(1);
+    // Both members in {u} AND {v}: a blank side is `ambiguous`, names no
+    // lane, and the edge connects nothing — until it is declared.
+    const shared = [
+      { id: 1, type: ["design"], laneTags: ["u", "v"] },
+      { id: 2, type: ["design"], laneTags: ["u", "v"] },
+    ];
+    expect(findComponent(checkLanes(shared, [edge(2, "extends", 1, [])]), "u")?.componentCount).toBe(2);
+    expect(findComponent(checkLanes(shared, [edge(2, "extends", 1, ["u"])]), "u")?.componentCount).toBe(1);
   });
 
   // The other half of the retarget: `indexes` and `override` are IN the domain
@@ -842,7 +890,16 @@ describe("partial-input coverage", () => {
   test("a lane whose edges reach a turn missing from the input flags coverage partial", () => {
     const turns = [design(601)]; // 602 deliberately absent
     const edges = [edge(602, "extends", 601, ["w"]), edge(602, "indexes", 601, ["w"])];
-    const result = checkLanes(turns, edges);
+    // Resolved against BOTH endpoints' facts — the loader primes every edge
+    // endpoint's lane facts whether or not the turn is in the projection
+    // (`db/lane-checker-load.ts`), so 602's declared `w` is `declared`, not
+    // an unknown endpoint's `invalid` — while the checker itself sees only
+    // the one loaded turn.
+    const loaded = withEdgeClaimedLaneTags(turns, edges);
+    const result = runCheckLanes(
+      loaded,
+      resolveLaneEdges(withEdgeClaimedLaneTags([...turns, design(602)], edges), edges),
+    );
     const stats = findLaneStats(result, "w");
     // 602 is NOT a member: membership is the turn's own tags, and this
     // projection never loaded the turn that would have carried them.
@@ -883,12 +940,21 @@ describe("ticket 12 — an unsettled cross-phase edge joins no lane's own graph"
     edge(4, "indexes", 3, ["z"]),
   ];
 
-  test("an UNSETTLED verifies between {y} and {z} adds nothing to either lane's island", () => {
+  test("an UNDECLARED verifies between {y} and {z} adds nothing to either lane's island — it derives a z->y CROSSING", () => {
     const result = checkLanes(baseTurns, [...baseEdges, edge(4, "verifies", 1, [])]);
     expect(findComponent(result, "y")?.islands[0]?.memberIds).toEqual([1, 2]);
     expect(findComponent(result, "z")?.islands[0]?.memberIds).toEqual([3, 4]);
-    // …and it couples nothing either: an unsettled edge names no lane.
-    expect(couplingCounts(result, "y")).toEqual([0, 0, 0]);
+    // T4 sits in {z} alone and T1 in {y} alone, so each blank side derives
+    // its endpoint's lane (main-agent-edges D2): the row is a cross-lane
+    // `verify` edge, counted in report 3 and in no lane's own graph.
+    expect(couplingCounts(result, "y")).toEqual([0, 1, 0]);
+    // Only a side with nothing to derive names no lane: T4 in {z} AND {q}
+    // leaves the tail `ambiguous`, and then the row couples nothing.
+    const ambiguous = checkLanes(
+      baseTurns.map((turn) => (turn.id === 4 ? { ...turn, laneTags: ["q"] } : turn)),
+      [...baseEdges, edge(4, "verifies", 1, [])],
+    );
+    expect(couplingCounts(ambiguous, "y")).toEqual([0, 0, 0]);
   });
 
   test("the SAME verifies edge TAGGED {y} connects T4 into lane y's own island", () => {
@@ -1102,13 +1168,20 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
    * as measurements rather than as text:
    *
    *   - report 2's terminus line: 7 of 11 closed lanes are cited from outside.
-   *   - the attribution cluster: ONE 54-turn component. The cluster is defined
+   *   - the attribution cluster: ONE 36-turn component. The cluster is defined
    *     by unsettled EDGES now ("两侧 tag 为空串的边 … 结算自己的待办队列"), and
-   *     this corpus predates v12, so most of its edges are unsettled and they
-   *     form one large component. That is the honest picture of settlement's
-   *     backlog on pre-migration stock, not a defect of the rule: the model's
-   *     own completion criterion is zero unsettled edges, at which point the
-   *     warning falls silent entirely.
+   *     this corpus predates v12, so most of its edges are undeclared. Under
+   *     main-agent-edges D2 an undeclared side on a one-lane endpoint DERIVES
+   *     that lane, so the 54-turn component the pre-resolution reading saw
+   *     shrinks to the 36 turns whose edges still resolve to no lane on either
+   *     side, and one 5-turn component loses a member the same way. That is
+   *     the honest picture of settlement's backlog on pre-migration stock, not
+   *     a defect of the rule: the model's own completion criterion is zero
+   *     unresolved edges, at which point the warning falls silent entirely.
+   *   - report 3's counts: six lanes now show a `use` crossing. Each is an
+   *     undeclared row whose two endpoints sit in different one-lane
+   *     memberships, resolved by derivation into the cross-lane edge it always
+   *     was — invisible to every stored-side reader before resolution.
    */
   const WARNING_SIDE_BASELINE = [
     "## Report 2 -- connectivity over each lane's OWN edges (provisional lanes, 0-1 members, are not judged)",
@@ -1138,13 +1211,13 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     "  island@T950: T950,T951,T952,T953,T954,T955,T957,T958",
     "",
     "## Report 3 -- cross-lane coupling (counts only; no threshold and no verdict)",
-    "Lane default:{cadence} - cross-lane edges: correct=0  verify=0  use=0",
+    "Lane default:{cadence} - cross-lane edges: correct=0  verify=0  use=1",
     "Lane default:{contract-repair} - cross-lane edges: correct=0  verify=0  use=0",
-    "Lane default:{contract-verify} - cross-lane edges: correct=0  verify=0  use=0",
-    "Lane default:{ownership} - cross-lane edges: correct=0  verify=0  use=0",
-    "Lane default:{relation-vocabulary} - cross-lane edges: correct=0  verify=0  use=0",
+    "Lane default:{contract-verify} - cross-lane edges: correct=0  verify=0  use=2",
+    "Lane default:{ownership} - cross-lane edges: correct=0  verify=0  use=1",
+    "Lane default:{relation-vocabulary} - cross-lane edges: correct=0  verify=0  use=1",
     "Lane default:{rewind-marking} - cross-lane edges: correct=0  verify=0  use=0",
-    "Lane default:{segment-audit} - cross-lane edges: correct=0  verify=0  use=0",
+    "Lane default:{segment-audit} - cross-lane edges: correct=0  verify=0  use=1",
     "Lane default:{settlement-scope} - cross-lane edges: correct=0  verify=0  use=0",
     "Lane default:{spec-design} - cross-lane edges: correct=0  verify=0  use=0",
     "Lane default:{turn-edge-mechanism} - cross-lane edges: correct=0  verify=0  use=0",
@@ -1178,10 +1251,9 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     "(none)",
     "",
     "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
-    "3 unattributed cluster(s) of 4+ turns:",
-    "  54 turns joined by edges with no lane on either side: T900,T902,T903,T904,T905,T910,T911,T912,T929,T930,T931,T932,T933,T935,T936,T939,T940,T941,T942,T945 (showing first 20)",
-    "  4 turns joined by edges with no lane on either side: T922,T923,T924,T926",
-    "  5 turns joined by edges with no lane on either side: T990,T991,T993,T994,T995",
+    "2 unattributed cluster(s) of 4+ turns:",
+    "  36 turns joined by edges with no lane on either side: T900,T902,T903,T904,T905,T911,T930,T931,T932,T936,T942,T947,T948,T949,T959,T960,T961,T962,T963,T964 (showing first 20)",
+    "  4 turns joined by edges with no lane on either side: T991,T993,T994,T995",
     "(no task over its lane budget)",
     "",
     "## Stock warnings -- rows that take part in no report",
@@ -1200,14 +1272,17 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
     // Ticket 20: the block no longer leads with "(none)" on this corpus — its
-    // 77 draft edges are E6 instances. The TYPE half (E3) is still silent,
-    // which is what `vocabularyConformance` below pins directly.
+    // draft edges are E6 instances. main-agent-edges D6 narrowed E6 to the
+    // `ambiguous` side, and on this corpus that is ONE row's head (see the
+    // golden block's own error test for the derivation). The TYPE half (E3)
+    // is still silent, which is what `vocabularyConformance` below pins
+    // directly.
     expect(text.startsWith(
       "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains\n" +
-        "77 error(s)\n",
+        "1 error(s)\n",
     )).toBe(true);
     expect(text).toContain(
-      "  [E6] anchor T902 -- T902 --consume--> T900: DRAFT edge -- neither side names a lane",
+      "  [E6] anchor T902 -- T902 --consume--> T900: DRAFT edge -- the head side names no lane (the tail side is {})",
     );
     expect(text).not.toContain("[E3]");
     expect(text).not.toContain("[E4]");
@@ -1267,8 +1342,16 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
   // fired on the WORD (`extends`/`narrows` specifically, under the withdrawn
   // mandate) and its absence is what these two still pin — the class list must
   // never single out a word again.
+  /** A turn in TWO lanes — the only endpoint a blank side is `ambiguous` (E6) on. `tags` is the raw column, `laneTags` the resolved membership; the two agree, as on every legal row. */
+  const twoLaned = (id: number, type: string[] = ["design"]): LaneCheckerTurnInput => ({
+    id,
+    type,
+    tags: ["lane-a", "lane-b"],
+    laneTags: ["lane-a", "lane-b"],
+  });
+
   test("an untagged extends/narrows produces no WORD-specific error — the mandate's stock half is gone", () => {
-    const turns = [tagged(10, ["lane-a"]), tagged(11, ["lane-a"])];
+    const turns = [twoLaned(10), twoLaned(11)];
     expect(checkLanes(turns, [edge(11, "extends", 10, [])]).errors.map((e) => e.class)).toEqual(["E6"]);
     expect(checkLanes(turns, [edge(11, "narrows", 10, [])]).errors.map((e) => e.class)).toEqual(["E6"]);
     // Not vacuous: the same shapes with a tag REMOVED from an endpoint still
@@ -1280,7 +1363,7 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
   });
 
   test("no error class named E1 is ever produced, whatever the untagged shape", () => {
-    const turns = [tagged(20, []), tagged(21, [])];
+    const turns = [twoLaned(20), twoLaned(21)];
     for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies"]) {
       // Every word yields the SAME class — the shape one, never a word one.
       expect(checkLanes(turns, [edge(21, word, 20, [])]).errors.map((e) => e.class)).toEqual(["E6"]);
@@ -1433,14 +1516,21 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
     ).toEqual(["E4"]);
   });
 
-  // ---- E6 — a DRAFT edge (ticket 20) ----
+  // ---- E6 — a DRAFT edge (ticket 20), NARROWED to the `ambiguous` side
+  // (main-agent-edges spec D6) ----
   //
-  // THE MUTATION for the whole class: make `computeDraftEdgeErrors` return `[]`
-  // and every test in this block goes red (as does the commit-refusal test in
-  // `tests/worker/note-settlement-sdk-query.test.ts`).
+  // A blank side is a finding only where its endpoint sits in two or more
+  // lanes. Every fixture below that expects E6 therefore puts the blank side
+  // on a `twoLaned` turn; the three NOT-a-finding cases after them are the
+  // half that pins the narrowing itself.
+  //
+  // THE MUTATIONS for the class: make `computeDraftEdgeErrors` return `[]` and
+  // every finding case goes red (as does the commit-refusal test in
+  // `tests/worker/note-settlement-sdk-query.test.ts`); widen it back to
+  // "any blank side" and the NOT-a-finding cases go red.
 
-  test("E6 — a fully unsettled edge is an error naming BOTH sides, anchored at the citing turn", () => {
-    const result = checkLanes([tagged(500, []), tagged(501, [])], [edge(501, "consume", 500, [])]);
+  test("E6 — a fully unsettled edge between two multi-lane endpoints is an error naming BOTH sides, anchored at the citing turn", () => {
+    const result = checkLanes([twoLaned(500), twoLaned(501)], [edge(501, "consume", 500, [])]);
     expect(result.errors).toEqual([
       {
         class: "E6",
@@ -1458,18 +1548,41 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
     // The side is the whole finding: "settle this row" and "settle the other
     // half of this row" are different jobs, and a class that only said "draft"
     // would leave the reader to diff the two side values themselves.
-    const turns = [tagged(510, ["a"]), tagged(511, ["a"])];
+    const turns = [twoLaned(510), twoLaned(511)];
     const headOpen = checkLanes(turns, [
-      edge(511, "extends", 510, [], { tailTag: "a", headTag: "" }),
+      edge(511, "extends", 510, [], { tailTag: "lane-a", headTag: "" }),
     ]).errors[0]!;
     expect(headOpen.class === "E6" && headOpen.unsettledSides).toEqual(["head"]);
-    expect(headOpen.class === "E6" && headOpen.tags).toEqual(["a"]);
+    expect(headOpen.class === "E6" && headOpen.tags).toEqual(["lane-a"]);
 
     const tailOpen = checkLanes(turns, [
-      edge(511, "extends", 510, [], { tailTag: "", headTag: "a" }),
+      edge(511, "extends", 510, [], { tailTag: "", headTag: "lane-a" }),
     ]).errors[0]!;
     expect(tailOpen.class === "E6" && tailOpen.unsettledSides).toEqual(["tail"]);
-    expect(tailOpen.class === "E6" && tailOpen.tags).toEqual(["a"]);
+    expect(tailOpen.class === "E6" && tailOpen.tags).toEqual(["lane-a"]);
+  });
+
+  test("E6 — a blank side on a UNIQUE endpoint is NOT a finding: it derives the endpoint's one lane", () => {
+    // T520 in {a} alone. The blank tail derives a, the head is declared a,
+    // and the row is lane a's own edge — no error, and it counts.
+    const result = checkLanes(
+      [tagged(520, ["a"]), twoLaned(521)],
+      [edge(521, "extends", 520, [], { tailTag: "lane-a", headTag: "" })],
+    );
+    expect(result.errors).toEqual([]);
+    // The mirror: the blank side on the TWO-lane endpoint is the finding, and
+    // the unique endpoint's blank side still is not — per SIDE, in one row.
+    const mixed = checkLanes([tagged(520, ["a"]), twoLaned(521)], [edge(521, "extends", 520, [])]);
+    expect(mixed.errors.map((e) => e.class === "E6" && e.unsettledSides)).toEqual([["tail"]]);
+  });
+
+  test("E6 — a blank side on a LANE-LESS endpoint is NOT a finding: there is nothing to declare", () => {
+    const result = checkLanes([tagged(525, []), tagged(526, [])], [edge(526, "consume", 525, [])]);
+    expect(result.errors).toEqual([]);
+    // Same row, same words, one endpoint in two lanes: the finding appears on
+    // that side alone.
+    const oneSide = checkLanes([tagged(525, []), twoLaned(526)], [edge(526, "consume", 525, [])]);
+    expect(oneSide.errors.map((e) => e.class === "E6" && e.unsettledSides)).toEqual([["tail"]]);
   });
 
   test("E6 — a fully SETTLED edge is not a draft, whatever else is wrong with it", () => {
@@ -1483,7 +1596,7 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
   });
 
   test("E6 — every relation word alike; the class fires on the SHAPE, never on the word", () => {
-    const turns = [tagged(530, []), tagged(531, [])];
+    const turns = [twoLaned(530), twoLaned(531)];
     for (const word of ["override", "narrows", "extends", "indexes", "consume", "grounds", "verifies"]) {
       expect(
         checkLanes(turns, [edge(531, word, 530, [])]).errors.map((e) => e.class),
@@ -1495,7 +1608,7 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
   test("E6 — in-scope vs out-of-scope anchor variants", () => {
     // The gate's whole scoping rule, on the new class: a draft anchored outside
     // the writable set is another window's work.
-    const turns = [tagged(540, []), tagged(541, []), tagged(550, []), tagged(551, [])];
+    const turns = [twoLaned(540), twoLaned(541), twoLaned(550), twoLaned(551)];
     const writable = [550, 551];
     expect(anchoredIn(checkLanes(turns, [edge(541, "extends", 540, [])]).errors, writable)).toEqual([]);
     expect(
@@ -1515,18 +1628,21 @@ describe("errors E3/E4/E6 — detection and anchoring", () => {
   // as no crossing and adds no member. Every one of those is asserted here on a
   // HALF-settled edge, the shape that only became writable with this ticket.
   test("a DRAFT edge takes part in no lane computation — it is E6 and nothing else", () => {
+    // Every turn in {a} AND {b}, so a blank side has two lanes to choose
+    // between and resolves `ambiguous` — the draft shape. (On one-lane turns
+    // the same rows would DERIVE a and be the lane's own edges.)
     const turns: LaneCheckerTurnInput[] = [
-      { id: 570, type: ["design"], tags: ["a"], laneTags: ["a"] },
-      { id: 571, type: ["design"], tags: ["a"], laneTags: ["a"] },
-      { id: 572, type: ["design"], tags: ["a"], laneTags: ["a"] },
+      { id: 570, type: ["design"], tags: ["a", "b"], laneTags: ["a", "b"] },
+      { id: 571, type: ["design"], tags: ["a", "b"], laneTags: ["a", "b"] },
+      { id: 572, type: ["design"], tags: ["a", "b"], laneTags: ["a", "b"] },
     ];
-    const result = runCheckLanes(turns, [
+    const result = runCheckLanes(turns, resolveLaneEdges(turns, [
       // The lane's ONE real internal edge, plus a half-settled row between the
       // same two turns and a fully unsettled one reaching the third.
       edge(571, "extends", 570, ["a"]),
       edge(571, "consume", 570, [], { tailTag: "a", headTag: "" }),
       edge(572, "grounds", 571, []),
-    ]);
+    ]));
     const stats = findLaneStats(result, "a");
     // Attribution: only the settled row is the lane's own edge.
     expect(stats?.edgeCountsByRelation).toEqual({ use: 1 });
@@ -1621,6 +1737,18 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
     type: ["design"],
     tags,
   });
+  /**
+   * A turn in TWO lanes, its raw tags NOT loaded so an edge's own declared
+   * tag can still be claimed onto it. A blank side on such a turn resolves
+   * `ambiguous` (main-agent-edges D2) — the one outcome that is BOTH cluster
+   * debt here and error E6. On a one-lane turn the same blank side would
+   * derive the lane and be neither.
+   */
+  const t2 = (id: number): LaneCheckerTurnInput => ({
+    id,
+    type: ["design"],
+    laneTags: ["p", "q"],
+  });
   const clusters = (result: ReturnType<typeof checkLanes>) => result.unattributedClusters;
   const clusterSizes = (result: ReturnType<typeof checkLanes>) =>
     clusters(result).entries.map((cluster) => cluster.turnCount);
@@ -1652,7 +1780,11 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
 
   test("a settled edge takes its pair out of the debt graph, and only that pair", () => {
     const result = checkLanes(
-      [t(1), t(2), t(3), t(4, ["lane"]), t(5, ["lane"])],
+      // T4 in {lane} AND {other}: its blank side toward T3 has two lanes to
+      // choose between and stays unresolved. (In {lane} alone it would DERIVE
+      // the lane, the row would be half-attributed, and the cluster would be
+      // three turns — silent.)
+      [t(1), t(2), t(3), { ...t(4, ["lane", "other"]), laneTags: ["other"] }, t(5, ["lane"])],
       [
         edge(2, "extends", 1),
         edge(3, "extends", 2),
@@ -1662,32 +1794,44 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
     );
     // The real lane exists (not vacuous), and the four unsettled-edge
     // endpoints still cluster — T4 among them, because its OWN edge to T3 is
-    // unsettled whether or not T4 belongs to a lane.
-    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["lane"]);
+    // unresolved whether or not T4 belongs to a lane.
+    expect(result.lanes.map((lane) => lane.key.tag)).toEqual(["lane", "other"]);
     expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
   });
 
-  test("a LANE MEMBER's own unsettled edge is debt too — membership excuses nothing", () => {
-    // THE REDEFINITION, isolated. Under the v11 node rule every one of these
-    // turns carries a lane tag and the cluster was silent; under the edge rule
-    // the four unsettled edges are four rows settlement still owes.
-    const member = (id: number): LaneCheckerTurnInput => ({
+  test("a LANE MEMBER's own undeclared edge is debt when membership cannot resolve it — two lanes excuse nothing; ONE lane resolves it", () => {
+    // THE REDEFINITION, isolated, then RESOLUTION on top of it. Under the v11
+    // node rule every one of these turns carries a lane tag and the cluster
+    // was silent; under the edge rule the four undeclared edges were four rows
+    // settlement still owed. main-agent-edges D2 splits that by what the
+    // endpoint can answer: a member of {L} AND {M} leaves a blank side
+    // `ambiguous` — still debt — while a member of {L} alone DERIVES it.
+    const member = (id: number, lanes: string[]): LaneCheckerTurnInput => ({
       id,
       type: ["design"],
-      tags: ["L"],
-      laneTags: ["L"],
+      tags: lanes,
+      laneTags: lanes,
     });
-    const result = checkLanes(
-      [member(1), member(2), member(3), member(4), member(5)],
-      [
-        edge(5, "extends", 4, ["L"]), // the one settled edge
-        edge(2, "extends", 1),
-        edge(3, "extends", 2),
-        edge(4, "extends", 3),
-      ],
+    const edges = [
+      edge(5, "extends", 4, ["L"]), // the one declared edge
+      edge(2, "extends", 1),
+      edge(3, "extends", 2),
+      edge(4, "extends", 3),
+    ];
+    const shared = checkLanes(
+      [1, 2, 3, 4, 5].map((id) => member(id, ["L", "M"])),
+      edges,
     );
-    expect(result.lanes[0]?.members.map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
-    expect(clusters(result).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+    expect(shared.lanes[0]?.members.map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(clusters(shared).entries).toEqual([{ turnIds: [1, 2, 3, 4], turnCount: 4 }]);
+
+    const unique = checkLanes(
+      [1, 2, 3, 4, 5].map((id) => member(id, ["L"])),
+      edges,
+    );
+    expect(unique.lanes[0]?.members.map((m) => m.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(clusters(unique).count).toBe(0);
+    expect(unique.errors).toEqual([]);
   });
 
   test("a HALF-settled edge leaves the CLUSTER graph — it is E6's row, not the warning's", () => {
@@ -1698,7 +1842,7 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
     // matter in ordinary stock rather than only after a migration defect — the
     // write gate ACCEPTS a half-settled edge now — and it is why the two
     // findings are not redundant: E6 is the ONLY place this shape is reported.
-    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+    const result = checkLanes([t2(1), t2(2), t2(3), t2(4)], [
       edge(2, "extends", 1, [], { tailTag: "x", headTag: "" }),
       edge(3, "extends", 2),
       edge(4, "extends", 3),
@@ -1793,7 +1937,7 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
   // neighbours its debt happens to have (E6 filtered by the cluster) or empty
   // the warning outright (the cluster filtered by E6).
   test("an unsettled-edge cluster stays a WARNING while its rows are E6 errors — the scale fact and the per-row backlog both stand", () => {
-    const result = checkLanes([t(1), t(2), t(3), t(4)], [
+    const result = checkLanes([t2(1), t2(2), t2(3), t2(4)], [
       edge(2, "extends", 1),
       edge(3, "extends", 2),
       edge(4, "extends", 3),
@@ -1816,7 +1960,7 @@ describe("D9 warning 1 — unsettled-edge clusters", () => {
   // one draft edge are silent as a cluster (3 or fewer is "a short exchange is
   // not a workflow") and still one blocking error.
   test("a single draft edge is E6 with no cluster at all — the per-row class has no 4+ boundary", () => {
-    const result = checkLanes([t(1), t(2)], [edge(2, "extends", 1)]);
+    const result = checkLanes([t2(1), t2(2)], [edge(2, "extends", 1)]);
     expect(clusters(result).count).toBe(0);
     expect(result.errors.map((e) => e.class)).toEqual(["E6"]);
   });

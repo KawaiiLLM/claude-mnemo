@@ -311,21 +311,24 @@ export interface LaneEdgeInput {
    * It used to be the row's STORED word and nothing else. Since resolution it
    * is what a DB loader resolved — the declaration when the row declares one,
    * the endpoint's single lane when it does not — so 69% of edges reach their
-   * lane with no writer having said so. A pure fixture that states a tag here
-   * and supplies no outcome is stating a declared side, which is exactly what
-   * it always meant.
+   * lane with no writer having said so. A pure fixture states the STORED side
+   * here and is resolved before it reaches a reader that keys on outcomes
+   * (`tests/support/lane-edge-fixtures.ts`'s `resolveLaneEdges`).
    */
   tailTag: string;
   headTag: string;
   /**
-   * The RESOLVED outcome per side, supplied by a DB loader. ABSENT on a pure
-   * fixture, and every reader that keys on it falls back to reading the tag
-   * alone in that case — so a fixture written before resolution keeps its
-   * exact old meaning.
+   * The RESOLVED outcome per side, supplied by a DB loader. OPTIONAL on this
+   * base shape only because the election's own feed
+   * (`db/memory-edges.ts`'s `getRelationEdgesAmongTurns`) hands over stored
+   * side columns and never resolves them — the election reads neither side.
+   * The lane checker REQUIRES both (`shared/lane-checker.ts`'s
+   * `LaneCheckerEdgeInput`): no reader in the tree falls back to the tag
+   * when the outcome is absent (ticket 02b deleted that branch).
    */
   tailOutcome?: LaneSideOutcome;
   headOutcome?: LaneSideOutcome;
-  /** The side's STORED declaration, verbatim (`''` = undeclared) — what an `invalid` finding has to NAME. Absent on a fixture, where `tailTag`/`headTag` are themselves the stored values. */
+  /** The side's STORED declaration, verbatim (`''` = undeclared) — what an `invalid` finding has to NAME. Required wherever the outcomes are. */
   storedTailTag?: string;
   storedHeadTag?: string;
   /**

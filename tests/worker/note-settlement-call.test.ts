@@ -2636,3 +2636,48 @@ describe("main-agent-edges ticket 04 — the resume dispatch writes its claim sc
     expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(0);
   });
 });
+
+describe("main-agent-edges ticket 02b — the UNIFIED dispatch writes its claim scope too", () => {
+  /**
+   * The sibling of ticket 04's resume-dispatch test above. Both shapes call
+   * `persistNoteSettlementClaimScope` the instant `writableTurnIds` resolves,
+   * and a structural verb has no way to ask which shape is running — so the
+   * unified shape's call has to be pinned on its own. It was not: dropping it
+   * left the whole suite green (ticket 04's integration finding).
+   *
+   * THE MUTATION: delete the `persistNoteSettlementClaimScope` call in
+   * `createUnifiedNoteSettlementDispatch` (note-settlement-dispatch.ts) and
+   * this test goes red.
+   */
+  test("the writable set is persisted as this job's claim scope before the unified query runs", async () => {
+    const fixture = seedFourTurnWindow();
+    let scopeAtQueryTime: number[] = [];
+    let writableAtQueryTime: number[] = [];
+    const dispatch = createUnifiedNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: async (request) => {
+        // Read INSIDE the query: the record has to exist before the model
+        // does anything, not after the run ends.
+        scopeAtQueryTime = readNoteSettlementClaimScope(db, request.jobId);
+        writableAtQueryTime = [...request.writableTurnIds].sort((a, b) => a - b);
+        return {
+          text: "the run ended without finalizing.",
+          finalized: false,
+          commitMetrics: null,
+          laneCheckCalled: false,
+        };
+      },
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const outcome = await dispatch({ job: fixture.job });
+
+    expect(outcome.ok).toBe(false);
+    expect(scopeAtQueryTime).toEqual(fixture.turnIds.slice().sort((a, b) => a - b));
+    // The SAME set the request declares — never a second derivation.
+    expect(scopeAtQueryTime).toEqual(writableAtQueryTime);
+    expect(readNoteSettlementClaimScope(db, fixture.job.id)).toEqual(scopeAtQueryTime);
+  });
+});
