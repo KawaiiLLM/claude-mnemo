@@ -12,6 +12,7 @@ import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { checkLanes } from "../../src/shared/lane-checker";
 import { laneToken } from "../../src/shared/lane-interpretation";
+import { interimLegacyRelation } from "../../src/shared/relation-class";
 import { buildLaneAnchorAddresses, renderLaneCheckerReports } from "../../src/shared/lane-checker-render";
 import {
   createConsoleReader,
@@ -968,14 +969,28 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     expect(body.turns[0].laneMemberships).toEqual([]);
   });
 
-  test("a settled edge carries the lane payload's own token on BOTH sides; an unsettled edge carries null on both and no tag on either", () => {
+  test("an attributed edge carries the lane payload's own token on BOTH sides; an unattributed edge carries null lane and null tag on both, with `none` as the reason", () => {
     const reader = makeFakeReader({
       findSession: () => ({ id: 1 }) as any,
       runLaneCheck: () => ({
         ...twoTurnLaneRun(),
         edges: [
-          { citingId: 2, citedId: 1, relation: "indexes", tags: ["focus"] },
-          { citingId: 2, citedId: 1, relation: "consume", tags: [] },
+          {
+            citingId: 2,
+            citedId: 1,
+            relation: "override",
+            relationClass: "correct",
+            relationCoverage: "full",
+            tags: ["focus"],
+          },
+          {
+            citingId: 2,
+            citedId: 1,
+            relation: "extends",
+            relationClass: "use",
+            relationCoverage: "",
+            tags: [],
+          },
         ],
       }),
       loadTurnDisplayFields: () => new Map(),
@@ -983,19 +998,24 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     const result = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=2"), CTX);
     const body = result.body as any;
     const laneToken_: string = body.lanes[0].token;
-    const settled = body.edges.find((e: any) => e.relation === "indexes");
-    const unsettled = body.edges.find((e: any) => e.relation === "consume");
-    expect(settled.tailTag).toBe("focus");
-    expect(settled.headTag).toBe("focus");
-    expect(settled.tailLaneToken).toBe(laneToken_);
-    expect(settled.headLaneToken).toBe(laneToken_);
-    // The retired merged field must not come back under its old name.
+    const settled = body.edges.find((e: any) => e.relationClass === "correct");
+    const unsettled = body.edges.find((e: any) => e.relationClass === "use");
+    // Class and coverage are two SEPARATE fields — never one `correct(full)`
+    // token the shell would have to split apart to reach either channel.
+    expect(settled.relationCoverage).toBe("full");
+    expect(unsettled.relationCoverage).toBe("");
+    expect(settled.tail).toEqual({ lane: laneToken_, tag: "focus", how: "declared" });
+    expect(settled.head).toEqual({ lane: laneToken_, tag: "focus", how: "declared" });
+    // The retired fields must not come back under their old names.
     expect("tags" in settled).toBe(false);
     expect("laneTokens" in settled).toBe(false);
-    expect(unsettled.tailTag).toBe("");
-    expect(unsettled.headTag).toBe("");
-    expect(unsettled.tailLaneToken).toBeNull();
-    expect(unsettled.headLaneToken).toBeNull();
+    expect("relation" in settled).toBe(false);
+    expect("tailTag" in settled).toBe(false);
+    expect("headTag" in settled).toBe(false);
+    expect("tailLaneToken" in settled).toBe(false);
+    expect("headLaneToken" in settled).toBe(false);
+    expect(unsettled.tail).toEqual({ lane: null, tag: null, how: "none" });
+    expect(unsettled.head).toEqual({ lane: null, tag: null, how: "none" });
   });
 
   // lane-model-v12 spec, problem 2: "一条从 lane A 指向 lane B 的边只能写成
@@ -1012,7 +1032,9 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
           {
             citingId: 2,
             citedId: 1,
-            relation: "indexes",
+            relation: "verifies",
+            relationClass: "verify",
+            relationCoverage: "",
             tailTag: "focus",
             headTag: "other",
           },
@@ -1037,7 +1059,7 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
                 { id: 1 },
                 { id: 2 },
               ],
-              edgeCountsByRelation: { indexes: 1 },
+              edgeCountsByRelation: { verifies: 1 },
               coverage: { status: "whole", missingTurnIds: [] },
             },
           ],
@@ -1050,22 +1072,20 @@ describe("GET /api/console/graph — additive fields (type/laneMemberships per t
     expect(body.lanes).toHaveLength(2);
     const focusToken = body.lanes.find((l: any) => l.tag === "focus").token;
     const otherToken = body.lanes.find((l: any) => l.tag === "other").token;
-    const edge = body.edges.find((e: any) => e.relation === "indexes");
+    const edge = body.edges.find((e: any) => e.relationClass === "verify");
     // Two NAMED lanes, and which end named which is recoverable: the tail is
     // the citing side's lane, the head the cited side's. Swapping the two
     // reads is exactly the mutation this assertion exists to catch — an
     // order-insensitive `.sort()` comparison (what the retired plural field
     // could only do) would survive it.
     expect(focusToken).not.toBe(otherToken);
-    expect(edge.tailTag).toBe("focus");
-    expect(edge.headTag).toBe("other");
-    expect(edge.tailLaneToken).toBe(focusToken);
-    expect(edge.headLaneToken).toBe(otherToken);
+    expect(edge.tail).toEqual({ lane: focusToken, tag: "focus", how: "declared" });
+    expect(edge.head).toEqual({ lane: otherToken, tag: "other", how: "declared" });
     // ... and each token really is built in its OWN endpoint's segment: the
     // head's lane lives in E2 (the CITED turn's), never in E1.
-    expect(edge.tailLaneToken).toBe(laneToken("E1", "focus"));
-    expect(edge.headLaneToken).toBe(laneToken("E2", "other"));
-    expect(edge.headLaneToken).not.toBe(laneToken("E1", "other"));
+    expect(edge.tail.lane).toBe(laneToken("E1", "focus"));
+    expect(edge.head.lane).toBe(laneToken("E2", "other"));
+    expect(edge.head.lane).not.toBe(laneToken("E1", "other"));
   });
 });
 
@@ -1382,16 +1402,27 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
 
   test("ticket 03 (peer P2-4): a self-edge (citingId === citedId) survives the over-budget walk with its own turn, exactly once — never dropped, never duplicated", () => {
     // Same 5-turn/big-title calibration as the turn-atomic test: only turns
-    // 4 and 5 survive. A real self-edge shape (Gate C self-`grounds`) is
-    // added on turn 5, alongside the same 500-edge ring.
+    // 4 and 5 survive. A real self-edge shape (Gate C's own self-reference) is
+    // added on turn 5, alongside the same 500-edge ring. It carries a
+    // DIFFERENT class from the ring so the assertion below can name it: the
+    // payload publishes class + coverage, never a word (ticket 11).
     const turns = turnsOfCount(5);
     const ringEdges = Array.from({ length: 500 }, (_, i) => ({
       citingId: (i % 5) + 1,
       citedId: ((i + 1) % 5) + 1,
-      relation: "consume",
+      relation: "extends",
+      relationClass: "use" as const,
+      relationCoverage: "" as const,
       tags: [] as string[],
     }));
-    const selfEdge = { citingId: 5, citedId: 5, relation: "grounds", tags: [] as string[] };
+    const selfEdge = {
+      citingId: 5,
+      citedId: 5,
+      relation: "override",
+      relationClass: "correct" as const,
+      relationCoverage: "full" as const,
+      tags: [] as string[],
+    };
     const edges = [...ringEdges, selfEdge];
     const bigTitle = "x".repeat(3_500_000);
     const displayFields = new Map<number, ConsoleTurnDisplayFields>(
@@ -1409,7 +1440,7 @@ describe("GET /api/console/graph — post-load bounds and partial labeling", () 
     );
     const body = result.body as any;
     expect(body.turns.map((t: any) => t.id).sort((a: number, b: number) => a - b)).toEqual([4, 5]);
-    const selfEdgesInBody = body.edges.filter((e: any) => e.citingId === 5 && e.citedId === 5 && e.relation === "grounds");
+    const selfEdgesInBody = body.edges.filter((e: any) => e.citingId === 5 && e.citedId === 5 && e.relationClass === "correct");
     expect(selfEdgesInBody).toHaveLength(1);
     // The 100 (4,5) ring edges survive alongside it, unaffected.
     expect(body.edges.filter((e: any) => e.citingId === 4 && e.citedId === 5)).toHaveLength(100);
@@ -1956,26 +1987,32 @@ describe("single-source pin — T900-1001 fixture", () => {
         expect(laneTokens.has(m.token)).toBe(true);
       }
     }
-    // Ticket 07: each SIDE carries its own tag and its own lane token, and a
-    // token is present exactly when that side is settled.
-    let settledSides = 0;
+    // Ticket 11: each SIDE carries its own resolved attribution — the
+    // qualified lane, that lane's tag, and HOW it was reached. Lane and tag
+    // are null together, exactly for a non-attributing outcome.
+    const HOWS = new Set(["declared", "derived", "none", "ambiguous", "invalid"]);
+    let attributedSides = 0;
     for (const e of body.edges) {
-      for (const [tag, token] of [
-        [e.tailTag, e.tailLaneToken],
-        [e.headTag, e.headLaneToken],
-      ] as const) {
-        expect(typeof tag).toBe("string");
-        if (tag === "") {
-          expect(token).toBeNull();
+      expect(["correct", "verify", "use", ""]).toContain(e.relationClass);
+      expect(["full", "partial", ""]).toContain(e.relationCoverage);
+      // Coverage rides on `correct` alone — the contract the write surface
+      // enforces, restated here over real rows.
+      if (e.relationCoverage !== "") expect(e.relationClass).toBe("correct");
+      for (const side of [e.tail, e.head]) {
+        expect(HOWS.has(side.how)).toBe(true);
+        if (side.how === "declared" || side.how === "derived") {
+          attributedSides += 1;
+          expect(typeof side.lane).toBe("string");
+          expect(typeof side.tag).toBe("string");
+          expect(laneTokens.has(side.lane)).toBe(true);
         } else {
-          settledSides += 1;
-          expect(typeof token).toBe("string");
-          expect(laneTokens.has(token)).toBe(true);
+          expect(side.lane).toBeNull();
+          expect(side.tag).toBeNull();
         }
       }
     }
-    // Not vacuous over this fixture — it really does contain settled sides.
-    expect(settledSides).toBeGreaterThan(0);
+    // Not vacuous over this fixture — it really does contain attributed sides.
+    expect(attributedSides).toBeGreaterThan(0);
   });
 
   test("the graph handler runs the projection EXACTLY once — byte-equality alone cannot catch a second derivation (peer #4), so the call count is pinned structurally", () => {
@@ -2203,5 +2240,231 @@ describe("GET /api/console/graph — turn address form", () => {
     });
     const body = handleGraphRoute(reader, new URL("http://x/api/console/graph?session=1&from=1&to=99"), CTX).body as any;
     expect(body.turns.map((t: any) => t.address)).toEqual(["S1/T4", "S2/T9", "S1/T6"]);
+  });
+});
+
+// ------------------------------------------- three classes, five outcomes -
+
+/**
+ * main-agent-edges ticket 11, acceptance: the console renders a database
+ * containing ALL THREE classes, BOTH coverages and ALL FIVE attribution
+ * outcomes — through the real reader, the real projection loader and the real
+ * resolver, not a hand-built payload.
+ *
+ * It is a REAL DB on purpose. The five outcomes are not a field a fixture can
+ * simply state: `derived`/`ambiguous`/`none` fall out of how many lanes the
+ * ENDPOINT turn is in, and `declared`/`invalid` out of whether a stored side
+ * tag is still among them — facts that live in `turns.tags`, `segment_members`
+ * and `lanes`, three tables away from the edge row. A fake reader asserting
+ * `how: "invalid"` would only be asserting that the test knows how to type the
+ * word.
+ */
+describe("GET /api/console/graph — three classes, both coverages, all five attribution outcomes over a real database", () => {
+  let db: Database;
+  let sessionId: number;
+  const NOW = 1_800_000_000;
+
+  // Six turns whose LANE CARDINALITY is the whole fixture: 0, 1 and 2 lanes
+  // are exactly what separates `none`, `derived` and `ambiguous`, and a
+  // one-lane turn is also what makes a stored `beta` on it `invalid`.
+  const TURN_TAGS: ReadonlyArray<readonly [id: number, tags: readonly string[]]> = [
+    [1, ["alpha"]],
+    [2, ["alpha", "beta"]],
+    [3, []],
+    [4, ["alpha"]],
+    [5, ["alpha", "beta"]],
+    [6, ["alpha"]],
+  ];
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "three-classes",
+      project: "/tmp/three-classes",
+      title: "three classes",
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+
+    const insertTurn = db.query<unknown, [number, number, number, number, string]>(
+      `INSERT INTO turns (id, session_id, prompt_number, status, user_prompt, title, tool_call_count, created_at_epoch, type, tags)
+       VALUES (?, ?, ?, 'active', 'p', 'note', 1, ?, '["design"]', ?)`,
+    );
+    for (const [id, tags] of TURN_TAGS) {
+      insertTurn.run(id, sessionId, id, NOW + id, JSON.stringify(tags));
+    }
+    const segmentId = createSegment(db, { title: "three classes", nowEpoch: NOW }).id;
+    addSegmentMembers(db, segmentId, TURN_TAGS.map(([id]) => id), NOW);
+    insertLane(db, segmentId, "alpha", NOW);
+    insertLane(db, segmentId, "beta", NOW);
+
+    writeMemoryEdges(
+      db,
+      [
+        // correct/full: a DECLARED tail (T2 is in two lanes, `alpha` is one of
+        // them) over a DERIVED head (T1 is in exactly one).
+        {
+          citing: { kind: "turn", id: 2 },
+          cited: { kind: "turn", id: 1 },
+          relation: interimLegacyRelation("correct", "full"),
+          relationClass: "correct",
+          relationCoverage: "full",
+          provenance: "asserted",
+          tailTag: "alpha",
+          headTag: "",
+        },
+        // correct/partial: an AMBIGUOUS tail (T5 is in two lanes, nobody
+        // picked) over a `none` head (T3 is in no lane at all).
+        {
+          citing: { kind: "turn", id: 5 },
+          cited: { kind: "turn", id: 3 },
+          relation: interimLegacyRelation("correct", "partial"),
+          relationClass: "correct",
+          relationCoverage: "partial",
+          provenance: "asserted",
+          tailTag: "",
+          headTag: "",
+        },
+        // verify: a DERIVED tail over an INVALID head — the stored `beta` is
+        // not among T4's lanes, and E4 says that never degrades to `derived`
+        // however unambiguous T4 looks now.
+        {
+          citing: { kind: "turn", id: 6 },
+          cited: { kind: "turn", id: 4 },
+          relation: interimLegacyRelation("verify", ""),
+          relationClass: "verify",
+          relationCoverage: "",
+          provenance: "asserted",
+          tailTag: "",
+          headTag: "beta",
+        },
+        // use: both ends derived, the ordinary shape 69% of production carries.
+        {
+          citing: { kind: "turn", id: 4 },
+          cited: { kind: "turn", id: 1 },
+          relation: interimLegacyRelation("use", ""),
+          relationClass: "use",
+          relationCoverage: "",
+          provenance: "asserted",
+          tailTag: "",
+          headTag: "",
+        },
+      ],
+      NOW,
+    );
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function graphBody(): any {
+    const result = handleGraphRoute(
+      createConsoleReader(db),
+      new URL(`http://x/api/console/graph?session=${sessionId}&from=1&to=6`),
+      CTX,
+    );
+    expect(result.status).toBe(200);
+    return result.body;
+  }
+
+  test("the payload's four edges carry class, coverage and BOTH sides' resolved attribution — the whole shape, asserted field for field", () => {
+    const body = graphBody();
+    const alpha = body.lanes.find((l: any) => l.tag === "alpha").token;
+    const beta = body.lanes.find((l: any) => l.tag === "beta").token;
+    expect(alpha).not.toBe(beta);
+
+    // Field-for-field, in the payload's own order — which is the sort under
+    // test as well (class, then coverage, then ids).
+    expect(body.edges).toEqual([
+      {
+        citingId: 2,
+        citedId: 1,
+        relationClass: "correct",
+        relationCoverage: "full",
+        tail: { lane: alpha, tag: "alpha", how: "declared" },
+        head: { lane: alpha, tag: "alpha", how: "derived" },
+      },
+      {
+        citingId: 5,
+        citedId: 3,
+        relationClass: "correct",
+        relationCoverage: "partial",
+        tail: { lane: null, tag: null, how: "ambiguous" },
+        head: { lane: null, tag: null, how: "none" },
+      },
+      {
+        citingId: 6,
+        citedId: 4,
+        relationClass: "verify",
+        relationCoverage: "",
+        tail: { lane: alpha, tag: "alpha", how: "derived" },
+        head: { lane: null, tag: null, how: "invalid" },
+      },
+      {
+        citingId: 4,
+        citedId: 1,
+        relationClass: "use",
+        relationCoverage: "",
+        tail: { lane: alpha, tag: "alpha", how: "derived" },
+        head: { lane: alpha, tag: "alpha", how: "derived" },
+      },
+    ]);
+  });
+
+  test("all three classes, both coverages and all five outcomes really are present — the fixture is not vacuous", () => {
+    const body = graphBody();
+    expect(new Set(body.edges.map((e: any) => e.relationClass))).toEqual(
+      new Set(["correct", "verify", "use"]),
+    );
+    expect(new Set(body.edges.map((e: any) => e.relationCoverage))).toEqual(
+      new Set(["full", "partial", ""]),
+    );
+    const hows = new Set(body.edges.flatMap((e: any) => [e.tail.how, e.head.how]));
+    expect(hows).toEqual(new Set(["declared", "derived", "ambiguous", "none", "invalid"]));
+  });
+
+  test("the retired word and the retired flat side fields are gone from every edge", () => {
+    const body = graphBody();
+    for (const e of body.edges) {
+      expect(Object.keys(e).sort()).toEqual([
+        "citedId",
+        "citingId",
+        "head",
+        "relationClass",
+        "relationCoverage",
+        "tail",
+      ]);
+      expect(Object.keys(e.tail).sort()).toEqual(["how", "lane", "tag"]);
+      expect(Object.keys(e.head).sort()).toEqual(["how", "lane", "tag"]);
+    }
+  });
+
+  test("the graph is not a blank canvas: every turn is on the wire and every edge's endpoints are inside it", () => {
+    const body = graphBody();
+    expect(body.turns.map((t: any) => t.id)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(body.meta.counts).toEqual({ turns: 6, edges: 4, lanes: body.lanes.length });
+    expectEdgesEndpointClosed(body);
+  });
+
+  test("sort order is class, then coverage, then ids — never the ids alone", () => {
+    const body = graphBody();
+    expect(body.edges.map((e: any) => `${e.relationClass}/${e.relationCoverage}`)).toEqual([
+      "correct/full",
+      "correct/partial",
+      "verify/",
+      "use/",
+    ]);
+    // Teeth: an id-ordered payload would put the (4,1) `use` edge second —
+    // this order is decided by the class table, not by the endpoints.
+    const asShipped = body.edges.map((e: any) => [e.citingId, e.citedId]);
+    const byIds = [...asShipped].sort(
+      (a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]!,
+    );
+    expect(asShipped).not.toEqual(byIds);
   });
 });
