@@ -140,3 +140,27 @@ The production clone could not be made (the sandbox refused the `cp -c` of
 (76 chars) becomes 92 chars if both sides derive (`+8` per side), so 40 atoms
 ≈ **3,680 chars / ~900 estimated tokens**, against ticket 06's 3,079 / 750.
 Ticket 01 should re-measure rather than take this.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `6a4d95f5` no-ff, clean; bundles rebuilt. `npx tsc --noEmit` 0; guards green; control-byte sweep
+over the touched renderer and its test: none. Full `bun test` **4751 / 0 / 268** against 4745/0/268.
+Delta accounting: the nine changed test files run 276 → 281 at the pre-merge commit vs HEAD (a detached
+scratch worktree at `9f7156c3`), exactly the worker's +5; the remaining **+1 is in a file outside the
+diff and I did not locate it** — no loop-generated or `test.each` table I found keys on the changed
+`recall` description. Recorded as unaccounted, not hidden. The "pre-existing red" the worker reports is
+the 3 → 2 reconciliation already on main as `aac14341` (its base `8a7af023` predates it).
+
+My probes, on sites the worker's six did not touch:
+
+| # | mutation in `src/mcp/relations-view.ts` | result |
+|---|---|---|
+| I1 | the `E<n>/` task qualifier never printed (always bare `#tag`) | RED ×1: "a side owned by ANOTHER task is qualified" |
+| I2 | `formatSides` always prints the pair, never the once form | RED ×6 across the direct set, outer assembly and segment card |
+
+Restored by `cp`, md5 verified. Accepted. Carried forward, as the worker flagged: the tree's lane
+suffix still reads raw stored tags (ticket 01's cutover makes stored = resolved for every surviving
+row, so this is not a release blocker), and the ~900-token estimate for 40 atoms is arithmetic, not a
+clone measurement — ticket 09 re-measures.

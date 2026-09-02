@@ -12751,7 +12751,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtkddbmp" : "dev";
+    BUILD_ID = true ? "0.29.0-mtkdpf23" : "dev";
   }
 });
 
@@ -40908,7 +40908,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   // needs it. K1's whole point is that a segment lets an agent avoid
   // rediscovering its own prior work; that only happens if `recall`'s own
   // description says the capability exists.
-  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. A list of TURN addresses (`id="S1/T4, S1/T9, S2/T2"`) is assembled as ONE page rather than several stapled together: the turns render in the order you named them under one header per session, an address named twice is read once, and the whole page carries one legend. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see THIS turn\'s own direct edges, and nothing further \u2014 every edge it cites OUT first (`<words> -> <addr>`), then every edge cited INTO it (`<- <addr> <words>`). No downstream hops, no branch cap, no `+N more`: the whole set renders, both directions, so what you see is what the write gate will check you against. The trailing `(#tail \u2192 #head)` is the edge\'s two stored lane sides \u2014 `(#lane)` when both settle in one, `\xB7` for a side nobody settled, `[unplaced]` when neither did \u2014 and an `E<n>/` in front of a lane names that endpoint\'s CURRENT task when it differs from this turn\'s (resolved at read time, advisory: not part of what an edge write is checked against). Several relation words fold onto one line only when their two sides are identical; one pair placed two ways is two lines. Addresses are relative to the turn\'s own session \u2014 a bare `T<m>` is that session, `S<n>/T<m>` another (Law-8 filtered; a prose-only citation carries no relation word and never appears here). A response that selected `relations` carries ONE legend line for the whole response. Off by default, a read convenience that grants nothing new. The 3-hop TREE view of the same node \u2014 where the thread goes, rather than what this node touches \u2014 is `timeline(id="S<n>/T<m>")`. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
+  recall: 'Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. The injected blocks are an index, not the memory \u2014 never conclude a fact is unrecorded because no injected block carries it. Materializing memory into a durable artifact (spec, ticket, doc, summary): any ruling you cannot quote verbatim \u2014 especially one from behind a compact \u2014 comes from recall/replay first, never from summary memory. Paginated index; hand off to the mnemo-replay skill for a turn\'s full untruncated text and tool I/O from the database (raw JSONL only for exact bytes). `id` also accepts a comma-separated list of same-kind addresses (e.g. `id="E31, E32"` or `id="S12, S15"`) \u2014 each item parses through the same grammar below, renders in order, and shares this call\'s page/turn budgets; mixed address kinds or any one invalid item rejects the whole call. A list of TURN addresses (`id="S1/T4, S1/T9, S2/T2"`) is assembled as ONE page rather than several stapled together: the turns render in the order you named them under one header per session, an address named twice is read once, and the whole page carries one legend. `id="E<n>"` (also `E*`, `E1..9`) recalls the task card \u2014 the accumulated impression of one arc of work, not a session or a turn \u2014 so check whether one already covers a task before redoing it: `[open]` is that task\'s still-live working state, `[delivered]` is its settled impression. `id="E<n>/S<a>/T<b>"` addresses one of the task\'s own members by its ordinary `S<session>/T<prompt>` address, scoped to that task \u2014 the same address you would cite it by anywhere else; `id="E<n>/S<a>/T<b>..S<c>/T<d>"` is a range over the task\'s own EVENT ORDER between those two endpoints inclusive (the two endpoints need not share a session), and `id="E<n>/T*"` is every member. The retired ordinal form (`E<n>/T<m>`, the task\'s own 1-based event-order position \u2014 a THIRD meaning the same `E<n>/T<m>` string once carried elsewhere) refuses outright, naming this grammar, rather than silently landing on the wrong turn. `id="E<n>/#<tag>"` addresses one DECLARED lane by NAME \u2014 the CANONICAL, pasteable lane address, reading the same subset of members `timeline`\'s own lane picker shows. `timeline`\'s `E<n>/L<n>` is a render-position ordinal for interactive picking only, never a pasteable address (the same ordinal can point at a different lane on a later render) \u2014 once you have picked one, address it here by its `tag` instead. An empty or non-canonical tag refuses, naming the exact problem. `filter.fields` is the one field-selection knob: pick any combination of turn fields (default title, metadata, content \u2014 metadata carries the local time plus a turn\'s `type`/`tags`); add `relations` to see THIS turn\'s own direct edges, and nothing further \u2014 every edge it cites OUT first (`<class> -> <addr>`), then every edge cited INTO it (`<- <addr> <class>`). The class is `correct(full)`, `correct(partial)`, `verify` or `use`, and it is the only relation word this field prints. No downstream hops, no branch cap, no `+N more`: the whole set renders, both directions, so what you see is what the write gate will check you against. The trailing `(tail \u2192 head)` is each side\'s RESOLVED lane attribution, printed once when both sides read alike: `#lane derived` (that endpoint is in exactly one lane, so nothing had to be declared), `#lane declared` (several lanes, and this is the declared one), `ambiguous` (several lanes, none declared \u2014 the declaration settlement owes), `none` (that endpoint is in no lane), `invalid (stored #tag)` (the stored declaration is not among that endpoint\'s current lane tags). An `E<n>/` in front of a lane names that endpoint\'s CURRENT task when it differs from this turn\'s. Attributions and qualifiers alike are resolved from the endpoints\' CURRENT tasks at read time and are ADVISORY: not part of what an edge write is checked against, and never the authority for a declaration. Several classes fold onto one line only when their two sides resolve alike; one pair attributed two ways is two lines. Addresses are relative to the turn\'s own session \u2014 a bare `T<m>` is that session, `S<n>/T<m>` another (Law-8 filtered; a prose-only citation carries no relation word and never appears here). A response that selected `relations` carries ONE legend line for the whole response. Off by default, a read convenience that grants nothing new. The 3-hop TREE view of the same node \u2014 where the thread goes, rather than what this node touches \u2014 is `timeline(id="S<n>/T<m>")`. A task card (`id="E<n>"`) shows its metadata header and counts with the newest field rows on page 1, every row plus a member index from page 2 on (`page` selects that, not a field). Body size is controlled by exactly two token budgets \u2014 `pageBudget` (page overflow \u2192 another page, never a truncated block) and `turn` (per-item cap on every rendered session/turn/observation, word-boundary cut). Reading also LICENSES writing back what you read: a `write` over a field another writer filled needs this read to have delivered THAT field untruncated \u2014 raise `turn` (or `pageBudget` on a task card) and re-read if it came back cut; a plain recall already earns this for `type`/`tags` too, since metadata is on by default \u2014 only a caller who narrowed `filter.fields` away from it needs to ask for `metadata` back explicitly. `edit` needs a current read, never a complete one. `query` is pure full-text search \u2014 it has no in-string dialect; a query containing `tag:foo` searches those literal characters. Use `filter` to scope by type/tag/session/time/file instead, AND-composed with `query` and with `id` alike. Bare `recall()` (no `id`, no `query`) lists tasks before sessions. Tasks also surface in `query=`/`filter` search alongside sessions and turns.',
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination on the `turns` view. Optional `view` selects `turns` (default turn table) or `milestones` \u2014 a lane-first structural election, not a score: identity tiers first (releases, then a tier held for index-declaring nodes which currently seats NOBODY until that rule lands, then nodes those elect index, then correctors, then everything else), in-degree breaking ties within a tier, recency deciding the rest; an edgeless window degrades to a flat recent-N list. The milestones view has no pagination of its own \u2014 `page`/`pageSize` have no effect on it \u2014 election ranks every window candidate and `pageBudget` (a token budget, default 1000) is the seat count: it decides how many of the ranked candidates actually render, cutting lowest election rank first. `phases` has retired. `id=\"E<n>/#<tag>\"` is the CANONICAL, pasteable lane address \u2014 by NAME, the same address `recall(id=\"E<n>/#<tag>\")` resolves to the same member subset \u2014 and renders exactly that ONE lane, identically to whichever `E<n>/L<n>` currently points at it; an unknown tag refuses, naming the task's declared lanes. `id=\"E<n>/L*\"` lists every declared lane (or `E<n>/L<n>` for one, by RENDER-POSITION ordinal \u2014 interactive picking only, never a pasteable address, since the same ordinal can point at a different lane once the list's own oldest-first order shifts), ascending, oldest lane first, paginated by `page`/`pageBudget` when the lane blocks overflow one page (overflow rolls to another page, a lane's own block is never split mid-page, and the page states the exact next call; a lane too big for one page shows its newest page in the list \u2014 drill via its `E<n>/#<tag>` address). Each lane renders as a ruled adjacency table over its SETTLED members (settlement-covered canonical turns; skipped/rewound/compact-synthetic turns are out everywhere): a header (`E<n>/#<tag> \xB7 <n> settled \xB7 <n> forward \xB7 <n> mirrors \xB7 islands <a>+<b> \xB7 frontier <k>` \u2014 forward and mirror counts each verifiable against the page's own lines; islands count both-endpoints-in-lane connectivity only, so a cross-lane edge raises forward but never islands) and a one-line arrow legend, then the chain skeleton: roots processed newest to oldest, EVERY valid out-edge of a lane member rendered exactly once \u2014 `<relation> -> <addr>` in-lane (the heaviest relation takes the root's main line, every other out-edge its own `\u2514` line; a line continues through a first-visit single-out node and otherwise stops, `^` marking a node expanded elsewhere on the page), `<relation> => S<n>/T<m>^(E<n>/#tag)` when the edge leaves the lane, and `\u2514 <relation> <= S<n>/T<m>^(E<n>/#tag)` for another lane's edges INTO this one (after all branches; same-relation sources fold onto one line). On a chain line addresses run-length fold: the line's first address is always full `S<session>/T<prompt>`, and a bare `T<m>` after it continues the PREVIOUS address's session \u2014 cross-lane stubs and mirror sources never fold. Then a time-ascending title table (`T<n> <MM-DD> <type words> <title>`) for exactly the nodes the skeleton showed; a settled member with no edges is counted in the header, never drawn. A lane too big for one page splits into contiguous time-range pages, newest first \u2014 on the single-lane addresses (`E<n>/#<tag>`, `E<n>/L<n>`) `page` selects one (default 1 = newest); a paged lane's header inserts `<p>/<N> S<a>/T<b>..S<c>/T<d>` (its position plus its own newest..oldest range) after the mirror count, a branch whose target sits on another page stops as `<relation> -> S<n>/T<m>^ (p/N)` (the target's page), and `\u2514 <relation> <- S<n>/T<m>^ (p/N)` mirrors a SAME-lane edge in from a NEWER page onto the head's own page (in-page inbound stays forward-only). Only a LONE member whose full rendering exceeds the page budget ships over budget, with an explicit self-including `[overflow +<n> tok]` marker. Every node is its own ordinary `S<session>/T<prompt>` address, addressable directly via `recall(id=\"S<session>/T<prompt>\")`; every hop address on a tree is relative to the ROOT line's session \u2014 a bare `T<m>` anywhere on the tree means the root's session, never the previous hop's. `timeline(id=\"S<n>/T<m>\")` is also its own legal call: one header row (`S<n>/T<m> MM-DD <emoji> <title>`) then that turn's own relation tree \u2014 the same shape and rule `recall`'s `relations` field renders for it. `filter` \u2014 the same structured grammar `recall` uses \u2014 AND-composes with the id selector's range to narrow which turns the current view considers.",
   // ticket 01 (spec "Note contract revision"): the field-level contract used
   // to live entirely in this one string — title's shape, content's admission
@@ -42982,11 +42982,15 @@ function renderRelationTree(tree, formatHopAddress, suffixOf) {
 }
 
 // src/mcp/relations-view.ts
+init_edge_side_resolution();
 init_memory_edges();
-init_segments();
 init_relation_class();
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
+}
+function renderRelationClassWord(row) {
+  const resolved = edgeRelationClass(row);
+  return resolved === null ? "" : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
 }
 function formatLaneSuffix(hop) {
   if (hop.tailTag !== "" && hop.tailTag === hop.headTag) {
@@ -43009,13 +43013,12 @@ function buildCandidates(rows) {
   const grouped = groupHopEdges(
     rows.map((row) => ({
       targetId: row.otherTurnId,
-      // relation-vocabulary-v13 ticket 02: the tree renders the CLASS a row was
-      // written under, and the stored seven-word value only for a row written
-      // before that vocabulary existed (`displayEdgeRelation`). This is the
-      // surface settlement reads its own edges back through, so a writer taught
-      // `correct`/`verify`/`use` must not be shown `override`/`extends` for
-      // what it just wrote.
-      relation: displayEdgeRelation(row),
+      // main-agent-edges ticket 07: the tree renders the row's CLASS and
+      // nothing else — see `renderRelationClassWord`. `defaultRelationRank`
+      // is itself class-keyed (`correct(full)` > `correct(partial)` > `verify`
+      // > `use`, ticket 02), so feeding it the class also puts a legacy row
+      // back on the ladder instead of at its defensive last rank.
+      relation: renderRelationClassWord(row),
       tailTag: row.tailTag,
       headTag: row.headTag
     }))
@@ -43165,28 +43168,45 @@ function buildTurnRelationView(db, turn) {
   }
   return { lines, turnIds: collectRelationTreeTurnIds(built.tree) };
 }
-function groupDirectRows(rows) {
-  const byPlacement = /* @__PURE__ */ new Map();
+function formatResolvedSide(resolution, viewerSegmentId) {
+  if (resolution.lane !== null) {
+    const lane = resolution.lane.segmentId === viewerSegmentId ? `#${resolution.lane.tag}` : `E${resolution.lane.segmentId}/#${resolution.lane.tag}`;
+    return `${lane} ${resolution.outcome}`;
+  }
+  if (resolution.outcome === "invalid") {
+    return `invalid (stored #${resolution.storedTag})`;
+  }
+  return resolution.outcome;
+}
+var SIDE_ARROW = "\u2192";
+function formatSides(tail, head) {
+  return tail === head ? `(${tail})` : `(${tail} ${SIDE_ARROW} ${head})`;
+}
+function groupDirectRows(rows, resolvableOf, endpointLaneFacts, viewerSegmentId) {
+  const byAttribution = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    const key = `${row.otherTurnId} ${row.tailTag} ${row.headTag}`;
-    const existing = byPlacement.get(key);
-    const word = displayEdgeRelation(row);
+    const resolvable = resolvableOf(row);
+    const sideOf = (side) => formatResolvedSide(resolveEdgeSide(resolvable, side, endpointLaneFacts), viewerSegmentId);
+    const tail = sideOf("tail");
+    const head = sideOf("head");
+    const key = JSON.stringify([row.otherTurnId, tail, head]);
+    const word = renderRelationClassWord(row);
+    const existing = byAttribution.get(key);
     if (existing) {
       if (!existing.words.includes(word)) {
         existing.words.push(word);
       }
       continue;
     }
-    byPlacement.set(key, {
-      otherTurnId: row.otherTurnId,
+    byAttribution.set(key, {
       otherSessionId: row.otherSessionId,
       otherPromptNumber: row.otherPromptNumber,
-      tailTag: row.tailTag,
-      headTag: row.headTag,
+      tail,
+      head,
       words: [word]
     });
   }
-  const grouped = [...byPlacement.values()];
+  const grouped = [...byAttribution.values()];
   for (const group of grouped) {
     group.words.sort();
   }
@@ -43197,66 +43217,54 @@ function groupDirectRows(rows) {
     if (left.otherPromptNumber !== right.otherPromptNumber) {
       return left.otherPromptNumber - right.otherPromptNumber;
     }
-    if (left.tailTag !== right.tailTag) return left.tailTag < right.tailTag ? -1 : 1;
-    if (left.headTag !== right.headTag) return left.headTag < right.headTag ? -1 : 1;
+    if (left.tail !== right.tail) return left.tail < right.tail ? -1 : 1;
+    if (left.head !== right.head) return left.head < right.head ? -1 : 1;
     return 0;
   });
   return grouped;
 }
-var UNPLACED_MARKER = "[unplaced]";
-var UNSETTLED_SIDE_MARK = "\xB7";
-var SIDE_ARROW = "\u2192";
-function formatSide(tag, endpointTaskId, viewerTaskId) {
-  if (tag === "") {
-    return null;
-  }
-  if (endpointTaskId !== null && endpointTaskId !== viewerTaskId) {
-    return `E${endpointTaskId}/#${tag}`;
-  }
-  return `#${tag}`;
-}
-function formatSides(tail, head) {
-  if (tail === null && head === null) {
-    return UNPLACED_MARKER;
-  }
-  if (tail !== null && tail === head) {
-    return `(${tail})`;
-  }
-  return `(${tail ?? UNSETTLED_SIDE_MARK} ${SIDE_ARROW} ${head ?? UNSETTLED_SIDE_MARK})`;
-}
-var RELATIONS_FIELD_LEGEND = "relations legend: `<words> -> <addr>` is an edge this turn cites OUT, `<- <addr> <words>` one cited IN; this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. The trailing `(#tail \u2192 #head)` is the edge's two stored lane sides \u2014 `(#lane)` when both settle in one, `\xB7` a side nobody settled, `[unplaced]` neither. An `E<n>/` before a lane names that endpoint's CURRENT task, resolved at read time and advisory: it is not part of what an edge write is checked against.";
+var RELATIONS_FIELD_LEGEND = "relations legend: `<class> -> <addr>` is an edge this turn cites OUT, `<- <addr> <class>` one cited IN; this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. The class is `correct(full)`, `correct(partial)`, `verify` or `use`. The trailing `(tail \u2192 head)` is each side's RESOLVED lane attribution, printed once when both sides read alike: `#lane derived` (that endpoint is in exactly one lane, so nothing had to be declared), `#lane declared` (several lanes, and this is the declared one), `ambiguous` (several lanes, none declared \u2014 the declaration settlement owes), `none` (that endpoint is in no lane), `invalid (stored #tag)` (the declaration is not among that endpoint's current lane tags). An `E<n>/` before a lane names that endpoint's CURRENT task. Attributions and qualifiers alike are resolved from the endpoints' CURRENT tasks at read time and are ADVISORY: they are not part of what an edge write is checked against, and they are not the authority for a declaration.";
 function buildTurnDirectRelationLines(db, turn) {
   const edges = getTurnRelationEdges(db, turn.id);
   if (edges.outbound.length === 0 && edges.inbound.length === 0) {
     return [];
   }
-  const taskCache = /* @__PURE__ */ new Map();
-  const taskOf = (turnId) => {
-    const cached2 = taskCache.get(turnId);
-    if (cached2 !== void 0) {
-      return cached2;
-    }
-    const resolved = getOwningSegmentId(db, turnId);
-    taskCache.set(turnId, resolved);
-    return resolved;
-  };
-  const viewerTaskId = taskOf(turn.id);
+  const endpointLaneFacts = loadEndpointLaneFacts(db, [
+    turn.id,
+    ...edges.outbound.map((row) => row.otherTurnId),
+    ...edges.inbound.map((row) => row.otherTurnId)
+  ]);
+  const viewerSegmentId = endpointLaneFacts.get(turn.id)?.segmentId ?? null;
+  const outgoingSides = (row) => ({
+    citingId: turn.id,
+    citedId: row.otherTurnId,
+    tailTag: row.tailTag,
+    headTag: row.headTag
+  });
+  const incomingSides = (row) => ({
+    citingId: row.otherTurnId,
+    citedId: turn.id,
+    tailTag: row.tailTag,
+    headTag: row.headTag
+  });
   const lines = [];
-  for (const row of groupDirectRows(edges.outbound)) {
-    const sides = formatSides(
-      formatSide(row.tailTag, viewerTaskId, viewerTaskId),
-      formatSide(row.headTag, taskOf(row.otherTurnId), viewerTaskId)
-    );
+  for (const row of groupDirectRows(
+    edges.outbound,
+    outgoingSides,
+    endpointLaneFacts,
+    viewerSegmentId
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`${row.words.join(",")} -> ${address} ${sides}`);
+    lines.push(`${row.words.join(",")} -> ${address} ${formatSides(row.tail, row.head)}`);
   }
-  for (const row of groupDirectRows(edges.inbound)) {
-    const sides = formatSides(
-      formatSide(row.tailTag, taskOf(row.otherTurnId), viewerTaskId),
-      formatSide(row.headTag, viewerTaskId, viewerTaskId)
-    );
+  for (const row of groupDirectRows(
+    edges.inbound,
+    incomingSides,
+    endpointLaneFacts,
+    viewerSegmentId
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`<- ${address} ${row.words.join(",")} ${sides}`);
+    lines.push(`<- ${address} ${row.words.join(",")} ${formatSides(row.tail, row.head)}`);
   }
   return lines;
 }

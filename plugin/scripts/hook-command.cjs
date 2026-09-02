@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkddbmp" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkdpf23" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -11960,28 +11960,49 @@ function turnMatchesFilter(turn, filter) {
 function formatRelationAddress(currentSessionId, otherSessionId, otherPromptNumber) {
   return currentSessionId === otherSessionId ? `T${otherPromptNumber}` : `S${otherSessionId}/T${otherPromptNumber}`;
 }
-function groupDirectRows(rows) {
-  const byPlacement = /* @__PURE__ */ new Map();
+function renderRelationClassWord(row) {
+  const resolved = edgeRelationClass(row);
+  return resolved === null ? "" : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
+}
+function formatResolvedSide(resolution, viewerSegmentId) {
+  if (resolution.lane !== null) {
+    const lane = resolution.lane.segmentId === viewerSegmentId ? `#${resolution.lane.tag}` : `E${resolution.lane.segmentId}/#${resolution.lane.tag}`;
+    return `${lane} ${resolution.outcome}`;
+  }
+  if (resolution.outcome === "invalid") {
+    return `invalid (stored #${resolution.storedTag})`;
+  }
+  return resolution.outcome;
+}
+var SIDE_ARROW = "\u2192";
+function formatSides(tail, head) {
+  return tail === head ? `(${tail})` : `(${tail} ${SIDE_ARROW} ${head})`;
+}
+function groupDirectRows(rows, resolvableOf, endpointLaneFacts, viewerSegmentId) {
+  const byAttribution = /* @__PURE__ */ new Map();
   for (const row of rows) {
-    const key = `${row.otherTurnId} ${row.tailTag} ${row.headTag}`;
-    const existing = byPlacement.get(key);
-    const word = displayEdgeRelation(row);
+    const resolvable = resolvableOf(row);
+    const sideOf = (side) => formatResolvedSide(resolveEdgeSide(resolvable, side, endpointLaneFacts), viewerSegmentId);
+    const tail = sideOf("tail");
+    const head = sideOf("head");
+    const key = JSON.stringify([row.otherTurnId, tail, head]);
+    const word = renderRelationClassWord(row);
+    const existing = byAttribution.get(key);
     if (existing) {
       if (!existing.words.includes(word)) {
         existing.words.push(word);
       }
       continue;
     }
-    byPlacement.set(key, {
-      otherTurnId: row.otherTurnId,
+    byAttribution.set(key, {
       otherSessionId: row.otherSessionId,
       otherPromptNumber: row.otherPromptNumber,
-      tailTag: row.tailTag,
-      headTag: row.headTag,
+      tail,
+      head,
       words: [word]
     });
   }
-  const grouped = [...byPlacement.values()];
+  const grouped = [...byAttribution.values()];
   for (const group of grouped) {
     group.words.sort();
   }
@@ -11992,66 +12013,54 @@ function groupDirectRows(rows) {
     if (left.otherPromptNumber !== right.otherPromptNumber) {
       return left.otherPromptNumber - right.otherPromptNumber;
     }
-    if (left.tailTag !== right.tailTag) return left.tailTag < right.tailTag ? -1 : 1;
-    if (left.headTag !== right.headTag) return left.headTag < right.headTag ? -1 : 1;
+    if (left.tail !== right.tail) return left.tail < right.tail ? -1 : 1;
+    if (left.head !== right.head) return left.head < right.head ? -1 : 1;
     return 0;
   });
   return grouped;
 }
-var UNPLACED_MARKER = "[unplaced]";
-var UNSETTLED_SIDE_MARK = "\xB7";
-var SIDE_ARROW = "\u2192";
-function formatSide(tag, endpointTaskId, viewerTaskId) {
-  if (tag === "") {
-    return null;
-  }
-  if (endpointTaskId !== null && endpointTaskId !== viewerTaskId) {
-    return `E${endpointTaskId}/#${tag}`;
-  }
-  return `#${tag}`;
-}
-function formatSides(tail, head) {
-  if (tail === null && head === null) {
-    return UNPLACED_MARKER;
-  }
-  if (tail !== null && tail === head) {
-    return `(${tail})`;
-  }
-  return `(${tail ?? UNSETTLED_SIDE_MARK} ${SIDE_ARROW} ${head ?? UNSETTLED_SIDE_MARK})`;
-}
-var RELATIONS_FIELD_LEGEND = "relations legend: `<words> -> <addr>` is an edge this turn cites OUT, `<- <addr> <words>` one cited IN; this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. The trailing `(#tail \u2192 #head)` is the edge's two stored lane sides \u2014 `(#lane)` when both settle in one, `\xB7` a side nobody settled, `[unplaced]` neither. An `E<n>/` before a lane names that endpoint's CURRENT task, resolved at read time and advisory: it is not part of what an edge write is checked against.";
+var RELATIONS_FIELD_LEGEND = "relations legend: `<class> -> <addr>` is an edge this turn cites OUT, `<- <addr> <class>` one cited IN; this turn's own direct edges only, both directions whole, nothing elided and nothing expanded. The class is `correct(full)`, `correct(partial)`, `verify` or `use`. The trailing `(tail \u2192 head)` is each side's RESOLVED lane attribution, printed once when both sides read alike: `#lane derived` (that endpoint is in exactly one lane, so nothing had to be declared), `#lane declared` (several lanes, and this is the declared one), `ambiguous` (several lanes, none declared \u2014 the declaration settlement owes), `none` (that endpoint is in no lane), `invalid (stored #tag)` (the declaration is not among that endpoint's current lane tags). An `E<n>/` before a lane names that endpoint's CURRENT task. Attributions and qualifiers alike are resolved from the endpoints' CURRENT tasks at read time and are ADVISORY: they are not part of what an edge write is checked against, and they are not the authority for a declaration.";
 function buildTurnDirectRelationLines(db, turn) {
   const edges = getTurnRelationEdges(db, turn.id);
   if (edges.outbound.length === 0 && edges.inbound.length === 0) {
     return [];
   }
-  const taskCache = /* @__PURE__ */ new Map();
-  const taskOf = (turnId) => {
-    const cached2 = taskCache.get(turnId);
-    if (cached2 !== void 0) {
-      return cached2;
-    }
-    const resolved = getOwningSegmentId(db, turnId);
-    taskCache.set(turnId, resolved);
-    return resolved;
-  };
-  const viewerTaskId = taskOf(turn.id);
+  const endpointLaneFacts = loadEndpointLaneFacts(db, [
+    turn.id,
+    ...edges.outbound.map((row) => row.otherTurnId),
+    ...edges.inbound.map((row) => row.otherTurnId)
+  ]);
+  const viewerSegmentId = endpointLaneFacts.get(turn.id)?.segmentId ?? null;
+  const outgoingSides = (row) => ({
+    citingId: turn.id,
+    citedId: row.otherTurnId,
+    tailTag: row.tailTag,
+    headTag: row.headTag
+  });
+  const incomingSides = (row) => ({
+    citingId: row.otherTurnId,
+    citedId: turn.id,
+    tailTag: row.tailTag,
+    headTag: row.headTag
+  });
   const lines = [];
-  for (const row of groupDirectRows(edges.outbound)) {
-    const sides = formatSides(
-      formatSide(row.tailTag, viewerTaskId, viewerTaskId),
-      formatSide(row.headTag, taskOf(row.otherTurnId), viewerTaskId)
-    );
+  for (const row of groupDirectRows(
+    edges.outbound,
+    outgoingSides,
+    endpointLaneFacts,
+    viewerSegmentId
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`${row.words.join(",")} -> ${address} ${sides}`);
+    lines.push(`${row.words.join(",")} -> ${address} ${formatSides(row.tail, row.head)}`);
   }
-  for (const row of groupDirectRows(edges.inbound)) {
-    const sides = formatSides(
-      formatSide(row.tailTag, taskOf(row.otherTurnId), viewerTaskId),
-      formatSide(row.headTag, viewerTaskId, viewerTaskId)
-    );
+  for (const row of groupDirectRows(
+    edges.inbound,
+    incomingSides,
+    endpointLaneFacts,
+    viewerSegmentId
+  )) {
     const address = formatRelationAddress(turn.sessionId, row.otherSessionId, row.otherPromptNumber);
-    lines.push(`<- ${address} ${row.words.join(",")} ${sides}`);
+    lines.push(`<- ${address} ${row.words.join(",")} ${formatSides(row.tail, row.head)}`);
   }
   return lines;
 }
