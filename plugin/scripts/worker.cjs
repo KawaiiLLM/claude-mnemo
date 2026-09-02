@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtkadpqf" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkbpyoe" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1312,62 +1312,127 @@ function releaseImpressionDebtClaims(db, jobId) {
   ).run(jobId).changes;
 }
 
-// src/db/tag-namespace.ts
-function findTagNamespaceHolders(db, claiming, tags) {
-  const wanted = [];
-  for (const tag of tags) {
-    if (tag !== "" && !wanted.includes(tag)) {
-      wanted.push(tag);
+// src/db/edge-side-resolution.ts
+var UNDECLARED_SIDE_TAG = "";
+var NO_FACTS = Object.freeze({ segmentId: null, lanes: [] });
+function edgeSideEndpointId(edge, side) {
+  return side === "tail" ? edge.citingId : edge.citedId;
+}
+function edgeSideStoredTag(edge, side) {
+  return side === "tail" ? edge.tailTag : edge.headTag;
+}
+function resolveEdgeSide(edge, side, endpointLaneFacts) {
+  const endpointId = edgeSideEndpointId(edge, side);
+  const facts = endpointLaneFacts.get(endpointId) ?? NO_FACTS;
+  const storedTag = edgeSideStoredTag(edge, side);
+  const cardinality = facts.lanes.length;
+  const base = { storedTag, endpointId, laneCardinality: cardinality };
+  if (storedTag !== UNDECLARED_SIDE_TAG) {
+    if (facts.segmentId !== null && facts.lanes.includes(storedTag)) {
+      return { ...base, outcome: "declared", lane: { segmentId: facts.segmentId, tag: storedTag } };
+    }
+    return { ...base, outcome: "invalid", lane: null };
+  }
+  if (cardinality === 1 && facts.segmentId !== null) {
+    return { ...base, outcome: "derived", lane: { segmentId: facts.segmentId, tag: facts.lanes[0] } };
+  }
+  if (cardinality >= 2) {
+    return { ...base, outcome: "ambiguous", lane: null };
+  }
+  return { ...base, outcome: "none", lane: null };
+}
+function resolveEdgeSides(edge, endpointLaneFacts) {
+  return {
+    tail: resolveEdgeSide(edge, "tail", endpointLaneFacts),
+    head: resolveEdgeSide(edge, "head", endpointLaneFacts)
+  };
+}
+function loadEndpointLaneFacts(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  const facts = /* @__PURE__ */ new Map();
+  if (ids.length === 0) {
+    return facts;
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const owningSegments = new Map(
+    db.query(
+      `SELECT turn_id AS turnId, MIN(segment_id) AS segmentId
+           FROM segment_members
+          WHERE turn_id IN (${placeholders})
+          GROUP BY turn_id`
+    ).all(...ids).map((row) => [row.turnId, row.segmentId])
+  );
+  const hasLanesTable = db.query(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'lanes'`
+  ).all().length > 0;
+  const declaredBySegment = /* @__PURE__ */ new Map();
+  const declaredFor = (segmentId) => {
+    let declared = declaredBySegment.get(segmentId);
+    if (declared === void 0) {
+      declared = hasLanesTable ? new Set(
+        db.query(
+          `SELECT tag FROM lanes WHERE segment_id = ?`
+        ).all(segmentId).map((row) => row.tag)
+      ) : /* @__PURE__ */ new Set();
+      declaredBySegment.set(segmentId, declared);
+    }
+    return declared;
+  };
+  for (const row of db.query(
+    `SELECT id, tags FROM turns WHERE id IN (${placeholders})`
+  ).all(...ids)) {
+    const segmentId = owningSegments.get(row.id);
+    if (segmentId === void 0) {
+      facts.set(row.id, { segmentId: null, lanes: [] });
+      continue;
+    }
+    const declared = declaredFor(segmentId);
+    facts.set(row.id, {
+      segmentId,
+      lanes: parseStoredTags(row.tags).filter((tag) => declared.has(tag))
+    });
+  }
+  for (const id of ids) {
+    if (!facts.has(id)) {
+      facts.set(id, { segmentId: null, lanes: [] });
     }
   }
-  if (wanted.length === 0) {
+  return facts;
+}
+function parseStoredTags(raw) {
+  if (raw === null) {
     return [];
   }
-  const placeholders = wanted.map(() => "?").join(",");
-  const rows = claiming === "lane" ? db.query(
-    `SELECT id AS segmentId, json_extract(tags, '$[0]') AS tag
-               FROM segments
-              WHERE json_array_length(tags) >= 1
-                AND json_extract(tags, '$[0]') IN (${placeholders})
-              ORDER BY id ASC`
-  ).all(...wanted) : db.query(
-    `SELECT segment_id AS segmentId, tag FROM lanes
-              WHERE tag IN (${placeholders})
-              ORDER BY segment_id ASC, id ASC`
-  ).all(...wanted);
-  const namespace = claiming === "lane" ? "segment" : "lane";
-  const holders = [];
-  for (const tag of wanted) {
-    for (const row of rows) {
-      if (row.tag === tag) {
-        holders.push({ namespace, segmentId: row.segmentId, tag });
-      }
-    }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+  } catch {
+    return [];
   }
-  return holders;
 }
-function findTagNamespaceHolder(db, claiming, tag) {
-  return findTagNamespaceHolders(db, claiming, [tag])[0] ?? null;
-}
-function formatTagNamespaceRefusal(claiming, holder) {
-  const shared = "a segment tag and a lane tag are ONE namespace \u2014 a turn carries both in its own tags, and the reader that derives a turn's segment from them cannot tell the two apart";
-  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or delete E${holder.segmentId}'s lane first.`;
-}
-var TagNamespaceCollisionError = class extends Error {
-  claiming;
-  holder;
-  constructor(claiming, holder) {
-    super(formatTagNamespaceRefusal(claiming, holder));
-    this.name = "TagNamespaceCollisionError";
-    this.claiming = claiming;
-    this.holder = holder;
-  }
-};
 
-// src/db/turn-liveness.ts
-function liveTurnSql(alias = "") {
-  const prefix = alias ? `${alias}.` : "";
-  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+// src/db/lane-disposition.ts
+function recordLaneTouch(db, record) {
+  db.query(
+    `INSERT OR IGNORE INTO lane_run_touches
+       (job_id, touch_kind, entity_id, lane_tag, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(record.jobId, record.kind, record.entityId, record.laneTag, record.createdAtEpoch);
+}
+function recordLaneReadReceipt(db, receipt) {
+  db.query(
+    `INSERT INTO lane_read_receipts
+       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    receipt.readerId,
+    receipt.segmentId,
+    receipt.laneTag,
+    JSON.stringify(receipt.membershipTurnIds),
+    JSON.stringify(receipt.renderedTurnIds),
+    receipt.sequence,
+    receipt.createdAtEpoch
+  );
 }
 
 // src/shared/config.ts
@@ -1650,6 +1715,187 @@ function loadConfigEraCutoff() {
   }
 }
 
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "discuss",
+  "research",
+  "design",
+  "implement",
+  "refactor",
+  "fix",
+  "measure",
+  "review",
+  "ops",
+  "delegate",
+  "correction"
+];
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_GLYPH = {
+  discuss: "\u{1F4AC}",
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  refactor: "\u{1F504}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  ops: "\u2699\uFE0F",
+  delegate: "\u{1F91D}",
+  correction: "\u21A9\uFE0F"
+};
+var COMPACT_TYPE_GLYPH = "\u23F8";
+var LEGACY_TYPE_GLYPH = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F",
+  compact: COMPACT_TYPE_GLYPH
+};
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+// src/shared/turn-phase.ts
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+var EDGE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies"
+];
+var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
+
+// src/shared/relation-class.ts
+var RELATION_CLASSES = ["correct", "verify", "use"];
+var RELATION_COVERAGES = ["full", "partial"];
+var NO_RELATION_COVERAGE = "";
+var NO_RELATION_CLASS = "";
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+var LEGACY_RELATION_CLASS = {
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
+};
+var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+  correct: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+  ),
+  verify: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+  ),
+  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+});
+var INTERIM_LEGACY_RELATION = Object.freeze([
+  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+]);
+function edgeRelationClass(row) {
+  if (isRelationClass(row.relationClass)) {
+    return {
+      relationClass: row.relationClass,
+      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    };
+  }
+  if (row.relation === null) {
+    return null;
+  }
+  return LEGACY_RELATION_CLASS[row.relation] ?? null;
+}
+function relationClassBearingSql(alias) {
+  const classes = RELATION_CLASSES.map((value) => `'${value}'`).join(", ");
+  const words = Object.keys(LEGACY_RELATION_CLASS).map((word) => `'${word}'`).join(", ");
+  return `(${alias}.relation_class IN (${classes}) OR (COALESCE(${alias}.relation_class, '') = '' AND ${alias}.relation IN (${words})))`;
+}
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+var RETIRED_RELATION_FIELDS = Object.freeze([
+  ["override", 'correct with `"coverage": "full"`'],
+  ["narrows", 'correct with `"coverage": "partial"`'],
+  ["extends", "use"],
+  ["consume", "use"],
+  ["grounds", "use"],
+  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+  ["verifies", "verify"],
+  ["retractOverride", "retractCorrect"],
+  ["retractNarrows", "retractCorrect"],
+  ["retractExtends", "retractUse"],
+  ["retractConsume", "retractUse"],
+  ["retractGrounds", "retractUse"],
+  ["retractIndexes", "retractUse"],
+  ["retractVerifies", "retractVerify"]
+]);
+
+// src/db/turn-liveness.ts
+function liveTurnSql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+}
+
 // src/db/note-settlement-snapshots.ts
 var WRITABLE_TURNS_DDL = `
   CREATE TABLE IF NOT EXISTS note_settlement_writable_turns (
@@ -1873,65 +2119,264 @@ function stampField(db, entityType, entityId, field, writer, nowEpoch) {
   ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
   return { writer, writeSequence, writtenAtEpoch: nowEpoch };
 }
+var RELATIONS_GATE_FIELD = "relations";
+function stampTurnRelationsRevision(db, turnId, writer, nowEpoch) {
+  return stampField(
+    db,
+    "turn",
+    turnId,
+    RELATIONS_GATE_FIELD,
+    writer ?? ANONYMOUS_WRITER,
+    nowEpoch
+  );
+}
 
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
+// src/db/normalize-incident-attribution.ts
+var SIDES = ["tail", "head"];
+function normalizeIncidentAttribution(db, turnIds, ctx) {
+  const ids = [...new Set(turnIds)];
+  const empty = {
+    clearedDeclarations: [],
+    deletedEdges: [],
+    stampedCiterIds: [],
+    touchedLanes: []
+  };
+  if (ids.length === 0) {
+    return empty;
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  const incident = db.query(
+    `SELECT id,
+              citing_kind AS citingKind, citing_id AS citingId,
+              cited_kind AS citedKind, cited_id AS citedId,
+              relation_class AS relationClass, relation_coverage AS relationCoverage,
+              tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges
+        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+          AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))
+        ORDER BY id ASC`
+  ).all(...ids, ...ids);
+  if (incident.length === 0) {
+    return empty;
+  }
+  const endpointIds = /* @__PURE__ */ new Set();
+  for (const row of incident) {
+    endpointIds.add(row.citingId);
+    endpointIds.add(row.citedId);
+  }
+  const facts = loadEndpointLaneFacts(db, [...endpointIds]);
+  const moved = new Set(ids);
+  const clearSide = {
+    tail: db.query(`UPDATE memory_edges SET tail_tag = '' WHERE id = ?`),
+    head: db.query(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`)
+  };
+  const collidingSibling = db.query(
+    `SELECT other.id AS id
+       FROM memory_edges me
+       JOIN memory_edges other
+         ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
+        AND other.cited_kind = me.cited_kind AND other.cited_id = me.cited_id
+        AND other.relation IS me.relation
+        AND other.tail_tag = ? AND other.head_tag = ?
+        AND other.id <> me.id
+      WHERE me.id = ?
+      ORDER BY other.id ASC
+      LIMIT 1`
+  );
+  const dropSideIndexRow = db.query(
+    `DELETE FROM memory_edge_side_tags WHERE edge_row_id = ? AND side = ?`
+  );
+  const dropAllSideIndexRows = db.query(
+    `DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?`
+  );
+  const deleteEdge = db.query(`DELETE FROM memory_edges WHERE id = ?`);
+  const insertReceipt = db.query(
+    `INSERT INTO edge_attribution_receipts
+       (edge_row_id, action, side, citing_id, cited_id,
+        relation_class, relation_coverage, tail_tag, head_tag, writer, created_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const clearedDeclarations = [];
+  const deletedEdges = [];
+  const stampedCiterIds = /* @__PURE__ */ new Set();
+  const touched = /* @__PURE__ */ new Map();
+  const onAmbiguous = ctx.onAmbiguous ?? (() => "delete");
+  const touch = (lane) => {
+    if (lane === null) return;
+    touched.set(`${lane.segmentId}:${lane.tag}`, lane);
+  };
+  for (const row of incident) {
+    const live = { ...row };
+    let deleted = false;
+    for (const side of SIDES) {
+      if (deleted) break;
+      const endpointId = side === "tail" ? row.citingId : row.citedId;
+      if (!moved.has(endpointId)) continue;
+      if (ctx.previousLaneFacts !== void 0) {
+        touch(resolveEdgeSide(row, side, ctx.previousLaneFacts).lane);
+      }
+      const resolved = resolveEdgeSide(live, side, facts);
+      const storedTag = edgeSideStoredTag(live, side);
+      if (storedTag !== UNDECLARED_SIDE_TAG) {
+        const reason = resolved.outcome === "invalid" ? "invalid" : resolved.laneCardinality < 2 ? "redundant" : null;
+        if (reason === null) {
+          touch(resolved.lane);
+          continue;
+        }
+        const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
+        const nextHead = side === "head" ? UNDECLARED_SIDE_TAG : live.headTag;
+        if (collidingSibling.get(nextTail, nextHead, row.id) !== null) {
+          dropAllSideIndexRows.run(row.id);
+          deleteEdge.run(row.id);
+          insertReceipt.run(
+            row.id,
+            "delete-edge",
+            side,
+            row.citingId,
+            row.citedId,
+            row.relationClass,
+            row.relationCoverage,
+            row.tailTag,
+            row.headTag,
+            ctx.writer,
+            ctx.nowEpoch
+          );
+          deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+          stampedCiterIds.add(row.citingId);
+          deleted = true;
+          continue;
+        }
+        clearSide[side].run(row.id);
+        dropSideIndexRow.run(row.id, side);
+        insertReceipt.run(
+          row.id,
+          "clear-declaration",
+          side,
+          row.citingId,
+          row.citedId,
+          row.relationClass,
+          row.relationCoverage,
+          row.tailTag,
+          row.headTag,
+          ctx.writer,
+          ctx.nowEpoch
+        );
+        clearedDeclarations.push({ edgeId: row.id, side, clearedTag: storedTag, reason });
+        stampedCiterIds.add(row.citingId);
+        if (side === "tail") {
+          live.tailTag = UNDECLARED_SIDE_TAG;
+        } else {
+          live.headTag = UNDECLARED_SIDE_TAG;
+        }
+      }
+      const after = resolveEdgeSide(live, side, facts);
+      if (after.outcome === "ambiguous") {
+        if (onAmbiguous(row, side) === "delete") {
+          dropAllSideIndexRows.run(row.id);
+          deleteEdge.run(row.id);
+          insertReceipt.run(
+            row.id,
+            "delete-edge",
+            side,
+            row.citingId,
+            row.citedId,
+            row.relationClass,
+            row.relationCoverage,
+            row.tailTag,
+            row.headTag,
+            ctx.writer,
+            ctx.nowEpoch
+          );
+          deletedEdges.push({
+            edgeId: row.id,
+            citingId: row.citingId,
+            citedId: row.citedId,
+            side
+          });
+          stampedCiterIds.add(row.citingId);
+          deleted = true;
+        }
+        continue;
+      }
+      touch(after.lane);
+    }
+  }
+  for (const citerId of [...stampedCiterIds].sort((a, b) => a - b)) {
+    stampTurnRelationsRevision(db, citerId, ctx.writer, ctx.nowEpoch);
+  }
+  const touchedLanes = [...touched.values()].sort(
+    (a, b) => a.segmentId - b.segmentId || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0)
+  );
+  if (ctx.jobId !== void 0) {
+    for (const lane of touchedLanes) {
+      recordLaneTouch(db, {
+        jobId: ctx.jobId,
+        kind: "lane",
+        entityId: lane.segmentId,
+        laneTag: lane.tag,
+        createdAtEpoch: ctx.nowEpoch
+      });
+    }
+  }
+  return {
+    clearedDeclarations,
+    deletedEdges,
+    stampedCiterIds: [...stampedCiterIds].sort((a, b) => a - b),
+    touchedLanes
+  };
 }
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
+
+// src/db/tag-namespace.ts
+function findTagNamespaceHolders(db, claiming, tags) {
+  const wanted = [];
+  for (const tag of tags) {
+    if (tag !== "" && !wanted.includes(tag)) {
+      wanted.push(tag);
+    }
+  }
+  if (wanted.length === 0) {
+    return [];
+  }
+  const placeholders = wanted.map(() => "?").join(",");
+  const rows = claiming === "lane" ? db.query(
+    `SELECT id AS segmentId, json_extract(tags, '$[0]') AS tag
+               FROM segments
+              WHERE json_array_length(tags) >= 1
+                AND json_extract(tags, '$[0]') IN (${placeholders})
+              ORDER BY id ASC`
+  ).all(...wanted) : db.query(
+    `SELECT segment_id AS segmentId, tag FROM lanes
+              WHERE tag IN (${placeholders})
+              ORDER BY segment_id ASC, id ASC`
+  ).all(...wanted);
+  const namespace = claiming === "lane" ? "segment" : "lane";
+  const holders = [];
+  for (const tag of wanted) {
+    for (const row of rows) {
+      if (row.tag === tag) {
+        holders.push({ namespace, segmentId: row.segmentId, tag });
+      }
+    }
+  }
+  return holders;
+}
+function findTagNamespaceHolder(db, claiming, tag) {
+  return findTagNamespaceHolders(db, claiming, [tag])[0] ?? null;
+}
+function formatTagNamespaceRefusal(claiming, holder) {
+  const shared = "a segment tag and a lane tag are ONE namespace \u2014 a turn carries both in its own tags, and the reader that derives a turn's segment from them cannot tell the two apart";
+  return claiming === "lane" ? `"${holder.tag}" is already E${holder.segmentId}'s segment tag \u2014 ${shared}. Pick another word for the lane, or retag E${holder.segmentId} off it first.` : `"${holder.tag}" is already a lane declared on E${holder.segmentId} \u2014 ${shared}. Pick another word for the segment, or delete E${holder.segmentId}'s lane first.`;
+}
+var TagNamespaceCollisionError = class extends Error {
+  claiming;
+  holder;
+  constructor(claiming, holder) {
+    super(formatTagNamespaceRefusal(claiming, holder));
+    this.name = "TagNamespaceCollisionError";
+    this.claiming = claiming;
+    this.holder = holder;
+  }
 };
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
 
 // src/db/segments.ts
 var SEGMENT_COLUMNS = `
@@ -2159,6 +2604,7 @@ function writeMembershipTags(db, input) {
   }
   const index = segmentTagIndex(db);
   const refusals = [];
+  const previousLaneFacts = input.callerNormalizesAttribution ? void 0 : loadEndpointLaneFacts(db, writes.map((write) => write.turnId));
   for (const write of writes) {
     const target = derivedTarget(index, write.tags);
     if (operation === "normal") {
@@ -2228,7 +2674,15 @@ function writeMembershipTags(db, input) {
       recomputeSegmentFacetsForTurn(db, write.turnId);
     }
   }
-  return { ok: true, operation, changedTurnIds, membership };
+  if (input.callerNormalizesAttribution === true || changedTurnIds.length === 0) {
+    return { ok: true, operation, changedTurnIds, membership };
+  }
+  const attribution = normalizeIncidentAttribution(db, changedTurnIds, {
+    writer: input.normalizationWriter ?? input.writer ?? ANONYMOUS_WRITER,
+    nowEpoch,
+    previousLaneFacts
+  });
+  return { ok: true, operation, changedTurnIds, membership, attribution };
 }
 function recomputeSegmentFacetsForTurn(db, turnId) {
   const rows = db.query(
@@ -2308,7 +2762,7 @@ function findMembershipLaneStrandings(db, turnIds, targetSegmentId) {
               tail_tag AS tailTag, head_tag AS headTag
          FROM memory_edges
         WHERE citing_kind = 'turn' AND cited_kind = 'turn'
-          AND relation IS NOT NULL
+          AND ${relationClassBearingSql("memory_edges")}
           AND (tail_tag <> '' OR head_tag <> '')
           AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`
   ).all(...ids, ...ids);
@@ -2828,118 +3282,6 @@ function countQueueItemsForSession(db, sessionDbId) {
   return getPendingQueueCount(db, sessionDbId);
 }
 
-// src/shared/turn-phase.ts
-var TYPE_PHASE = {
-  research: "evidence",
-  measure: "evidence",
-  design: "decision",
-  discuss: "decision",
-  correction: "decision",
-  implement: "delivery",
-  refactor: "delivery",
-  fix: "delivery",
-  delegate: "delivery",
-  review: "delivery",
-  ops: "delivery"
-};
-function phasesForTypes(types) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const raw of types) {
-    const phase = TYPE_PHASE[raw];
-    if (phase !== void 0) {
-      phases.add(phase);
-    }
-  }
-  return phases;
-}
-var EDGE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies"
-];
-var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
-var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-
-// src/shared/relation-class.ts
-var RELATION_CLASSES = ["correct", "verify", "use"];
-var RELATION_COVERAGES = ["full", "partial"];
-var NO_RELATION_COVERAGE = "";
-var NO_RELATION_CLASS = "";
-function isRelationClass(value) {
-  return typeof value === "string" && RELATION_CLASSES.includes(value);
-}
-function isRelationCoverage(value) {
-  return typeof value === "string" && RELATION_COVERAGES.includes(value);
-}
-var LEGACY_RELATION_CLASS = {
-  override: { relationClass: "correct", relationCoverage: "full" },
-  narrows: { relationClass: "correct", relationCoverage: "partial" },
-  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
-  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
-};
-var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
-  correct: EDGE_RELATIONS.filter(
-    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
-  ),
-  verify: EDGE_RELATIONS.filter(
-    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
-  ),
-  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
-});
-var INTERIM_LEGACY_RELATION = Object.freeze([
-  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
-  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
-  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
-  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
-]);
-function edgeRelationClass(row) {
-  if (isRelationClass(row.relationClass)) {
-    return {
-      relationClass: row.relationClass,
-      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
-    };
-  }
-  if (row.relation === null) {
-    return null;
-  }
-  return LEGACY_RELATION_CLASS[row.relation] ?? null;
-}
-function formatRelationClass(relationClass, relationCoverage) {
-  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
-}
-function displayEdgeRelation(row) {
-  if (isRelationClass(row.relationClass)) {
-    return formatRelationClass(
-      row.relationClass,
-      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
-    );
-  }
-  return row.relation ?? "";
-}
-var RETIRED_RELATION_FIELDS = Object.freeze([
-  ["override", 'correct with `"coverage": "full"`'],
-  ["narrows", 'correct with `"coverage": "partial"`'],
-  ["extends", "use"],
-  ["consume", "use"],
-  ["grounds", "use"],
-  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
-  ["verifies", "verify"],
-  ["retractOverride", "retractCorrect"],
-  ["retractNarrows", "retractCorrect"],
-  ["retractExtends", "retractUse"],
-  ["retractConsume", "retractUse"],
-  ["retractGrounds", "retractUse"],
-  ["retractIndexes", "retractUse"],
-  ["retractVerifies", "retractVerify"]
-]);
-
 // src/db/memory-edges.ts
 var EDGE_NODE_KINDS = ["turn", "segment"];
 var CITING_NODE_KINDS = ["turn", "segment", "session"];
@@ -3229,7 +3571,6 @@ function getRelationEdgesAmongTurns(db, turnIds) {
     return [];
   }
   const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
               me.tail_tag AS tailTag, me.head_tag AS headTag,
@@ -3239,9 +3580,9 @@ function getRelationEdgesAmongTurns(db, turnIds) {
        JOIN turns td ON td.id = me.cited_id
        WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...ids, ...ids, ...EDGE_RELATIONS).map((row) => ({
+  ).all(...ids, ...ids).map((row) => ({
     citingId: row.citingId,
     citedId: row.citedId,
     relation: row.relation,
@@ -3250,26 +3591,6 @@ function getRelationEdgesAmongTurns(db, turnIds) {
     relationClass: row.relationClass ?? NO_RELATION_CLASS,
     relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
   }));
-}
-function getRolledBackCiterIds(db, citingTurnIds) {
-  const ids = [...new Set(citingTurnIds)];
-  if (ids.length === 0) {
-    return [];
-  }
-  const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db.query(
-    `SELECT DISTINCT me.citing_id AS citingId
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")}
-         AND td.was_rolled_back = 1
-       ORDER BY me.citing_id ASC`
-  ).all(...ids, ...EDGE_RELATIONS).map((row) => row.citingId);
 }
 function rebuildMemoryEdgeSideTagsIndexCore(db) {
   db.exec("DELETE FROM memory_edge_side_tags");
@@ -5801,6 +6122,25 @@ var MEMORY_EDGE_SIDE_TAGS_DDL = `
   CREATE INDEX IF NOT EXISTS idx_memory_edge_side_tags_tag
     ON memory_edge_side_tags(side, tag, edge_row_id);
 `;
+var EDGE_ATTRIBUTION_RECEIPTS_DDL = `
+  CREATE TABLE IF NOT EXISTS edge_attribution_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    edge_row_id INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('clear-declaration', 'delete-edge')),
+    side TEXT NOT NULL CHECK (side IN ('tail', 'head')),
+    citing_id INTEGER NOT NULL,
+    cited_id INTEGER NOT NULL,
+    relation_class TEXT NOT NULL DEFAULT '',
+    relation_coverage TEXT NOT NULL DEFAULT '',
+    tail_tag TEXT NOT NULL DEFAULT '',
+    head_tag TEXT NOT NULL DEFAULT '',
+    writer TEXT NOT NULL,
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_edge_attribution_receipts_citing
+    ON edge_attribution_receipts(citing_id, created_at_epoch);
+`;
 var MEMORY_EDGES_PRUNE_DELETED_TURN_DDL = `
   CREATE TRIGGER IF NOT EXISTS memory_edges_prune_deleted_turn
     AFTER DELETE ON turns
@@ -7135,6 +7475,7 @@ function ensureMemoryEdgesSchema(db) {
     db.exec(MEMORY_EDGE_TAGS_DDL);
   }
   db.exec(MEMORY_EDGE_SIDE_TAGS_DDL);
+  db.exec(EDGE_ATTRIBUTION_RECEIPTS_DDL);
   if (isFirstCreation) {
     migrateTurnCitationsToEdges(db);
   }
@@ -9112,7 +9453,7 @@ function computeSettlementWritableTurnIds(db, renderedTurnIds) {
            JOIN turns td ON td.id = me.cited_id
           WHERE me.citing_id IN (${placeholders})
             AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-            AND me.relation IS NOT NULL
+            AND ${relationClassBearingSql("me")}
             AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
     ).all(...chunk);
     for (const row of rows) {
@@ -10306,8 +10647,26 @@ var JUDGMENT_LOOKBACK_PROMPTS = 50;
 function turnOrderKey(sessionId, promptNumber) {
   return [sessionId, promptNumber];
 }
-var CROSS_PHASE_CITEDNESS_RELATIONS = ["grounds", "verifies", "refutes"];
-var SEGMENT_GRAPH_RELATIONS_SQL = [...STANCE_RELATIONS, "consume", "grounds"];
+function createProjectionSideResolver(db) {
+  const known = /* @__PURE__ */ new Map();
+  const prime = (turnIds) => {
+    const missing = [...new Set(turnIds)].filter((id) => !known.has(id));
+    if (missing.length === 0) {
+      return;
+    }
+    for (const [id, entry] of loadEndpointLaneFacts(db, missing)) {
+      known.set(id, entry);
+    }
+  };
+  return {
+    prime,
+    facts: () => known,
+    resolve: (row, side) => {
+      prime([row.citingId, row.citedId]);
+      return resolveEdgeSide(row, side, known);
+    }
+  };
+}
 function edgeKey(row) {
   return JSON.stringify([row.citingId, row.citedId, row.relation, row.tailTag, row.headTag]);
 }
@@ -10352,54 +10711,24 @@ function resolveSeedTurnIds(db, scope) {
        ORDER BY t.created_at_epoch ASC, t.id ASC`
   ).all(scope.segmentId).map((row) => row.id);
 }
-function loadTaggedEdgesTouching(db, turnIds) {
+function loadClassEdgesTouching(db, turnIds) {
   if (turnIds.length === 0) {
     return [];
   }
   const placeholders = turnIds.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE (me.citing_id IN (${placeholders}) OR me.cited_id IN (${placeholders}))
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND (me.tail_tag <> '' OR me.head_tag <> '')
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
   ).all(...turnIds, ...turnIds);
-}
-function loadEdgesForTag(db, tag) {
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.id IN (SELECT edge_row_id FROM memory_edge_side_tags WHERE tag = ?)
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(tag);
-}
-function loadEdgesByRelationTouching(db, turnIds, relations) {
-  if (turnIds.length === 0 || relations.length === 0) {
-    return [];
-  }
-  const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = relations.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...relations);
 }
 function loadSegmentTurnIdsCarryingTag(db, segmentId, tag) {
   return db.query(
@@ -10430,7 +10759,7 @@ function loadJudgmentAnchorTurnIds(db, window) {
          AND ${liveTurnSql()}`
   ).all(window.sessionId, promptStart, window.windowEnd).map((row) => row.id);
 }
-function componentsOfLane(laneKey, memberIds, laneEdges, owningSegments, judgmentIds) {
+function componentsOfLane(laneKey, memberIds, laneEdges, owningSegments, judgmentIds, resolver) {
   const parent = /* @__PURE__ */ new Map();
   const find = (id) => {
     let root = id;
@@ -10451,7 +10780,7 @@ function componentsOfLane(laneKey, memberIds, laneEdges, owningSegments, judgmen
   for (const row of laneEdges) {
     if (!memberIds.has(row.citingId) || !memberIds.has(row.citedId)) continue;
     const claims = laneMembershipClaims(
-      toEdgeInput(row),
+      toEdgeInput(row, resolver),
       segmentKeyFor(owningSegments, row.citingId),
       segmentKeyFor(owningSegments, row.citedId)
     );
@@ -10502,54 +10831,57 @@ function loadComponentEdgesAmong(db, turnIds) {
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = SEGMENT_GRAPH_RELATIONS_SQL.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
+         AND ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...SEGMENT_GRAPH_RELATIONS_SQL);
+  ).all(...turnIds, ...turnIds);
 }
 function loadOutOfVocabularyEdgesAmong(db, turnIds) {
   if (turnIds.length === 0) {
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders}) AND me.cited_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...turnIds, ...EDGE_RELATIONS);
+  ).all(...turnIds, ...turnIds);
 }
 function loadOutOfVocabularyEdgesFromCiting(db, turnIds) {
   if (turnIds.length === 0) {
     return [];
   }
   const idPlaceholders = turnIds.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
   return db.query(
     `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              COALESCE(me.relation_class, '') AS relationClass,
+              COALESCE(me.relation_coverage, '') AS relationCoverage
        FROM memory_edges me
        JOIN turns tc ON tc.id = me.citing_id
        JOIN turns td ON td.id = me.cited_id
        WHERE me.citing_id IN (${idPlaceholders})
          AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IS NOT NULL AND me.relation NOT IN (${relationPlaceholders})
+         AND me.relation IS NOT NULL AND NOT ${relationClassBearingSql("me")}
          AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...turnIds, ...EDGE_RELATIONS);
+  ).all(...turnIds);
 }
 function loadSegmentFacts(db, segmentIds) {
   const ids = [...new Set(segmentIds)].sort((a, b) => a - b);
@@ -10567,34 +10899,44 @@ function loadSegmentFacts(db, segmentIds) {
     ).all(...ids)) {
       declaredBySegment.set(row.segmentId, row.laneCount);
     }
+    const declaredTagsBySegment = /* @__PURE__ */ new Map();
     for (const row of db.query(
-      `SELECT l.segment_id AS segmentId, l.tag AS tag
-         FROM lanes l
-         WHERE l.segment_id IN (${placeholders})
-           AND NOT EXISTS (
-             SELECT 1
-             FROM memory_edge_side_tags mest
-             JOIN memory_edges me ON me.id = mest.edge_row_id
-             JOIN turns tc ON tc.id = me.citing_id
-             JOIN turns td ON td.id = me.cited_id
-             WHERE mest.tag = l.tag
-               AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-               AND me.relation IS NOT NULL
-               AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
-               AND (
-                 (mest.side = 'tail'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.citing_id) = l.segment_id)
-                 OR (mest.side = 'head'
-                   AND (SELECT MIN(sm.segment_id) FROM segment_members sm WHERE sm.turn_id = me.cited_id) = l.segment_id)
-               )
-           )
-         ORDER BY l.segment_id ASC, l.tag ASC`
+      `SELECT segment_id AS segmentId, tag AS tag
+           FROM lanes WHERE segment_id IN (${placeholders})
+          ORDER BY segment_id ASC, tag ASC`
     ).all(...ids)) {
-      const bucket = emptyLanesBySegment.get(row.segmentId);
+      const bucket = declaredTagsBySegment.get(row.segmentId);
       if (bucket === void 0) {
-        emptyLanesBySegment.set(row.segmentId, [row.tag]);
+        declaredTagsBySegment.set(row.segmentId, [row.tag]);
       } else {
         bucket.push(row.tag);
+      }
+    }
+    const attributedBySegment = /* @__PURE__ */ new Map();
+    const resolver = createProjectionSideResolver(db);
+    for (const segmentId of ids) {
+      const attributed = /* @__PURE__ */ new Set();
+      attributedBySegment.set(segmentId, attributed);
+      const memberIds = loadSegmentTurnIds(db, segmentId);
+      if (memberIds.length === 0) {
+        continue;
+      }
+      const incident = loadClassEdgesTouching(db, memberIds);
+      resolver.prime(incident.flatMap((row) => [row.citingId, row.citedId]));
+      for (const row of incident) {
+        for (const side of ["tail", "head"]) {
+          const lane = resolver.resolve(row, side).lane;
+          if (lane !== null && lane.segmentId === segmentId) {
+            attributed.add(lane.tag);
+          }
+        }
+      }
+    }
+    for (const [segmentId, tags] of declaredTagsBySegment) {
+      const attributed = attributedBySegment.get(segmentId) ?? /* @__PURE__ */ new Set();
+      const empty = tags.filter((tag) => !attributed.has(tag));
+      if (empty.length > 0) {
+        emptyLanesBySegment.set(segmentId, empty);
       }
     }
   }
@@ -10646,13 +10988,27 @@ function parseTurnTags(raw) {
   }
   return canonicalTagSet(parsed);
 }
-function toEdgeInput(row) {
+function toEdgeInput(row, resolver) {
+  const tail = resolver.resolve(row, "tail");
+  const head = resolver.resolve(row, "head");
   return {
     citingId: row.citingId,
     citedId: row.citedId,
     relation: row.relation,
-    tailTag: row.tailTag,
-    headTag: row.headTag
+    relationClass: row.relationClass,
+    relationCoverage: row.relationCoverage,
+    // THE RESOLVED ATTRIBUTION (main-agent-edges spec D2), not the stored word
+    // — `''` for a side that attributes to no lane. Every lane-keyed reader
+    // downstream (`laneMembershipClaims`, the coupling report, the console
+    // payload, the timeline's lane chain) asks the same question this answers.
+    tailTag: tail.lane?.tag ?? "",
+    headTag: head.lane?.tag ?? "",
+    tailOutcome: tail.outcome,
+    headOutcome: head.outcome,
+    // The STORED declarations, carried alongside so an `invalid` finding can
+    // name the word that stopped being true.
+    storedTailTag: row.tailTag,
+    storedHeadTag: row.headTag
   };
 }
 function createLaneTagResolver(db) {
@@ -10692,6 +11048,7 @@ function loadLaneCheckScope(db, scope) {
   let involvedLaneKeys;
   let seedTurnIds;
   const laneTagsFor = createLaneTagResolver(db);
+  const sideResolver = createProjectionSideResolver(db);
   const judgmentWindow = scope.kind === "turns" ? scope.judgment : void 0;
   const judgmentIds = judgmentWindow === void 0 ? void 0 : new Set(loadJudgmentAnchorTurnIds(db, judgmentWindow));
   if (scope.kind === "lanes") {
@@ -10699,20 +11056,19 @@ function loadLaneCheckScope(db, scope) {
     seedTurnIds = [];
   } else {
     seedTurnIds = resolveSeedTurnIds(db, scope);
-    const discoveryRows = loadTaggedEdgesTouching(db, seedTurnIds);
+    const discoveryRows = loadClassEdgesTouching(db, seedTurnIds);
     const owningSegments = loadOwningSegments(
       db,
       discoveryRows.flatMap((row) => [row.citingId, row.citedId])
     );
     const seen = /* @__PURE__ */ new Map();
+    sideResolver.prime(discoveryRows.flatMap((row) => [row.citingId, row.citedId]));
     for (const row of discoveryRows) {
-      if (row.tailTag !== "") {
-        const citingKey = { segment: segmentKeyFor(owningSegments, row.citingId), tag: row.tailTag };
-        seen.set(laneKeyToken(citingKey), citingKey);
-      }
-      if (row.headTag !== "") {
-        const citedKey = { segment: segmentKeyFor(owningSegments, row.citedId), tag: row.headTag };
-        seen.set(laneKeyToken(citedKey), citedKey);
+      for (const side of ["tail", "head"]) {
+        const lane = sideResolver.resolve(row, side).lane;
+        if (lane === null) continue;
+        const key = { segment: String(lane.segmentId), tag: lane.tag };
+        seen.set(laneKeyToken(key), key);
       }
     }
     const seedTurnRows = loadLiveTurns(db, seedTurnIds);
@@ -10739,13 +11095,13 @@ function loadLaneCheckScope(db, scope) {
     if (laneKey.segment !== DEFAULT_SEGMENT) {
       laneMemberTotals.push({ key: laneKey, declaredMemberCount: scannedMembers.size });
     }
-    const candidates = loadEdgesForTag(db, laneKey.tag);
-    const owningSegments = candidates.length === 0 ? /* @__PURE__ */ new Map() : loadOwningSegments(
-      db,
-      candidates.flatMap((row) => [row.citingId, row.citedId])
-    );
+    const candidates = loadClassEdgesTouching(db, [...scannedMembers]);
+    sideResolver.prime(candidates.flatMap((row) => [row.citingId, row.citedId]));
     const laneEdges = candidates.filter(
-      (row) => row.tailTag === laneKey.tag && segmentKeyFor(owningSegments, row.citingId) === laneKey.segment || row.headTag === laneKey.tag && segmentKeyFor(owningSegments, row.citedId) === laneKey.segment
+      (row) => ["tail", "head"].some((side) => {
+        const lane = sideResolver.resolve(row, side).lane;
+        return lane !== null && String(lane.segmentId) === laneKey.segment && lane.tag === laneKey.tag;
+      })
     );
     if (judgmentIds === void 0) {
       membersByLaneToken.set(token, scannedMembers);
@@ -10755,7 +11111,15 @@ function loadLaneCheckScope(db, scope) {
       }
       continue;
     }
-    const components = componentsOfLane(laneKey, scannedMembers, laneEdges, owningSegments, judgmentIds);
+    const laneEdgeOwningSegments = laneEdges.length === 0 ? /* @__PURE__ */ new Map() : loadOwningSegments(db, laneEdges.flatMap((row) => [row.citingId, row.citedId]));
+    const components = componentsOfLane(
+      laneKey,
+      scannedMembers,
+      laneEdges,
+      laneEdgeOwningSegments,
+      judgmentIds,
+      sideResolver
+    );
     const kept = /* @__PURE__ */ new Map();
     for (const component of components) {
       if (!component.touched) continue;
@@ -10798,14 +11162,11 @@ function loadLaneCheckScope(db, scope) {
     memberIds.add(id);
   }
   const memberIdList = [...memberIds];
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, [...CROSS_PHASE_CITEDNESS_RELATIONS])) {
-    edgeMap.set(edgeKey(row), row);
-  }
-  for (const row of loadEdgesByRelationTouching(db, memberIdList, ["override"])) {
+  for (const row of loadClassEdgesTouching(db, memberIdList)) {
     edgeMap.set(edgeKey(row), row);
   }
   if (seedTurnIds.length > 0) {
-    for (const row of loadEdgesByRelationTouching(db, seedTurnIds, [...STANCE_RELATIONS])) {
+    for (const row of loadClassEdgesTouching(db, seedTurnIds)) {
       edgeMap.set(edgeKey(row), row);
     }
   }
@@ -10821,7 +11182,7 @@ function loadLaneCheckScope(db, scope) {
     for (const id of memberIdList) {
       segmentGraphDomain.add(id);
     }
-    for (const row of loadEdgesByRelationTouching(db, memberIdList, [...SEGMENT_GRAPH_RELATIONS_SQL])) {
+    for (const row of loadClassEdgesTouching(db, memberIdList)) {
       segmentGraphDomain.add(row.citingId);
       segmentGraphDomain.add(row.citedId);
     }
@@ -10848,7 +11209,8 @@ function loadLaneCheckScope(db, scope) {
     allTurnIds.add(row.citingId);
     allTurnIds.add(row.citedId);
   }
-  const outOfVocabularyEdges = [...outOfVocabularyRows.values()].map(toEdgeInput).sort((a, b) => {
+  sideResolver.prime([...outOfVocabularyRows.values()].flatMap((row) => [row.citingId, row.citedId]));
+  const outOfVocabularyEdges = [...outOfVocabularyRows.values()].map((row) => toEdgeInput(row, sideResolver)).sort((a, b) => {
     if (a.citingId !== b.citingId) return a.citingId - b.citingId;
     if (a.citedId !== b.citedId) return a.citedId - b.citedId;
     return a.relation.localeCompare(b.relation);
@@ -10893,7 +11255,8 @@ function loadLaneCheckScope(db, scope) {
     }
     return input;
   }).sort((a, b) => a.id - b.id);
-  const edges = [...edgeMap.values()].map(toEdgeInput).sort((a, b) => {
+  sideResolver.prime([...edgeMap.values()].flatMap((row) => [row.citingId, row.citedId]));
+  const edges = [...edgeMap.values()].map((row) => toEdgeInput(row, sideResolver)).sort((a, b) => {
     if (a.citingId !== b.citingId) return a.citingId - b.citingId;
     if (a.citedId !== b.citedId) return a.citedId - b.citedId;
     return a.relation.localeCompare(b.relation);
@@ -11200,97 +11563,89 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
-// src/shared/election-relation-weights.ts
-var FROZEN_ELECTION_RELATION_PARAMETERS = Object.freeze({
-  use: Object.freeze({ kind: "retired-words" }),
-  convergence: Object.freeze({ kind: "retired-indexes" })
+// src/shared/election-weights.ts
+var ELECTION_WEIGHTS = Object.freeze({
+  /** `w_out` — per outgoing logical edge, whatever it claims. */
+  outDegree: 1,
+  /** `w_rec` — the whole recency term's coefficient; `rec(n)` itself is already in [0, 1]. */
+  recency: 1,
+  /** `w_type` — the type term's coefficient. */
+  type: 1,
+  /** `w_class(e)`, keyed by `formatRelationClass` (`correct(full)`, `correct(partial)`, `verify`, `use`). */
+  class: Object.freeze({
+    "correct(full)": 2,
+    "correct(partial)": 1.5,
+    verify: 1,
+    use: 0.5
+  }),
+  /** `type(n)` = the MAX over the node's own type words. Absent word = 0. */
+  turnType: Object.freeze({
+    design: 1.5,
+    correction: 1.5,
+    measure: 1,
+    research: 1,
+    review: 1,
+    implement: 0.5,
+    fix: 0.5,
+    refactor: 0.5,
+    ops: 0.25,
+    delegate: 0.25,
+    discuss: 0.25
+  })
 });
-var RETIRED_USE_WORDS = ["extends", "consume", "grounds", "indexes"];
-var RETIRED_USE_WORD_WEIGHTS = Object.freeze({
-  extends: Object.freeze({ out: 0, in: 0 }),
-  consume: Object.freeze({ out: 0, in: 0 }),
-  grounds: Object.freeze({ out: 1, in: 2 }),
-  indexes: Object.freeze({ out: 2, in: 1 })
-});
-function retiredUseWord(edge) {
-  const word = edge.relation;
-  return RETIRED_USE_WORDS.includes(word ?? "") ? word : null;
-}
-var FORCED_CLASS_WEIGHTS = Object.freeze({
-  "correct(full)": Object.freeze({ out: 2, in: 0 }),
-  "correct(partial)": Object.freeze({ out: 1, in: 1 }),
-  verify: Object.freeze({ out: 1, in: 2 })
-});
-function classKeyOf(relationClass, relationCoverage) {
-  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
-}
 function electionEdgeClass(edge) {
   return edgeRelationClass({
-    relation: edge.relation,
+    relation: edge.relation ?? null,
     relationClass: edge.relationClass ?? NO_RELATION_CLASS,
     relationCoverage: edge.relationCoverage ?? NO_RELATION_COVERAGE
   });
 }
-function useWeights(edge, parameters) {
-  if (parameters.use.kind === "uniform") {
-    return { out: parameters.use.out, in: parameters.use.in };
+function electionClassWeight(edge) {
+  const resolved = electionEdgeClass(edge);
+  if (resolved === null) {
+    return 0;
   }
-  const word = retiredUseWord(edge);
-  return word === null ? RETIRED_USE_WORD_WEIGHTS.extends : RETIRED_USE_WORD_WEIGHTS[word];
+  return ELECTION_WEIGHTS.class[formatRelationClass(
+    resolved.relationClass,
+    resolved.relationCoverage
+  )] ?? 0;
 }
-function weightsFor(edge, parameters) {
+var FRONTIER_EDGE_WEIGHTS = Object.freeze({
+  "correct(full)": Object.freeze({ out: 2, in: 0 }),
+  "correct(partial)": Object.freeze({ out: 1, in: 1 }),
+  verify: Object.freeze({ out: 1, in: 2 }),
+  use: Object.freeze({ out: 0, in: 0 })
+});
+function frontierWeights(edge) {
   const resolved = electionEdgeClass(edge);
   if (resolved === null) {
     return { out: 0, in: 0 };
   }
-  if (resolved.relationClass === "use") {
-    return useWeights(edge, parameters);
-  }
-  return FORCED_CLASS_WEIGHTS[classKeyOf(resolved.relationClass, resolved.relationCoverage)] ?? {
-    out: 0,
-    in: 0
-  };
+  return FRONTIER_EDGE_WEIGHTS[formatRelationClass(resolved.relationClass, resolved.relationCoverage)] ?? { out: 0, in: 0 };
 }
-function electionOutEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
-  return weightsFor(edge, parameters).out;
+function frontierOutEdgeWeight(edge) {
+  return frontierWeights(edge).out;
 }
-function electionInEdgeWeight(edge, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
-  return weightsFor(edge, parameters).in;
+function frontierInEdgeWeight(edge) {
+  return frontierWeights(edge).in;
 }
-function countsTowardInDegree(edge) {
-  const resolved = electionEdgeClass(edge);
-  if (resolved === null) {
-    return false;
-  }
-  return !(resolved.relationClass === "correct" && resolved.relationCoverage === "full");
-}
-function isCorrectionEdge(edge) {
+function isFullCorrectionEdge(edge) {
   const resolved = electionEdgeClass(edge);
   return resolved !== null && resolved.relationClass === "correct" && resolved.relationCoverage === "full";
 }
-function isUseEdge(edge) {
-  return electionEdgeClass(edge)?.relationClass === "use";
-}
-function convergenceDeclarationPredicate(edges, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
-  if (parameters.convergence.kind === "retired-indexes") {
-    return (edge) => edge.relation === "indexes";
-  }
-  const threshold = parameters.convergence.threshold;
-  const useOutDegree = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (isUseEdge(edge)) {
-      useOutDegree.set(edge.citingId, (useOutDegree.get(edge.citingId) ?? 0) + 1);
+function electionTypeWeight(types) {
+  let best = 0;
+  for (const word of types ?? []) {
+    const weight = ELECTION_WEIGHTS.turnType[word];
+    if (weight !== void 0 && weight > best) {
+      best = weight;
     }
   }
-  return (edge) => isUseEdge(edge) && (useOutDegree.get(edge.citingId) ?? 0) >= threshold;
+  return best;
 }
 
 // src/shared/milestone-election.ts
-var DECISION_TIER_SHARE_WARN_THRESHOLD = 0.45;
-function rankCompare(a, b) {
-  if (a.tier !== b.tier) return a.tier - b.tier;
-  if (a.inDegree !== b.inDegree) return b.inDegree - a.inDegree;
-  if (a.outDegree !== b.outDegree) return b.outDegree - a.outDegree;
+function compareNewestFirst(a, b) {
   const orderCmp = compareOrderKeyAcrossSessions(
     { order: b.order, createdAtEpoch: b.epoch },
     { order: a.order, createdAtEpoch: a.epoch }
@@ -11298,13 +11653,13 @@ function rankCompare(a, b) {
   if (orderCmp !== 0) return orderCmp;
   return b.id - a.id;
 }
-function electMilestones(turns, edges, budget, rolledBackCiterIds = [], parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+function electMilestones(turns, edges) {
   const orderOf = /* @__PURE__ */ new Map();
-  const rolledBackOf = /* @__PURE__ */ new Map();
   const epochOf = /* @__PURE__ */ new Map();
+  const typeOf = /* @__PURE__ */ new Map();
   for (const turn of turns) {
     orderOf.set(turn.id, turn.order ?? [0, turn.id]);
-    rolledBackOf.set(turn.id, turn.wasRolledBack === true);
+    typeOf.set(turn.id, turn.type ?? []);
     if (turn.createdAtEpoch !== void 0) {
       epochOf.set(turn.id, turn.createdAtEpoch);
     }
@@ -11323,104 +11678,48 @@ function electMilestones(turns, edges, budget, rolledBackCiterIds = [], paramete
       excluded.add(turn.id);
     }
   }
-  const inDegree = /* @__PURE__ */ new Map();
   const outDegree = /* @__PURE__ */ new Map();
+  const classScore = /* @__PURE__ */ new Map();
   for (const edge of edges) {
-    if (countsTowardInDegree(edge)) {
-      inDegree.set(edge.citedId, (inDegree.get(edge.citedId) ?? 0) + 1);
-    }
     outDegree.set(edge.citingId, (outDegree.get(edge.citingId) ?? 0) + 1);
-  }
-  const declaresConvergence = convergenceDeclarationPredicate(edges, parameters);
-  const tier1 = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (declaresConvergence(edge) && edge.tailTag === UNSETTLED_LANE_TAG && edge.headTag === UNSETTLED_LANE_TAG) {
-      tier1.add(edge.citingId);
-    }
-  }
-  const tier2 = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (declaresConvergence(edge)) {
-      tier2.set(edge.citingId, "declares-index");
-    }
+    classScore.set(
+      edge.citingId,
+      (classScore.get(edge.citingId) ?? 0) + electionClassWeight(edge)
+    );
   }
   const candidateIds = [...eligibleIds].filter((id) => !excluded.has(id));
-  const toRankKey = (id, tier) => ({
-    tier,
-    inDegree: inDegree.get(id) ?? 0,
-    outDegree: outDegree.get(id) ?? 0,
+  const pool = candidateIds.map((id) => ({
+    id,
     order: orderFor(id),
-    epoch: epochFor(id),
-    id
+    epoch: epochFor(id)
+  }));
+  const byAge = [...pool].sort(compareNewestFirst);
+  const rankAge = /* @__PURE__ */ new Map();
+  byAge.forEach((entry, index) => rankAge.set(entry.id, index));
+  const poolSize = pool.length;
+  const candidates = pool.map((entry) => {
+    const out = outDegree.get(entry.id) ?? 0;
+    const claims = classScore.get(entry.id) ?? 0;
+    const recency = 1 - (rankAge.get(entry.id) ?? 0) / poolSize;
+    const typeWeight = electionTypeWeight(typeOf.get(entry.id));
+    return {
+      id: entry.id,
+      score: ELECTION_WEIGHTS.outDegree * out + claims + ELECTION_WEIGHTS.recency * recency + ELECTION_WEIGHTS.type * typeWeight,
+      outDegree: out,
+      classScore: claims,
+      recency,
+      typeWeight,
+      order: entry.order,
+      epoch: entry.epoch
+    };
   });
-  const stage1 = [];
-  for (const id of candidateIds) {
-    let tier;
-    let reason = "other";
-    if (tier1.has(id)) {
-      tier = 1;
-      reason = "release";
-    } else if (tier2.has(id)) {
-      tier = 2;
-      reason = tier2.get(id);
-    }
-    if (tier === void 0) continue;
-    stage1.push({ ...toRankKey(id, tier), reason });
-  }
-  stage1.sort(rankCompare);
-  const electedIds = new Set(stage1.slice(0, Math.max(0, budget)).map((c) => c.id));
-  const indexedByElected = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (declaresConvergence(edge) && electedIds.has(edge.citingId)) {
-      indexedByElected.add(edge.citedId);
-    }
-  }
-  const correctors = /* @__PURE__ */ new Set();
-  for (const edge of edges) {
-    if (isCorrectionEdge(edge)) {
-      correctors.add(edge.citingId);
-    }
-    if (rolledBackOf.get(edge.citedId) === true) {
-      correctors.add(edge.citingId);
-    }
-  }
-  for (const id of rolledBackCiterIds) {
-    correctors.add(id);
-  }
-  const typeDecision = /* @__PURE__ */ new Set();
-  for (const turn of turns) {
-    if ((turn.type ?? []).some((word) => word === "design" || word === "correction")) {
-      typeDecision.add(turn.id);
-    }
-  }
-  const stage1Ids = new Set(stage1.map((c) => c.id));
-  const rest = [];
-  for (const id of candidateIds) {
-    if (stage1Ids.has(id)) continue;
-    let tier;
-    let reason;
-    if (typeDecision.has(id)) {
-      tier = 3;
-      reason = "type-decision";
-    } else if (indexedByElected.has(id)) {
-      tier = 4;
-      reason = "indexed-by-elected";
-    } else if (correctors.has(id)) {
-      tier = 5;
-      reason = "corrector";
-    } else {
-      tier = 6;
-      reason = "other";
-    }
-    rest.push({ ...toRankKey(id, tier), reason });
-  }
-  rest.sort(rankCompare);
-  const decisionTierCandidateCount = candidateIds.filter((id) => typeDecision.has(id)).length;
-  const decisionTierShare = candidateIds.length === 0 ? 0 : decisionTierCandidateCount / candidateIds.length;
+  candidates.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    return compareNewestFirst(a, b);
+  });
   return {
-    candidates: [...stage1, ...rest],
-    excluded: [...excluded].sort((a, b) => a - b),
-    decisionTierShare
+    candidates,
+    excluded: [...excluded].sort((a, b) => a - b)
   };
 }
 
@@ -12092,13 +12391,15 @@ function formatRelationArrow(words, crossLane) {
   const lead = label !== "" || crossLane ? stroke : "";
   return `${lead}${label}${stroke}>`;
 }
+var RELATION_RANK_ORDER = [
+  "correct(full)",
+  "correct(partial)",
+  "verify",
+  "use"
+];
 function defaultRelationRank(relation) {
-  if (relation === "extends" || relation === "narrows" || relation === "use") return 0;
-  if (relation === "correct(partial)") return 0;
-  if (relation === "indexes") return 1;
-  if (relation === "consume") return 2;
-  if (relation === "override" || relation === "correct(full)") return 3;
-  return 4;
+  const at = RELATION_RANK_ORDER.indexOf(relation);
+  return at === -1 ? RELATION_RANK_ORDER.length : at;
 }
 function groupHopEdges(edges) {
   const byTarget = /* @__PURE__ */ new Map();
@@ -14927,10 +15228,7 @@ function selectMilestoneTurns(view) {
   }));
   const { candidates } = electMilestones(
     [...electionTurns, ...view.externalTurns ?? []],
-    laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    view.rolledBackCiterIds ?? [],
-    view.electionParameters ?? FROZEN_ELECTION_RELATION_PARAMETERS
+    laneEdges
   );
   const windowIds = new Set(seq.map((turn) => turn.id));
   const windowCandidates = candidates.filter((candidate) => windowIds.has(candidate.id));
@@ -14962,7 +15260,6 @@ function selectMilestoneTurns(view) {
     return {
       turn,
       score: 0,
-      tier: candidate.tier,
       marker: markerForSelection(turn),
       antecedents: antecedentsOf(turn.id)
     };
@@ -15070,12 +15367,10 @@ function buildTimelineView(db, input, preloadedTurns) {
   const legacyWindowIds = new Set(legacyWindowTurns.map((turn) => turn.id));
   const laneEdges = getRelationEdgesAmongTurns(db, [...legacyWindowIds]);
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, legacyWindowIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...legacyWindowIds]);
   const milestoneSelection = selectMilestoneTurns({
     windowTurns: legacyWindowTurns,
     laneEdges,
     externalTurns: externalElectionTurns,
-    rolledBackCiterIds,
     // Ticket 10: the election's lanes come from the turns' own tags now.
     laneTagsByTurnId: loadLaneTagsForTurns(db, [...legacyWindowIds])
   });
@@ -16080,7 +16375,7 @@ function fetchUserPrompts(db, turnIds) {
   }
   return result;
 }
-function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCausalityEraCutoffEpoch) {
   const liveMembers = excludeTimelineHiddenMembers(db, members);
   if (liveMembers.length === 0) {
     return { kept: [], demotedCount: 0 };
@@ -16096,21 +16391,10 @@ function selectSegmentMilestonesByEdgeSignals(db, members, pageBudget, _taskCaus
     createdAtEpoch: member.createdAtEpoch
   }));
   const externalElectionTurns = fetchExternalElectionTurns(db, laneEdges, memberIds);
-  const rolledBackCiterIds = getRolledBackCiterIds(db, [...memberIds]);
-  const { candidates, decisionTierShare } = electMilestones(
+  const { candidates } = electMilestones(
     [...electionTurns, ...externalElectionTurns],
-    laneEdges,
-    DEFAULT_TIMELINE_PAGE_SIZE,
-    rolledBackCiterIds,
-    parameters
+    laneEdges
   );
-  if (decisionTierShare > DECISION_TIER_SHARE_WARN_THRESHOLD) {
-    timelineLogger.warn("milestone election decision-tier candidate share exceeds guard threshold", {
-      share: decisionTierShare,
-      threshold: DECISION_TIER_SHARE_WARN_THRESHOLD,
-      memberCount: memberIds.size
-    });
-  }
   const windowCandidates = candidates.filter((candidate) => memberIds.has(candidate.id));
   const chronologicalOrdinals = new Map(liveMembers.map((member, index) => [member.turnId, index + 1]));
   const memberById = new Map(liveMembers.map((member) => [member.turnId, member]));
@@ -16503,11 +16787,12 @@ function loadRawTurnTags(db, turnIds) {
   }
   return result;
 }
-function loadFrontierEdges(db, laneTags) {
-  if (laneTags.length === 0) {
+function loadFrontierEdges(db, memberTurnIds) {
+  const ids = [...new Set(memberTurnIds)];
+  if (ids.length === 0) {
     return [];
   }
-  const placeholders = laneTags.map(() => "?").join(",");
+  const placeholders = ids.map(() => "?").join(",");
   const rows = db.query(
     `SELECT e.relation AS relation,
               e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
@@ -16521,45 +16806,55 @@ function loadFrontierEdges(db, laneTags) {
          JOIN turns tc ON tc.id = e.citing_id
          JOIN turns td ON td.id = e.cited_id
         WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-          AND e.relation IS NOT NULL
-          AND e.tail_tag != '' AND e.head_tag != ''
-          AND (e.tail_tag IN (${placeholders}) OR e.head_tag IN (${placeholders}))
+          AND ${relationClassBearingSql("e")}
+          AND (e.citing_id IN (${placeholders}) OR e.cited_id IN (${placeholders}))
           AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}
         ORDER BY e.id ASC`
-  ).all(...laneTags, ...laneTags);
+  ).all(...ids, ...ids);
   const canonicalRows = rows.filter(
     (row) => !isCompactSyntheticTagList(parseRawTagList(row.tailTags)) && !isCompactSyntheticTagList(parseRawTagList(row.headTags))
   );
-  const owning = getSegmentMembershipForTurns(db, [
+  const endpointIds = [
     ...new Set(canonicalRows.flatMap((row) => [row.tailTurnId, row.headTurnId]))
-  ]);
-  return canonicalRows.map((row) => ({
-    // `relation` stays the STORED word, but since ticket 05a it is no longer
-    // the scoring key: the two class columns below are, and the word survives
-    // here only as the retired-word residue inside `use` and as the
-    // latest-override pointer's own filter. What renders is `relationLabel` —
-    // kept apart from both on purpose.
-    relation: row.relation,
-    relationLabel: displayEdgeRelation({
+  ];
+  const owning = getSegmentMembershipForTurns(db, endpointIds);
+  const laneFacts = loadEndpointLaneFacts(db, endpointIds);
+  return canonicalRows.map((row) => {
+    const sides = resolveEdgeSides(
+      {
+        citingId: row.tailTurnId,
+        citedId: row.headTurnId,
+        tailTag: row.tailTag,
+        headTag: row.headTag
+      },
+      laneFacts
+    );
+    return {
       relation: row.relation,
+      relationLabel: displayEdgeRelation({
+        relation: row.relation,
+        relationClass: row.relationClass ?? NO_RELATION_CLASS,
+        relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+      }),
       relationClass: row.relationClass ?? NO_RELATION_CLASS,
-      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
-    }),
-    relationClass: row.relationClass ?? NO_RELATION_CLASS,
-    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
-    tailTurnId: row.tailTurnId,
-    headTurnId: row.headTurnId,
-    tailTag: row.tailTag,
-    headTag: row.headTag,
-    tailSegmentId: owning.get(row.tailTurnId) ?? null,
-    headSegmentId: owning.get(row.headTurnId) ?? null,
-    tailSessionId: row.tailSessionId,
-    tailPromptNumber: row.tailPromptNumber,
-    tailCreatedAtEpoch: row.tailCreatedAtEpoch,
-    headSessionId: row.headSessionId,
-    headPromptNumber: row.headPromptNumber,
-    headCreatedAtEpoch: row.headCreatedAtEpoch
-  }));
+      relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
+      tailTurnId: row.tailTurnId,
+      headTurnId: row.headTurnId,
+      // The RESOLVED attribution, never the stored word — `''` for a side that
+      // attributes to no lane, which every consumer below already treats as
+      // "no lane placement".
+      tailTag: sides.tail.lane?.tag ?? "",
+      headTag: sides.head.lane?.tag ?? "",
+      tailSegmentId: owning.get(row.tailTurnId) ?? null,
+      headSegmentId: owning.get(row.headTurnId) ?? null,
+      tailSessionId: row.tailSessionId,
+      tailPromptNumber: row.tailPromptNumber,
+      tailCreatedAtEpoch: row.tailCreatedAtEpoch,
+      headSessionId: row.headSessionId,
+      headPromptNumber: row.headPromptNumber,
+      headCreatedAtEpoch: row.headCreatedAtEpoch
+    };
+  });
 }
 function compareFrontierNewerFirst(left, right) {
   if (left.createdAtEpoch !== right.createdAtEpoch) {
@@ -16707,7 +17002,7 @@ function buildFrontierEdgeVisibility(db, segmentId, eraCutoffEpoch, homeUniverse
     return edge.headSegmentId !== null && declaredFor(edge.headSegmentId).has(edge.headTag);
   };
 }
-function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_ELECTION_RELATION_PARAMETERS) {
+function assembleFrontierLanes(db, segment, eraCutoffEpoch) {
   const segmentId = segment.id;
   const universe = loadFrontierLaneUniverse(db, segmentId, eraCutoffEpoch);
   const laneRecords = universe.laneRecords;
@@ -16717,9 +17012,14 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_
     eraCutoffEpoch,
     universe
   );
-  const edges = loadFrontierEdges(db, laneRecords.map((lane) => lane.tag)).filter(
-    isVisibleEdge
-  );
+  const memberTurnIds = [
+    ...new Set(
+      laneRecords.flatMap(
+        (lane) => (universe.membersByTag.get(lane.tag) ?? []).map((member) => member.turnId)
+      )
+    )
+  ];
+  const edges = loadFrontierEdges(db, memberTurnIds).filter(isVisibleEdge);
   return laneRecords.map((laneRecord) => {
     const tag = laneRecord.tag;
     const members = universe.membersByTag.get(tag);
@@ -16735,7 +17035,7 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_
       (edge) => headQualifies(edge) && settledIds.has(edge.tailTurnId) && settledIds.has(edge.headTurnId)
     );
     const { islands, singletons } = countFrontierIslands(settled, islandEdges);
-    const overrideEdges = edges.filter((edge) => edge.relation === "override" && headQualifies(edge)).sort((left, right) => {
+    const overrideEdges = edges.filter((edge) => isFullCorrectionEdge(edge) && headQualifies(edge)).sort((left, right) => {
       if (left.tailCreatedAtEpoch !== right.tailCreatedAtEpoch) {
         return right.tailCreatedAtEpoch - left.tailCreatedAtEpoch;
       }
@@ -16765,10 +17065,10 @@ function assembleFrontierLanes(db, segment, eraCutoffEpoch, parameters = FROZEN_
       }
       for (const edge of edges) {
         if (tailQualifies(edge) && edge.tailTurnId === member.turnId) {
-          score += electionOutEdgeWeight(edge, parameters);
+          score += frontierOutEdgeWeight(edge);
         }
         if (headQualifies(edge) && edge.headTurnId === member.turnId) {
-          score += electionInEdgeWeight(edge, parameters);
+          score += frontierInEdgeWeight(edge);
         }
       }
       scores.set(member.turnId, score);
@@ -16816,8 +17116,8 @@ function parseSegmentLaneTagId(id) {
 }
 var LANE_ARROW_LEGEND = "arrows: -> in-lane \xB7 => cross-lane out \xB7 <= cross-lane in \xB7 <- cross-page in";
 function compareLaneBranchEdges(left, right) {
-  const weightLeft = electionOutEdgeWeight(left);
-  const weightRight = electionOutEdgeWeight(right);
+  const weightLeft = frontierOutEdgeWeight(left);
+  const weightRight = frontierOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -16827,11 +17127,11 @@ function compareLaneBranchEdges(left, right) {
   if (left.headTurnId !== right.headTurnId) {
     return right.headTurnId - left.headTurnId;
   }
-  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
+  return left.relationLabel < right.relationLabel ? -1 : left.relationLabel > right.relationLabel ? 1 : 0;
 }
 function compareLaneMirrorEdges(left, right) {
-  const weightLeft = electionOutEdgeWeight(left);
-  const weightRight = electionOutEdgeWeight(right);
+  const weightLeft = frontierOutEdgeWeight(left);
+  const weightRight = frontierOutEdgeWeight(right);
   if (weightLeft !== weightRight) {
     return weightRight - weightLeft;
   }
@@ -16841,7 +17141,7 @@ function compareLaneMirrorEdges(left, right) {
   if (left.tailTurnId !== right.tailTurnId) {
     return right.tailTurnId - left.tailTurnId;
   }
-  return left.relation < right.relation ? -1 : left.relation > right.relation ? 1 : 0;
+  return left.relationLabel < right.relationLabel ? -1 : left.relationLabel > right.relationLabel ? 1 : 0;
 }
 function collectOverflowingPageOrdinals(pages, boundaries) {
   const ordinals = [];
@@ -17457,23 +17757,6 @@ ${recentPart}`;
 // src/hooks/note-reminder.ts
 function formatTurnAddress(debt) {
   return `S${debt.sessionId}/T${debt.promptNumber}`;
-}
-
-// src/db/lane-disposition.ts
-function recordLaneReadReceipt(db, receipt) {
-  db.query(
-    `INSERT INTO lane_read_receipts
-       (reader_id, segment_id, lane_tag, membership_snapshot, rendered_member_ids, sequence, created_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    receipt.readerId,
-    receipt.segmentId,
-    receipt.laneTag,
-    JSON.stringify(receipt.membershipTurnIds),
-    JSON.stringify(receipt.renderedTurnIds),
-    receipt.sequence,
-    receipt.createdAtEpoch
-  );
 }
 
 // src/mcp/selectors.ts
@@ -19949,8 +20232,10 @@ function computeAnchorInvalidations(db, currentText, writableTurnIds) {
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
   );
   const relationLookup = db.query(
-    `SELECT citing_id AS citingId FROM memory_edges
-      WHERE cited_kind = 'turn' AND cited_id = ? AND relation = ?
+    `SELECT citing_id AS citingId, relation AS relation,
+            relation_class AS relationClass, relation_coverage AS relationCoverage
+       FROM memory_edges
+      WHERE cited_kind = 'turn' AND cited_id = ?
         AND citing_kind = 'turn'`
   );
   const seenOverridden = /* @__PURE__ */ new Set();
@@ -19961,12 +20246,31 @@ function computeAnchorInvalidations(db, currentText, writableTurnIds) {
       continue;
     }
     const address = `S${anchor.sessionId}/T${anchor.promptNumber}`;
-    const hitsWindow = (relation) => relationLookup.all(row.id, relation).some((edge) => writableTurnIds.has(edge.citingId));
-    if (!seenOverridden.has(address) && hitsWindow("override")) {
+    let hitsFull = false;
+    let hitsPartial = false;
+    for (const edge of relationLookup.all(row.id)) {
+      if (!writableTurnIds.has(edge.citingId)) {
+        continue;
+      }
+      const resolved = edgeRelationClass({
+        relation: edge.relation,
+        relationClass: edge.relationClass ?? "",
+        relationCoverage: edge.relationCoverage ?? ""
+      });
+      if (resolved === null || resolved.relationClass !== "correct") {
+        continue;
+      }
+      if (resolved.relationCoverage === "full") {
+        hitsFull = true;
+      } else if (resolved.relationCoverage === "partial") {
+        hitsPartial = true;
+      }
+    }
+    if (!seenOverridden.has(address) && hitsFull) {
       seenOverridden.add(address);
       overridden.push(address);
     }
-    if (!seenNarrowed.has(address) && hitsWindow("narrows")) {
+    if (!seenNarrowed.has(address) && hitsPartial) {
       seenNarrowed.add(address);
       narrowed.push(address);
     }
@@ -23074,18 +23378,28 @@ function captureSessionEnv(sourceEnv = process.env) {
 var import_bun_sqlite2 = require("bun:sqlite");
 
 // src/shared/lane-checker.ts
-var EDGE_RELATION_WORDS = new Set(EDGE_RELATIONS);
+function carriesRelationClass(edge) {
+  return edgeRelationClass({
+    relation: edge.relation ?? null,
+    relationClass: edge.relationClass ?? "",
+    relationCoverage: edge.relationCoverage ?? ""
+  }) !== null;
+}
+function relationClassToken(edge) {
+  const resolved = edgeRelationClass({
+    relation: edge.relation ?? null,
+    relationClass: edge.relationClass ?? "",
+    relationCoverage: edge.relationCoverage ?? ""
+  });
+  return resolved === null ? null : formatRelationClass(resolved.relationClass, resolved.relationCoverage);
+}
 var MAX_VOCABULARY_REPORT_ENTRIES = 20;
-var SEGMENT_GRAPH_RELATIONS = /* @__PURE__ */ new Set([
-  ...STANCE_RELATIONS,
-  "consume",
-  "grounds"
-]);
-var LANE_COUPLING_GROUPS = [
-  ["verifies", "override", "narrows", "extends"],
-  ["grounds"],
-  ["consume", "indexes"]
-];
+function isSegmentGraphEdge(edge) {
+  return carriesRelationClass(edge);
+}
+var LANE_COUPLING_GROUPS = RELATION_CLASSES.map(
+  (relationClass) => [relationClass]
+);
 var MIN_UNATTRIBUTED_CLUSTER_TURNS = 4;
 var MAX_CLUSTER_TURN_ENTRIES = 20;
 var MIN_REPORTED_LANE_MEMBERS = 2;
@@ -23163,14 +23477,20 @@ function computeCoupling(lanes, allEdges, segmentFor) {
     const head = laneKeyOfSide(edge, "head", segmentFor);
     if (tail === null || head === null) continue;
     if (sameLaneKey(tail, head)) continue;
-    crossings.push({ tail, head, relation: edge.relation });
+    const resolved = edgeRelationClass({
+      relation: edge.relation ?? null,
+      relationClass: edge.relationClass ?? "",
+      relationCoverage: edge.relationCoverage ?? ""
+    });
+    if (resolved === null) continue;
+    crossings.push({ tail, head, relationClass: resolved.relationClass });
   }
   return lanes.map((lane) => ({
     key: lane.key,
     groups: LANE_COUPLING_GROUPS.map((relations) => ({
       relations,
       count: crossings.filter(
-        (crossing) => relations.includes(crossing.relation) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
+        (crossing) => relations.includes(crossing.relationClass) && (sameLaneKey(crossing.tail, lane.key) || sameLaneKey(crossing.head, lane.key))
       ).length
     }))
   }));
@@ -23219,7 +23539,7 @@ function computeBypassCandidates(turns, allEdges, segmentFor) {
   const graphs = /* @__PURE__ */ new Map();
   const directs = /* @__PURE__ */ new Map();
   for (const edge of allEdges) {
-    if (!SEGMENT_GRAPH_RELATIONS.has(edge.relation)) continue;
+    if (!isSegmentGraphEdge(edge)) continue;
     if (edge.citingId === edge.citedId) continue;
     if (!loaded.has(edge.citingId) || !loaded.has(edge.citedId)) continue;
     const segment = segmentFor(edge.citingId);
@@ -23316,7 +23636,7 @@ function partitionEdgesByVocabulary(edges) {
   const inVocabulary = [];
   const outOfVocabulary = [];
   for (const edge of edges) {
-    if (EDGE_RELATION_WORDS.has(edge.relation)) {
+    if (carriesRelationClass(edge)) {
       inVocabulary.push(edge);
     } else {
       outOfVocabulary.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
@@ -23346,6 +23666,15 @@ function mergeOutOfVocabularyEdges(fromEdges, known) {
 }
 function subsetObligations(edge) {
   const obligations = [];
+  if (edge.tailOutcome !== void 0 || edge.headOutcome !== void 0) {
+    if (edge.tailOutcome === "invalid") {
+      obligations.push({ tag: edge.storedTailTag ?? edge.tailTag, endpoint: "citing" });
+    }
+    if (edge.headOutcome === "invalid") {
+      obligations.push({ tag: edge.storedHeadTag ?? edge.headTag, endpoint: "cited" });
+    }
+    return obligations;
+  }
   if (edge.tailTag !== UNSETTLED_LANE_TAG && edge.tailTag !== void 0) {
     obligations.push({ tag: edge.tailTag, endpoint: "citing" });
   }
@@ -23385,6 +23714,25 @@ function computeDraftEdgeErrors(edges) {
   const errors = [];
   for (const edge of edges) {
     const unsettledSides = [];
+    if (edge.tailOutcome !== void 0 || edge.headOutcome !== void 0) {
+      if (edge.tailOutcome === "ambiguous") {
+        unsettledSides.push("tail");
+      }
+      if (edge.headOutcome === "ambiguous") {
+        unsettledSides.push("head");
+      }
+      if (unsettledSides.length === 0) continue;
+      errors.push({
+        class: "E6",
+        anchorId: edge.citingId,
+        citingId: edge.citingId,
+        citedId: edge.citedId,
+        relation: edge.relation,
+        tags: laneEdgeTags(edge),
+        unsettledSides
+      });
+      continue;
+    }
     if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG) {
       unsettledSides.push("tail");
     }
@@ -23431,24 +23779,6 @@ function computeUnattributedClusters(turns, edges) {
     }
   }
   return [...byRoot.values()].filter((ids) => ids.length >= MIN_UNATTRIBUTED_CLUSTER_TURNS).map((ids) => ({ turnIds: ids.slice(0, MAX_CLUSTER_TURN_ENTRIES), turnCount: ids.length })).sort((a, b) => a.turnIds[0] - b.turnIds[0]);
-}
-function computeTooFineIndexes(edges) {
-  const indexedByCitingId = /* @__PURE__ */ new Map();
-  for (const edge of edges) {
-    if (edge.relation !== "indexes") continue;
-    let bucket = indexedByCitingId.get(edge.citingId);
-    if (bucket === void 0) {
-      bucket = /* @__PURE__ */ new Set();
-      indexedByCitingId.set(edge.citingId, bucket);
-    }
-    bucket.add(edge.citedId);
-  }
-  const warnings = [];
-  for (const [citingId, citedIds] of indexedByCitingId) {
-    if (citedIds.size !== 1) continue;
-    warnings.push({ citingId, citedId: [...citedIds][0] });
-  }
-  return warnings.sort((a, b) => a.citingId - b.citingId || a.citedId - b.citedId);
 }
 function computeLaneProliferation(segmentFacts) {
   const warnings = [];
@@ -23533,7 +23863,6 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
   const timeOrderViolations = computeTimeOrderViolations(turnById, vocabEdges);
   const unattributedClusters = computeUnattributedClusters(turns, vocabEdges);
   const laneProliferation = computeLaneProliferation(segmentFacts);
-  const tooFineIndexes = computeTooFineIndexes(vocabEdges);
   const errors = [
     ...typeViolations.map(
       (violation) => ({
@@ -23560,7 +23889,6 @@ function checkLanes(turns, edges, knownOutOfVocabularyEdges = [], segmentFacts =
     },
     unattributedClusters: cappedFactList(unattributedClusters),
     laneProliferation,
-    tooFineIndexes: cappedFactList(tooFineIndexes),
     errors
   };
 }
@@ -23577,22 +23905,9 @@ function buildLaneStats(lane, memberIds, turnById, allEdges, declaredMemberCount
   }
   const edgeCountsByRelation = {};
   for (const edge of lane.taggedEdges) {
-    edgeCountsByRelation[edge.relation] = (edgeCountsByRelation[edge.relation] ?? 0) + 1;
-  }
-  const groundsFromNonMembers = [];
-  const usedFromNonMembers = [];
-  const testimonyFromNonMembers = [];
-  for (const edge of allEdges) {
-    if (!memberIds.has(edge.citedId) || memberIds.has(edge.citingId)) {
-      continue;
-    }
-    if (edge.relation === "grounds") {
-      groundsFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "consume") {
-      usedFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId });
-    } else if (edge.relation === "verifies" || edge.relation === "refutes") {
-      testimonyFromNonMembers.push({ citingId: edge.citingId, citedId: edge.citedId, relation: edge.relation });
-    }
+    const token = relationClassToken(edge);
+    if (token === null) continue;
+    edgeCountsByRelation[token] = (edgeCountsByRelation[token] ?? 0) + 1;
   }
   const edgeEndpointIds = /* @__PURE__ */ new Set();
   for (const edge of lane.taggedEdges) {
@@ -23614,7 +23929,6 @@ function buildLaneStats(lane, memberIds, turnById, allEdges, declaredMemberCount
     phases: [...phases],
     members: lane.members,
     edgeCountsByRelation,
-    citedness: { groundsFromNonMembers, usedFromNonMembers, testimonyFromNonMembers },
     coverage
   };
 }
@@ -23636,7 +23950,7 @@ function parseSessionsCursor(raw) {
   }
   return { epoch, id };
 }
-function parseStoredTags(raw) {
+function parseStoredTags2(raw) {
   if (raw === null) {
     return [];
   }
@@ -23769,7 +24083,7 @@ function createConsoleReader(db, options = {}) {
             title: row.title,
             userPrompt: row.userPrompt,
             content: row.content,
-            tags: parseStoredTags(row.tags)
+            tags: parseStoredTags2(row.tags)
           }
         ])
       );
@@ -23845,18 +24159,6 @@ function renderStatsReport(lane, addresses) {
   lines.push("  members: " + formatMembers(lane.members));
   const edgeCounts = Object.entries(lane.edgeCountsByRelation).map(([relation, count]) => relation + "=" + count).join(" ");
   lines.push("  edges: " + (edgeCounts || "(none)"));
-  const grounds = lane.citedness.groundsFromNonMembers.map(
-    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses)
-  );
-  const used = lane.citedness.usedFromNonMembers.map(
-    (fact) => formatTurnRef(fact.citingId, addresses) + "->" + formatTurnRef(fact.citedId, addresses)
-  );
-  const testimony = lane.citedness.testimonyFromNonMembers.map(
-    (fact) => formatTurnRef(fact.citingId, addresses) + " " + fact.relation + " " + formatTurnRef(fact.citedId, addresses)
-  );
-  lines.push(
-    "  cited from outside: depends[" + (grounds.join(", ") || "-") + "] used[" + (used.join(", ") || "-") + "] testimony[" + (testimony.join(", ") || "-") + "]"
-  );
   const membership = lane.coverage.membership;
   lines.push(
     "  coverage: " + lane.coverage.status + (lane.coverage.missingTurnIds.length > 0 ? " (missing: " + formatTurnRefList(lane.coverage.missingTurnIds, addresses) + ")" : "") + (membership === void 0 ? "" : " -- " + membership.loaded + " of " + membership.declared + " declared member(s) loaded" + (membership.declared > membership.loaded ? "; the members above are a SLICE of this lane, not all of it" : ""))
@@ -23891,9 +24193,6 @@ function renderTimeOrderViolation(violation, addresses) {
 }
 function renderUnattributedCluster(cluster, addresses) {
   return "  " + cluster.turnCount + " turns joined by edges with no lane on either side: " + formatTurnRefList(cluster.turnIds, addresses) + cappedCountSuffix(cluster.turnCount, cluster.turnIds.length);
-}
-function renderTooFineIndex(warning, addresses) {
-  return "  " + formatTurnRef(warning.citingId, addresses) + " converges one node only (" + formatTurnRef(warning.citedId, addresses) + ") -- a phase cut this fine is usually a step";
 }
 function formatAllowance(allowance) {
   return Number.isInteger(allowance) ? String(allowance) : allowance.toFixed(2);
@@ -24006,7 +24305,7 @@ function renderLaneCheckerReports(result, anchorAddresses) {
   }
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation + index granularity (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)"
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");
@@ -24024,16 +24323,6 @@ function renderLaneCheckerReports(result, anchorAddresses) {
     sections.push(result.laneProliferation.length + " task(s) over the lane budget:");
     for (const warning of result.laneProliferation) {
       sections.push(renderLaneProliferation(warning));
-    }
-  }
-  if (result.tooFineIndexes.count === 0) {
-    sections.push("(no single-target index)");
-  } else {
-    sections.push(
-      result.tooFineIndexes.count + " turn(s) whose whole index batch is one node" + cappedCountSuffix(result.tooFineIndexes.count, result.tooFineIndexes.entries.length) + ":"
-    );
-    for (const warning of result.tooFineIndexes.entries) {
-      sections.push(renderTooFineIndex(warning, anchorAddresses));
     }
   }
   sections.push("");
@@ -24072,7 +24361,6 @@ var EXCERPT_CONTENT_CP = 280;
 var GRAPH_EDGE_MAX = 1e4;
 var WIDEN_NODE_MAX = 1e4;
 var RESPONSE_BYTE_SOFT_MAX = 8e6;
-var ELECTION_PREVIEW_BUDGET = 30;
 var CONSOLE_MAX_PAGE_BUDGET = 25e3;
 var CONSOLE_MAX_TURN_BUDGET = 5e3;
 function errorResult(status, code, message) {
@@ -24653,12 +24941,10 @@ function handleGraphRoute(reader, url, ctx) {
   const run = reader.runLaneCheck(scope);
   const laneAddresses = buildLaneAnchorAddresses(run.turns);
   const laneCheckText = renderLaneCheckerReports(run.result, laneAddresses);
-  const election = electMilestones(
-    run.turns,
-    run.edges,
-    ELECTION_PREVIEW_BUDGET
+  const election = electMilestones(run.turns, run.edges);
+  const rankByTurnId = new Map(
+    election.candidates.map((candidate, index) => [candidate.id, index + 1])
   );
-  const tierByTurnId = new Map(election.candidates.map((candidate) => [candidate.id, candidate.tier]));
   const componentIdsByToken = indexLaneComponentIds(run.result.components);
   const laneMembershipsByTurnId = computePerTurnLaneMemberships(
     run.result.lanes,
@@ -24696,7 +24982,7 @@ function handleGraphRoute(reader, url, ctx) {
       title: fields?.title ?? null,
       promptExcerpt: codePointExcerpt(fields?.userPrompt ?? null, EXCERPT_PROMPT_CP),
       contentExcerpt: codePointExcerpt(fields?.content ?? null, EXCERPT_CONTENT_CP),
-      electionTier: tierByTurnId.get(turn.id) ?? null,
+      electionRank: rankByTurnId.get(turn.id) ?? null,
       type: [...turn.type],
       tags: [...fields?.tags ?? []],
       laneMemberships: laneMembershipsByTurnId.get(turn.id) ?? []
@@ -24706,7 +24992,11 @@ function handleGraphRoute(reader, url, ctx) {
   const edgesPayload = sortedEdges.map((edge) => ({
     citingId: edge.citingId,
     citedId: edge.citedId,
-    relation: edge.relation,
+    relation: displayEdgeRelation({
+      relation: edge.relation,
+      relationClass: edge.relationClass ?? "",
+      relationCoverage: edge.relationCoverage ?? ""
+    }),
     tailTag: edge.tailTag,
     headTag: edge.headTag,
     tailLaneToken: sideLaneToken(edge.citingId, edge.tailTag),
@@ -24792,7 +25082,7 @@ function toConsoleApiResponse(result) {
 }
 
 // src/worker/console-shell.ts
-var CONSOLE_SHELL_HTML = '<!doctype html>\n<html lang="zh">\n<head>\n<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'self\'">\n<title>claude-mnemo \xB7 memory console v2</title>\n<script>\n// Runs BEFORE the stylesheet paints anything: reads the saved choice, falls\n// back to the OS, and puts the answer on <html> as `data-theme`. Doing this in\n// <head> rather than with the rest of the script is what stops a dark-mode\n// reader getting a white flash on every load.\n//\n// Every colour below is a CSS custom property, so the attribute IS the switch \u2014\n// no element is re-rendered, no state is recomputed, and a graph the reader has\n// already focused keeps its focus across a toggle.\n(function () {\n  var saved = null;\n  try { saved = localStorage.getItem("mnemo-theme"); } catch (e) { /* private mode */ }\n  var dark = saved === "dark" || (saved === null &&\n    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);\n  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\n})();\n</script>\n<style>\n  :root {\n    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;\n    --t-research:#2b6fb5; --t-measure:#6db1e4;\n    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;\n    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;\n    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;\n    --override:#d64541; --narrows:#d98e04; --extends:#3b82c4; --indexes:#8e5bb5;\n    --grounds:#2e9e6b; --consume:#9c7a5c; --verifies:#16a3a3;\n    /* [S15069/T1760, revised by console-focus-encoding ticket 01] GREY\'S\n       RESERVATION IS RELEASED. It used to say ONE thing only \u2014 this edge has\n       no lane attribution yet, so nothing else may claim it \u2014 and `consume`\n       moved off grey to protect that. The exclusivity cost nothing to keep\n       because the tenant never moved in: an unattributed edge does not\n       render in the graph at all, so `--draft` below has never actually\n       painted a pixel. Focus dimming claims grey now instead (`--edge-gray`,\n       `path.edge.gray` below) \u2014 colour and width both carry focus, not\n       opacity alone. Consequence: grey is spoken for again, by a different\n       claimant \u2014 once draft edges start rendering, an unattributed edge and\n       a merely-unfocused one will both read grey, indistinguishable by\n       colour alone. `consume` still carries the muted taupe this ruling gave\n       it, and `refutes` is still gone with the word itself, folded into\n       `override` in v12. */\n    --draft:#b9bec4;\n    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;\n    --lane:#6b4d8f; --lane-bg:#f3eefa;\n    /* Tokens the rules below used to hardcode. Named for their ROLE, not their\n       colour, so the dark block can answer each one without a second sweep. */\n    --row-hover:#f5f6f7; --row-active:#f7f5fa; --chip-bg:#eef0f2; --chip-ink:#555;\n    --chip-ph-ink:#fff; --prompt-bg:#f7f7f6; --edge-gray:#c9cdd1;\n    --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;\n    --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;\n    --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;\n    --sel-ring:#1a1d20;\n  }\n\n  /* NIGHT. One override block, no duplication of the light one \u2014 the resolver\n     in <head> puts `data-theme` on <html> before first paint, so the cascade\n     does all the switching and nothing re-renders.\n\n     The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and\n     relation colour above was chosen against white and several (`--t-fix`,\n     `--grounds`) are far too dark to read on a dark panel, so each is lifted in\n     lightness and slightly desaturated rather than reused. The hue is what\n     carries the meaning; the lightness is what has to move. */\n  :root[data-theme="dark"] {\n    --evidence:#66a8e0; --decision:#e8bb63; --delivery:#7cc48c; --none:#5a626b;\n    --t-research:#5c9ee0; --t-measure:#8ec8f0;\n    --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;\n    --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;\n    --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;\n    --override:#e86b67; --narrows:#e8a838; --extends:#63a3e0; --indexes:#ab82cf;\n    --grounds:#4dbb88; --consume:#c09a78; --verifies:#3cc0c0;\n    --draft:#5a626b;\n    --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;\n    --lane:#b394d6; --lane-bg:#2a2135;\n    --row-hover:#20252b; --row-active:#26212f; --chip-bg:#262c33; --chip-ink:#9aa3ad;\n    /* The type chip paints its own background from the type colour, and those\n       are now LIGHT. White-on-light is the contrast failure this token exists\n       to avoid. */\n    --chip-ph-ink:#14171a;\n    --prompt-bg:#1f242a; --edge-gray:#3d444c;\n    --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;\n    --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;\n    --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;\n    --sel-ring:#f0f2f4;\n  }\n  * { box-sizing:border-box; margin:0; }\n  html,body { height:100%; }\n  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }\n  #app { display:flex; height:100vh; }\n\n  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }\n  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; position:relative; }\n  /* Sits in the brand block\'s own whitespace rather than taking a row of its\n     own \u2014 the sidebar\'s vertical budget is for content. */\n  #themeToggle { position:absolute; top:15px; right:14px; width:24px; height:24px;\n    padding:0; border:1px solid var(--line); border-radius:6px; background:transparent;\n    color:var(--faint); font-size:12px; line-height:1; cursor:pointer; }\n  #themeToggle:hover { border-color:var(--faint); color:var(--ink); }\n  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }\n  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }\n  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }\n  .srow:hover { background:var(--row-hover); }\n  .srow.active { border-left-color:var(--lane); background:var(--row-active); }\n  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }\n  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }\n  .srow .rm { font-size:11px; color:var(--faint); }\n  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }\n  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }\n  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .srow.more { color:var(--faint); text-align:center; font-size:12px; }\n  .srow.more:hover { color:var(--ink); }\n\n  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }\n  #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }\n  #stoppedBanner { background:#5c1f1f; color:#fbdede; display:none; align-items:center; gap:12px; }\n  #stoppedBanner button { background:#fff; color:#5c1f1f; border:none; border-radius:5px; padding:3px 12px; cursor:pointer; font-size:12px; font-weight:600; }\n  #partialBanner { background:#6b4d10; color:#fdecc8; }\n  header { padding:14px 24px 8px; flex:none; }\n  h1 { font-size:15px; font-weight:600; }\n  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }\n  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }\n  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }\n  #bar input[type=checkbox]{ accent-color:var(--accent); }\n  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }\n  .sw.dash { border-top-style:dashed; }\n  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }\n  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }\n\n  /* console-recall-timeline-panels ticket 13: same box-model as #search\n     above, just full-width inside the sidebar\'s own padding \u2014 the two are\n     visually one family (jump-in-graph vs. cross-session recall) but never\n     confusable, since only one of them lives in the sidebar. */\n  .recall-box { padding:4px 16px 12px; }\n  .recall-box input { width:100%; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }\n\n  /* console-timeline-panel-controls ticket 16: id + view + pageBudget + page\n     in one form \u2014 the context-adaptive header button (`#timelineBtn`) is a\n     PREFILL shortcut into this SAME form, never a second fetch path. */\n  /* The timeline\u63A7\u4EF6\u6761 lives in the overlay panel\'s top-right (user ruling\n     S15069/T2043) \u2014 one quiet row, shown only while timeline output is up.\n     Native form chrome is fully suppressed (appearance:none, no number\n     spinners, no OS focus ring): every control is the same 26px quiet box the\n     theme vars draw, in light and dark alike. */\n  #tlbar { display:none; flex-wrap:nowrap; gap:6px; align-items:center; margin:0 26px 14px 0; }\n  #tlbar input, #tlbar select, #tlbar button {\n    appearance:none; -webkit-appearance:none; outline:none; box-sizing:border-box;\n    height:26px; font-size:12px; padding:0 8px;\n    border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink);\n  }\n  #tlbar input:focus, #tlbar select:focus { border-color:var(--lane); }\n  #tlbar input::placeholder { color:var(--faint); }\n  #tlbar #timelineIdInput { flex:1 1 110px; min-width:0; font-family:"SF Mono",Menlo,monospace; }\n  #tlbar select { padding-right:20px; background-image:url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5" viewBox="0 0 8 5"><path d="M1 1l3 3 3-3" fill="none" stroke="%23888e96" stroke-width="1.2" stroke-linecap="round"/></svg>\'); background-repeat:no-repeat; background-position:right 7px center; }\n  #tlbar input[type=number] { width:46px; padding:0 6px; -moz-appearance:textfield; }\n  #tlbar input[type=number]::-webkit-inner-spin-button, #tlbar input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }\n  #tlbar button { width:26px; padding:0; color:var(--faint); cursor:pointer; line-height:1; }\n  #tlbar button:hover { color:var(--ink); border-color:var(--faint); }\n  .timeline-controls button:hover { border-color:var(--lane); color:var(--lane); }\n\n  /* Context-adaptive: one control, its own target decided at click time by\n     `timelineIdForContext` (session scope, segment scope, or \u2014 when exactly\n     one lane is focused \u2014 that lane) rather than one trigger per row/chip. */\n  #timelineBtn { margin-left:12px; border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:2px 10px; font-size:11.5px; cursor:pointer; vertical-align:1px; }\n  #timelineBtn:hover { border-color:var(--lane); color:var(--lane); }\n\n  #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }\n  #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }\n  #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }\n  #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }\n  /* an edge the shell could not place \u2014 loud on purpose, never a silent drop */\n  #rangeBar .rangeWarn { color:var(--override); font-weight:600; }\n\n  #lanes { padding:8px 24px 4px; flex:none; }\n  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }\n  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }\n  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }\n  .lchip:hover { border-color:var(--lane); }\n  .lchip.on { background:var(--lane); color:#fff; }\n  /* lane-state-retirement ticket 01: the dashed `.openlane` variant is gone\n     with the open/closed axis it styled. Every lane chip renders the same,\n     because there is no longer a per-lane state to distinguish. */\n  .lchip .term { opacity:.75; margin-left:4px; }\n\n  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }\n  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }\n  #phases .clu b { font-weight:600; color:var(--ink); }\n  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }\n\n  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }\n  svg text { font-family:"SF Mono",Menlo,monospace; }\n  .rowlbl { font-size:11px; fill:var(--rowlbl); font-weight:600; }\n  .rowtitle { font-size:11.5px; fill:var(--rowtitle); font-family:-apple-system,"PingFang SC",sans-serif; }\n  .rowtitle.none { fill:var(--rowtitle-none); }\n  rect.rowhit { fill:transparent; cursor:pointer; }\n  rect.rowhit:hover { fill:var(--row-hover); }\n  path.edge { fill:none; cursor:pointer; }\n  /* console-focus-encoding ticket 01 (cf32918) took weight off `indexes` as\n     a channel of its own \u2014 it used to render thin, alone, for fanning out\n     to the batch it cites, so it reads by its own hue (--indexes) instead\n     of a thinner line. That part still holds. What that ticket ALSO did \u2014\n     give width to the focused SUBGRAPH, so a whole component read thick\n     under any focus and the resting graph (no focus at all) was uniformly\n     thick \u2014 is revised by user ruling 2026-08-28 [S15069/T1859]: width now\n     answers ONE question, "does this edge touch the CLICKED node", nothing\n     about focus or attribution. The resting default below is therefore\n     THIN; path.edge.inc is the only rule that thickens anything, and it is\n     driven by `touchesSel` in paintFilters, not by `.gray`/`.hot`. */\n  path.edge { stroke-width:1.1; opacity:.78; }\n  path.edge.off { opacity:.04; }\n  /* The node\'s own channel: thick iff one of this edge\'s two ends is the\n     clicked/panel node (`sel`), direction irrelevant \u2014 in-edges and\n     out-edges both qualify. Independent of colour/focus below: an edge can\n     be `.inc` while `.gray` (touches the clicked node but sits outside its\n     coloured subgraph) or plain default (no focus at all, node still\n     clicked \u2014 impossible in the current selection model, since clicking\n     always sets a focus, but the rule does not depend on that fact). */\n  path.edge.inc { stroke-width:2.2; }\n  /* Outside the focused subgraph: grey. Width is NOT this rule\'s concern \u2014\n     path.edge.inc above is the only rule that ever thickens a line, so grey\n     edges stay at the base thin width like everything else that is not\n     incident to the clicked node. `!important`: each edge\'s own colour is\n     set on `style="stroke:..."` inline (so a theme toggle can re-resolve it\n     without a redraw \u2014 see renderGraphSvg\'s own comment), and an inline\n     style outranks any class rule without it. */\n  path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; }\n  /* hot = inside the focused subgraph: opacity brightens slightly; colour\n     needs no rule here because it already carries the emphasis \u2014 see\n     path.edge.gray above for the outside half of the same decision. Width\n     is not part of this rule either: `.hot` and `.inc` are independent\n     classes an edge may carry in any combination. */\n  path.edge.hot { opacity:.95; }\n  g.node { cursor:pointer; }\n  g.node.dim, text.dim, rect.dim { opacity:.3; }\n  /* The clicked node wears a ring. With the resting graph uniformly thin\n     (node-incidence width, [S15069/T1859]), thick edges radiate FROM the\n     selected node but nothing marked the node itself \u2014 the ring is that\n     mark, toggled in paintFilters on `id===sel` and cleared with sel by\n     clearFocus. The ring is its OWN circle.selring element rather than a\n     stroke on the node body: a multi-type node\'s body is pie-slice paths,\n     not a circle, so a body-stroke rule rings only single-type nodes\n     ([S15069/T1863]). --sel-ring is near-ink per theme so it reads against\n     every type fill. */\n  g.node circle.selring { fill:none; stroke:var(--sel-ring); stroke-width:2; display:none; }\n  g.node.sel circle.selring { display:inline; }\n\n  #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }\n  #tip .t { color:var(--tip-faint); font-size:11px; }\n  #tip .lg { color:var(--tip-lane); }\n  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }\n  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }\n  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }\n  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }\n  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:var(--chip-bg); color:var(--chip-ink); }\n  .chip.ph { color:var(--chip-ph-ink); }\n  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }\n  /* A stored tag the model does NOT recognise as one of this turn\'s lanes \u2014\n     the segment\'s own tag, or a word left over from a retired vocabulary.\n     Shown, because it is what the turn actually carries; muted and outlined,\n     because it names no lane. */\n  .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }\n  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }\n  #panel .content { font-size:13px; white-space:pre-wrap; }\n  /* console-recall-timeline-panels ticket 13: recall/timeline render as\n     plain server prose, same monospace family the shell already uses for\n     every address (.rid, #panel .addr, svg text) \u2014 `.content` alone stays\n     the turn-detail proportional font, unchanged. */\n  #panel .content.mono { font-family:"SF Mono",Menlo,monospace; font-size:12px; }\n  #panel .content.mono a.addrlink { color:var(--lane); text-decoration:none; }\n  #panel .content.mono a.addrlink:hover { text-decoration:underline; }\n  #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }\n  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }\n  #panel .erow:hover { text-decoration:underline; }\n  #panel .erow .etags { color:var(--lane); font-size:11px; }\n  #panel .flowline { font-size:12.5px; color:var(--faint); }\n  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }\n  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }\n  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }\n  #selbadge:hover { background:var(--badge-hover); }\n</style>\n</head>\n<body>\n<div id="app">\n  <aside>\n    <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="\u5207\u6362\u65E5\u95F4 / \u591C\u95F4"></button></div>\n    <div class="side-sec">\u4F1A\u8BDD</div>\n    <div id="sessions"></div>\n    <div class="side-sec">\u4EFB\u52A1</div>\n    <div id="segments"></div>\n    <div class="side-sec">\u56DE\u5FC6</div>\n    <div class="recall-box"><input id="recallInput" placeholder="\u5173\u952E\u8BCD\u6216\u5730\u5740 \u23CE"></div>\n  </aside>\n  <main>\n    <div id="stoppedBanner"><span>worker \u65E0\u54CD\u5E94 \u2014 \u5F53\u524D\u5C55\u793A\u7684\u662F\u6700\u540E\u4E00\u6B21\u6210\u529F\u52A0\u8F7D\u7684\u5FEB\u7167</span><button id="stoppedRetry" type="button">\u91CD\u8BD5</button></div>\n    <div id="partialBanner"></div>\n    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span><button id="timelineBtn" type="button" title="\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD/\u4EFB\u52A1(\u6216\u805A\u7126\u6CF3\u9053)\u7684\u65F6\u95F4\u7EBF">\u23F1 \u65F6\u95F4\u7EBF</button></h1></header>\n    <div id="rangeBar"></div>\n    <div id="bar"></div>\n    <div id="lanes"></div>\n    <div id="phases">\n      <span class="clu"><b>\u53D6\u8BC1</b>\n        <span><span class="dot" style="background:var(--t-research)"></span>research</span>\n        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>\n      </span>\n      <span class="clu"><b>\u51B3\u7B56</b>\n        <span><span class="dot" style="background:var(--t-design)"></span>design</span>\n        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>\n        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>\n      </span>\n      <span class="clu"><b>\u843D\u5730</b>\n        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>\n        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>\n        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>\n        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>\n        <span><span class="dot" style="background:var(--t-review)"></span>review</span>\n        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>\n      </span>\n    </div>\n    <div id="wrap"><svg id="svg"></svg></div>\n  </main>\n</div>\n<div id="tip"></div>\n<div id="panel"><button id="close">\u2715</button><div id="tlbar"><input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; \u23CE" title="timelineQuery \u63A5\u53D7\u7684\u4EFB\u610F\u5408\u6CD5\u5730\u5740"><select id="timelineViewSelect" title="view \u2014 \u89C6\u56FE"><option value="">turns</option><option value="milestones">milestones</option></select><input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="\u9884\u7B97" title="pageBudget\uFF081\u201325000\uFF0C\u9ED8\u8BA4 1000\uFF09"><input id="timelinePageInput" type="number" min="1" placeholder="\u9875" title="page\uFF08\u9ED8\u8BA4 1\uFF09"><button id="timelinePrev" type="button" title="\u4E0A\u4E00\u9875">\u2039</button><button id="timelineNext" type="button" title="\u4E0B\u4E00\u9875">\u203A</button></div><div id="pbody"></div></div>\n<div id="toast"></div>\n<script>\n// `refutes` left with v12 \u2014 it folded into `override`. It stayed in this list\n// long enough to keep drawing its own filter checkbox for a word no edge can carry.\nconst WORDS = ["override","narrows","extends","indexes","grounds","consume","verifies"];\nconst STRUCT = new Set(["narrows","extends","override"]);\n// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.\n// Cross-phase words never carry lane tags (lanes are phase-local), so the\n// dash axis and the tag axis can never collide on one edge.\n// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation\n// words. lane-model-v12 deleted the phase axis outright \u2014 "\u76F8\u4F4D" appears zero\n// times in the concepts document \u2014 and one of those three words (`refutes`)\n// no longer exists at all, having folded into `override`. So the mark was\n// keyed on a retired axis through a stale word list.\n//\n// It now says what the model actually distinguishes: SOLID = internal to one\n// lane (both sides resolve to the SAME lane), DASHED = everything else \u2014 a\n// crossing between two lanes, a half-settled edge, or an unattributed one.\n// That is the same predicate the focus domain uses, so the two agree by\n// construction instead of by coincidence.\nconst isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;\nconst TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];\n// Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" \u2014\n// db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot\n// colors (open=green, "delivered"=grey \u2014 the prototype\'s own demo-data\n// vocabulary), so "closed" maps onto the existing grey bucket rather than\n// inventing a third visual state. Any future status value this map does not\n// know about falls back to the same grey bucket instead of leaking an\n// unmapped word into a class attribute (DOM rule: type words map through a\n// closed-set lookup before touching class/style).\nconst SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };\nconst css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();\n// Returns a `var()` REFERENCE, not a resolved literal. `getComputedStyle` reads\n// the value in force at RENDER time and bakes it into the attribute, so every\n// colour painted through it would stay frozen at the theme that happened to be\n// active when the graph was drawn. `relationVar` below already had this right;\n// this is the same fix applied to the type colours.\nconst typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";\nconst sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});\nconst esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };\n// lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE\n// (`tailTag` = citing end, `headTag` = cited end; "" = unsettled, i.e. nobody\n// has attributed that end yet \u2014 not a lane named ""). The payload no longer\n// ships a merged `tags` set, because a merged set cannot say WHICH END named\n// which lane: `{a,b}` read equally as "in both lanes at once".\nconst edgeSettled = e => e.tailTag!=="" || e.headTag!=="";\n// The label a reader sees. Same-lane (the ordinary case) renders exactly the\n// `{tag}` the merged set used to render for a one-tag edge; a CROSS-LANE edge\n// renders `{tail\u2192head}`, which is the crossing itself.\nconst edgeLaneLabel = e => {\n  if (!edgeSettled(e)) return "";\n  // ONE escape site per side, deliberately: both sinks below render through\n  // this helper, so this pair of calls IS the DOM-rule boundary for a lane tag\n  // on an edge (tests/worker/console-shell.test.ts\'s field-sink table).\n  const tail = esc(e.tailTag), head = esc(e.headTag);\n  return e.tailTag===e.headTag ? "{"+tail+"}" : "{"+tail+"\u2192"+head+"}";\n};\n// Both sides\' lane tokens, unsettled sides dropped and the same-lane case\n// collapsed to one \u2014 what focus/highlight tests set membership against.\nconst edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];\n// Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an\n// edge whose two sides settle to the SAME lane is internal to anything \u2014 that\n// is the connectivity definition itself, so a cross-lane or half-settled edge\n// answers null rather than picking a side. The component is read off whichever\n// endpoint is loaded (an interval can cut the other one away); both endpoints\n// of an internal edge are in the same component by construction, so either\n// answers identically.\nconst edgeComponentId = e => {\n  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;\n  for (const endpoint of [e.citingId, e.citedId]) {\n    const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;\n    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);\n    if (m) return m.componentId;\n  }\n  return null;\n};\n// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a\n// style-attribute sink is still built from it below (turn-panel edge rows) \u2014\n// this is the same closed-set-lookup discipline the DOM rule asks for,\n// applied so the sink can never resolve to anything outside WORDS even if a\n// future schema value slips past the CHECK constraint in production data.\nconst relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";\n// Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-\n// fidelity ticket 03, user ruling S15069/T1482) \u2014 internal `turns.id` stays\n// a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.\n// The bare `T<id>` fallback below is a marked last resort, same posture as\n// the server-side renderer\'s own `formatTurnRef` (shared/lane-checker-\n// render.ts): every call site this shell has now ships a server-supplied\n// address for any id that can legitimately fall outside the currently-loaded\n// `turns` array. The ONE id that used to (a lane\'s terminus, read off\n// `state.terminusAddress` rather than through `addrOf` \u2014 ticket 03, peer\n// P2-5/P2-6) left the payload with lane state in ticket 01, so every id\n// `addrOf` IS called with (edge endpoints, the focus badge\'s `sel`/`solo`,\n// panel erows) is, by construction, always a member of the currently-loaded\n// `turns`. The fallback is therefore asserted UNREACHABLE on any real graph\n// response, kept only as defensive dead code for a malformed fixture.\n// `t.address` is server-decided ([S15069/T1557] \u2014 ticket 10, "one address\n// grammar"): ALWAYS `S<session>/T<prompt>`, under every scope including\n// segment. A segment appears only as a SCOPE (the header\'s own `E<n>`,\n// `renderHeader` above), never folded into a turn\'s own address \u2014 this\n// supersedes T1524/T1532, which each made a segment scope read\n// `E<segment>/T<k>` for its own members, and supersedes the T1531 toggle that\n// switch existed to reconcile (a segment holding turns it never adopted used\n// to render two address forms interleaved in one column; with one form there\n// is nothing left to switch between). The shell never assembles the address\n// itself \u2014 the `S/T` term below is the same defensive fallback as the bare\n// `T<id>` one, for a fixture predating the field.\nconst sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;\nconst addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : "T"+id; };\n\n/* ---- mutable render state: reset on every graph load ---- */\nlet turns = [], edges = [], lanes = [];\nlet idx = new Map();\nlet laneByToken = new Map();\nlet turnsByLaneToken = new Map();\nlet edgeEls = [];\nlet nodeEls = new Map(), rowEls = new Map();\nconst laneChips = new Map();\nlet sessionsList = [], segmentsList = [];\n// nextCursor from the most recent /api/console/sessions page (peer finding\n// #10) \u2014 null once the last page has been loaded, or before the first load.\nlet sessionsNextCursor = null;\nlet sessionsLoadingMore = false;\nlet currentScope = null; // { kind: "session"|"segment", id }\n// The exact params object behind the CURRENT graph response (floor-and-\n// render-fidelity ticket 04) \u2014 kept so the range bar\'s "\u8F83\u65E9"/"\u6700\u65B0"\n// buttons can re-issue the identical request with only `interval`\n// overridden, never reconstructing session/segment from `currentScope`\n// alone (which drops any `interval` already in effect).\nlet currentGraphTarget = null;\nlet lastLoad = null; // retry hook for the worker-stopped banner\n\n// Focus is a set of COMPONENTS, not of lanes ([S15069/T1696] ruling). A\n// component is one lane\'s members joined by edges carrying that lane\'s tag on\n// BOTH sides, so it belongs to exactly one lane by construction and a lane may\n// hold several. Focusing a turn that belongs to two lanes lights BOTH lanes\'\n// components \u2014 two entries here, never one merged region.\nlet selComps = new Set();\nlet compLaneToken = new Map();   // componentId -> its lane\'s token\nlet turnsByComp = new Map();     // componentId -> member turn ids\nlet compsByLaneToken = new Map();// lane token -> its own component ids\nlet solo = null;\nlet sel = null;\nconst sameFocus = (comps) => selComps.size===comps.length && comps.every(c=>selComps.has(c));\nconst focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c)).filter(Boolean));\nfunction clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }\n\n/* ---- fixed DOM refs ---- */\n// The toggle writes `data-theme` and the saved choice; the cascade does the\n// rest. Nothing re-renders, so focus, scroll and the open panel all survive it.\nconst themeToggle = document.getElementById("themeToggle");\nfunction paintThemeToggle(){\n  const dark = document.documentElement.getAttribute("data-theme") === "dark";\n  themeToggle.textContent = dark ? "\u263E" : "\u2600";\n  themeToggle.setAttribute("aria-label", dark ? "\u5207\u6362\u5230\u65E5\u95F4" : "\u5207\u6362\u5230\u591C\u95F4");\n}\nthemeToggle.addEventListener("click", () => {\n  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";\n  document.documentElement.setAttribute("data-theme", next);\n  // A stored choice is a DECISION, so it outranks the OS from here on. Storage\n  // can throw (private mode); the theme still applies, it just stops persisting.\n  try { localStorage.setItem("mnemo-theme", next); } catch (e) { /* ignore */ }\n  paintThemeToggle();\n});\npaintThemeToggle();\n// Follow the OS only while the reader has expressed no preference of their own.\nif (window.matchMedia) {\n  const os = window.matchMedia("(prefers-color-scheme: dark)");\n  const onOsChange = (e) => {\n    let saved = null;\n    try { saved = localStorage.getItem("mnemo-theme"); } catch (err) { /* ignore */ }\n    if (saved !== null) return;\n    document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");\n    paintThemeToggle();\n  };\n  if (os.addEventListener) os.addEventListener("change", onOsChange);\n}\n\nconst sesBox = document.getElementById("sessions");\nconst segBox = document.getElementById("segments");\nconst bar = document.getElementById("bar");\nconst rangeBar = document.getElementById("rangeBar");\nconst laneBox = document.getElementById("lanes");\nconst svg = document.getElementById("svg");\nconst wrap = document.getElementById("wrap");\nconst panel = document.getElementById("panel"), pbody = document.getElementById("pbody");\nconst selBadge = document.getElementById("selbadge");\nconst scopeTitleEl = document.getElementById("scopeTitle");\nconst metaEl = document.getElementById("meta");\nconst stoppedBanner = document.getElementById("stoppedBanner");\nconst partialBanner = document.getElementById("partialBanner");\nconst tipEl = document.getElementById("tip");\n\nscopeTitleEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";\n\n/* ---- worker-stopped snapshot state (spec "Worker lifecycle"): no\n   heartbeat, no auto-retry loop \u2014 a fetch failure keeps the last rendered\n   snapshot on screen and offers exactly one manual retry action. ---- */\nfunction showStopped(retryFn){ lastLoad = retryFn; stoppedBanner.style.display = "flex"; }\nfunction hideStopped(){ stoppedBanner.style.display = "none"; }\ndocument.getElementById("stoppedRetry").addEventListener("click", () => { if (lastLoad) lastLoad(); });\n\nlet toastTimer = null;\nfunction toast(msg){\n  const el = document.getElementById("toast");\n  el.textContent = msg; el.style.opacity = 1; // textContent \u2014 DOM rule\'s own safe path\n  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);\n}\n\n/**\n * Distinguishes "the worker is unreachable" (network failure \u2014 the\n * lifecycle banner\'s own case) from "the worker answered with an\n * application error" (a well-formed 4xx/5xx envelope \u2014 retrying the exact\n * same request would just fail again identically, so a transient toast is\n * the honest signal, not a persistent banner claiming the worker is down).\n */\nasync function fetchJson(url){\n  let res;\n  try {\n    res = await fetch(url);\n  } catch (networkError) {\n    const err = new Error("network"); err.kind = "network"; throw err;\n  }\n  if (!res.ok) {\n    let body = null;\n    try { body = await res.json(); } catch {}\n    const err = new Error("http " + res.status);\n    err.kind = "http"; err.status = res.status; err.body = body;\n    throw err;\n  }\n  return res.json();\n}\n\n/* ---- sidebar: populated from /api/console/sessions + /api/console/segments ---- */\nasync function loadSidebar(){\n  try {\n    const [sessionsRes, segmentsRes] = await Promise.all([\n      fetchJson("/api/console/sessions"),\n      fetchJson("/api/console/segments"),\n    ]);\n    sessionsList = sessionsRes.sessions;\n    sessionsNextCursor = sessionsRes.nextCursor ?? null;\n    segmentsList = segmentsRes.segments;\n    renderSidebar();\n    hideStopped();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u4F1A\u8BDD/\u4EFB\u52A1\u5217\u8868\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(loadSidebar);\n    }\n  }\n}\n\n/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer\n   finding #10) \u2014 older sessions are unreachable without walking nextCursor. ---- */\nasync function loadMoreSessions(){\n  if (!sessionsNextCursor || sessionsLoadingMore) return;\n  sessionsLoadingMore = true;\n  try {\n    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));\n    sessionsList = sessionsList.concat(res.sessions);\n    sessionsNextCursor = res.nextCursor ?? null;\n    renderSidebar();\n  } catch (e) {\n    toast("\u52A0\u8F7D\u66F4\u591A\u4F1A\u8BDD\u5931\u8D25: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  } finally {\n    sessionsLoadingMore = false;\n  }\n}\n\nfunction renderSidebar(){\n  sesBox.innerHTML = "";\n  for (const s of sessionsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="session" && currentScope.id===s.id ? " active" : "");\n    div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title || "(\u65E0\u6807\u9898)")}</div>\n      <div class="rm">${s.turnCount} turns \xB7 ${esc(s.date)}</div>`;\n    div.addEventListener("click", () => loadGraph({ session: s.id }));\n    sesBox.appendChild(div);\n  }\n  if (sessionsNextCursor) {\n    const more = document.createElement("div");\n    more.className = "srow more";\n    more.textContent = "\u66F4\u591A\u2026"; // textContent \u2014 a static app-authored label, not payload text\n    more.addEventListener("click", loadMoreSessions);\n    sesBox.appendChild(more);\n  }\n  segBox.innerHTML = "";\n  for (const g of segmentsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="segment" && currentScope.id===g.id ? " active" : "");\n    const dotClass = SEGMENT_STATUS_DOT[g.status] ?? "delivered";\n    div.innerHTML = `<div class="rid"><span class="sdot ${dotClass}"></span>E${g.id}</div>\n      <div class="rt">${esc(g.title)}</div>\n      <div class="rm">${g.memberCount} \u6210\u5458 \xB7 ${esc(g.status)}</div>\n      ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;\n    div.addEventListener("click", () => loadGraph({ segment: g.id }));\n    segBox.appendChild(div);\n  }\n}\n\n/* ---- filter bar: built once \u2014 WORDS is a closed, app-authored set, never graph data ---- */\n// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a\n// property of the relation word \u2014 it says whether one EDGE stayed inside a\n// lane \u2014 so a per-word swatch cannot honestly carry it: the same word draws\n// solid on one edge and dashed on the next. The legend states the rule; the\n// swatch states only the colour, which IS per-word.\nconst on = Object.fromEntries(WORDS.map(w=>[w,true]));\nfor (const w of WORDS) {\n  const l = document.createElement("label");\n  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;\n  bar.appendChild(l);\n}\nbar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="\u8DF3\u8F6C:\u5730\u5740\u6216\u6807\u9898\u5173\u952E\u8BCD \u23CE">`);\nbar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});\n\n/* ---- graph load: session or segment scope -> /api/console/graph ---- */\nasync function loadGraph(target){\n  const params = new URLSearchParams();\n  if (target.session !== undefined) params.set("session", target.session);\n  if (target.segment !== undefined) params.set("segment", target.segment);\n  if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);\n  const url = "/api/console/graph?" + params.toString();\n  try {\n    const data = await fetchJson(url);\n    currentScope = target.session !== undefined\n      ? { kind: "session", id: target.session }\n      : { kind: "segment", id: target.segment };\n    currentGraphTarget = target;\n    applyGraph(data);\n    hideStopped();\n    renderSidebar();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u56FE\u6570\u636E\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(() => loadGraph(target));\n    }\n  }\n}\n\nfunction applyGraph(data){\n  turns = data.turns; edges = data.edges; lanes = data.lanes;\n  idx = new Map(turns.map((t,i)=>[t.id,i]));\n  laneByToken = new Map(lanes.map(l=>[l.token,l]));\n  turnsByLaneToken = new Map();\n  compLaneToken = new Map(); turnsByComp = new Map(); compsByLaneToken = new Map();\n  for (const t of turns) {\n    for (const m of t.laneMemberships) {\n      if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);\n      turnsByLaneToken.get(m.token).push(t.id);\n      // Every component index is READ off the payload\'s own membership\n      // entries, never derived by splitting the id string: `componentId`\n      // embeds a `laneToken`, which is itself a JSON pair, so parsing it back\n      // apart here would be inventing a second grammar for a fact the payload\n      // already states next to it.\n      compLaneToken.set(m.componentId, m.token);\n      if (!turnsByComp.has(m.componentId)) turnsByComp.set(m.componentId, []);\n      turnsByComp.get(m.componentId).push(t.id);\n      if (!compsByLaneToken.has(m.token)) compsByLaneToken.set(m.token, new Set());\n      compsByLaneToken.get(m.token).add(m.componentId);\n    }\n  }\n  clearFocus();\n  renderHeader(data.meta);\n  renderRangeBar(data.meta);\n  renderLanes();\n  renderGraphSvg();\n  paintFilters();\n  syncBadge();\n}\n\nfunction renderHeader(meta){\n  let title = "";\n  if (meta.scope.kind === "range") title = `S${meta.scope.sessionId} \xB7 T${meta.scope.from}\u2013T${meta.scope.to}`;\n  else if (meta.scope.kind === "segment") title = `E${meta.scope.segmentId}`;\n  scopeTitleEl.textContent = title; // textContent \u2014 no markup ever reaches this sink\n  metaEl.textContent = ` ${turns.length} turns \xB7 ${edges.length} edges \xB7 ${lanes.length} lanes \xB7 ${meta.asOf}`;\n\n  if (meta.stateCoverage === "partial") {\n    const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}\u2192${b.applied}`).join(", ");\n    // Ticket 04 banner semantics update (T1496/T1498 rulings): "partial"\n    // means an OLDER interval is not currently shown \u2014 never that rows\n    // inside the shown interval were silently removed (the old drop-edges-\n    // then-turns amputation is retired; the interval selector always ships\n    // a COMPLETE sub-graph for whatever interval it picked).\n    // Ticket 03 (peer P2-5/P2-6): lanes and laneCheckText are ONE declared\n    // semantics \u2014 FULL SNAPSHOT, same posture as election tier \u2014 never\n    // projected down to whichever interval the graph happens to be showing.\n    // The old copy claimed lane_check fell short of the full picture, when\n    // the payload was already whole-scope; this states the true, single\n    // semantics instead.\n    const boundsNote = bounds ? `(${bounds})` : "";\n    partialBanner.textContent =\n      `\u90E8\u5206\u7ED3\u679C \u2014 \u66F4\u65E9\u7684\u533A\u95F4\u672A\u663E\u793A,\u53EF\u70B9\u51FB\u4E0B\u65B9\u300C\u8F83\u65E9\u300D\u67E5\u770B;\u5F53\u524D\u663E\u793A\u533A\u95F4\u5185\u5BB9\u5B8C\u6574;` +\n      `\u6CF3\u9053\u4E0E\u68C0\u9A8C\u6587\u672C\u8986\u76D6\u6574\u4E2A\u8303\u56F4,\u56FE\u4EC5\u663E\u793A\u5F53\u524D\u6240\u9009\u533A\u95F4;` +\n      `election tier \u6309\u5B8C\u6574\u5FEB\u7167\u8BA1\u7B97,\u4E0D\u53D7\u533A\u95F4\u9009\u62E9\u5F71\u54CD ${boundsNote}`;\n    partialBanner.style.display = "block";\n  } else {\n    partialBanner.style.display = "none";\n  }\n}\n\n/* ---- range bar: the interval selector (floor-and-render-fidelity ticket\n   04, T1498 ruling) \u2014 shows the interval this response actually renders and\n   lets the user page to an older one. `meta.interval` is `null` only for a\n   zero-turn graph response, in which case the bar stays hidden. ---- */\nfunction renderRangeBar(meta){\n  const iv = meta.interval;\n  if (!iv) { rangeBar.style.display = "none"; return; }\n  rangeBar.style.display = "flex";\n  rangeBar.innerHTML = "";\n  const label = document.createElement("span");\n  label.className = "rangeLabel";\n  // textContent \u2014 addresses are server-formatted, not raw payload text. The\n  // node count rides along because it is the one number the endpoints alone\n  // never give: how much of the scope this interval actually holds.\n  label.textContent = `\u533A\u95F4 ${iv.fromAddress}\u2013${iv.toAddress} \xB7 ${turns.length} \u4E2A\u8282\u70B9`;\n  rangeBar.appendChild(label);\n  if (!iv.isOldest) {\n    const older = document.createElement("button");\n    older.type = "button"; older.className = "rangeNav";\n    older.textContent = "\u2039 \u8F83\u65E9";\n    older.addEventListener("click", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));\n    rangeBar.appendChild(older);\n  }\n  if (!iv.isNewest) {\n    const newest = document.createElement("button");\n    newest.type = "button"; newest.className = "rangeNav";\n    newest.textContent = "\u6700\u65B0 \u203A";\n    newest.addEventListener("click", () => {\n      const target = { ...currentGraphTarget };\n      delete target.interval;\n      loadGraph(target);\n    });\n    rangeBar.appendChild(newest);\n  }\n}\n\n/* ---- lane strip: ONE group (lane-state-retirement ticket 01) ----\n   The strip used to split "open (live work)" from "closed", which is exactly\n   the distinction the model dropped: nothing here can know whether a lane will\n   continue. One group, the payload\'s own order, count in the label. */\nfunction renderLanes(){\n  laneBox.innerHTML = "";\n  laneChips.clear();\n  const g = document.createElement("div"); g.className="lgroup";\n  g.innerHTML = `<span class="lt">\u6CF3\u9053 (${lanes.length})</span>`;\n  for (const l of lanes) g.appendChild(laneChip(l));\n  laneBox.appendChild(g);\n}\nfunction laneChip(l){\n  const c = document.createElement("span");\n  // ONE styling for every lane. Ticket 04 removed the validity verdict (node\n  // death is deleted); ticket 01 removed closure, which was the last per-lane\n  // state this class list branched on.\n  c.className = "lchip";\n  // What the chip says beside the tag is the lane\'s SIZE \u2014 a fact the payload\n  // carries whole-snapshot and that stays true however the interval narrows.\n  // It replaces the terminus address (`\u25CES\u2026/T\u2026` / `\u2026\u25CES\u2026/T\u2026` / `\u65E0\u5BA3\u544A`), which\n  // named a latest-wins seat the model no longer computes; a lane that\n  // converged five times never had one.\n  const term = `${l.memberCount}`;\n  // D5, v11 (lane-declaration ticket 05): a lane\'s identity is ONE tag now\n  // (`ConsoleGraphLane.tag`, never an array) \u2014 the prototype\'s `tagSet.join`\n  // is retired along with the exact-set identity it rendered.\n  c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;\n  c.addEventListener("click", () => {\n    // A chip is the WHOLE lane \u2014 every component it split into. That is the\n    // one place the shattering is visible as a single act: press the chip and\n    // the badge says how many islands this lane\'s members fall into.\n    const comps = [...(compsByLaneToken.get(l.token) || [])];\n    if (comps.length && sameFocus(comps)) { clearFocus(); }\n    else {\n      selComps = new Set(comps); solo = null;\n      if (sel!==null && !(turnsByLaneToken.get(l.token)||[]).includes(sel)) { sel=null; panel.style.display="none"; }\n      const anchor = anchorOf(l.token);\n      if (anchor != null && idx.has(anchor))\n        wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});\n    }\n    paintFilters();\n    syncBadge();\n  });\n  laneChips.set(l.token, c);\n  return c;\n}\n\n/* ---- vertical graph: one row per turn, arcs on the left rails ---- */\nconst ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372, LABEL_GAP = 12;\nconst yOf = id => TOP + idx.get(id)*ROW + ROW/2;\nconst W = 1080;\nconst NS = "http://www.w3.org/2000/svg";\nconst mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };\n\n// any blank click (svg background or the baseline) clears all focus. Attached\n// once \u2014 the listener checks the event target\'s tag generically, so it stays\n// correct across every renderGraphSvg() rebuild of svg\'s own children.\nsvg.addEventListener("click", e => {\n  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }\n});\n\nfunction renderGraphSvg(){\n  svg.innerHTML = "";\n  edgeEls = []; nodeEls = new Map(); rowEls = new Map();\n  const H = TOP*2 + turns.length*ROW;\n  svg.setAttribute("width", W); svg.setAttribute("height", H);\n  svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));\n\n  // row hover/click layer sits UNDER the edges: the hover band may never mask\n  // an arc, and it doubles as a full-width row guide across the rail.\n  const bgg = mk("g",{}); svg.appendChild(bgg);\n  const eg = mk("g",{}); svg.appendChild(eg);\n  let undrawnEdges = 0;\n  for (const e of edges) {\n    const y1=yOf(e.citingId), y2=yOf(e.citedId);\n    // Asserted unreachable \u2014 the server only ships an edge whose BOTH endpoints\n    // are in the interval it selected. Counted and reported below rather than\n    // dropped in silence (T1529 ruling, "\u4E0D\u8981\u9759\u9ED8\u9690\u85CF\u8BE5\u6709\u7684\u7EBF"): a line the data\n    // says exists must never just fail to appear.\n    if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }\n    const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));\n    // Arc depth is REACH. The wide band\'s old slope (150 + span*1.9) spent 9px\n    // across spans 1..6 while 76% of real wide-band edges live at span <= 5, so\n    // two citations from one node came out as one stroke (T1527). At span*12\n    // the same band separates them by 60px and saturates only past span 15,\n    // where the endpoints are already far enough apart to tell the arcs apart.\n    const depth = STRUCT.has(e.relation)\n      ? Math.min(120, 16 + span*2.4)\n      : Math.min(330, 150 + span*12);\n    // [S15069/T1760, revised by console-focus-encoding ticket 01, revised\n    // again by user ruling 2026-08-28 S15069/T1859] Colour and dash are\n    // decided here, at draw time; width never is \u2014 it is decided in\n    // paintFilters, from whether the edge touches the CLICKED node\n    // (`touchesSel`, path.edge.inc), never from this edge\'s own attribution\n    // or from which focused subgraph it may or may not sit inside.\n    //   colour \u2014 attributed at all (grey = draft), else which relation word\n    //   dash   \u2014 did the edge stay inside one lane\n    // `indexes` still does not render thin for fanning out to the batch it\n    // cites \u2014 that reading collided with the one channel a reader is\n    // actually steering by; `indexes` reads by its own hue (--indexes)\n    // instead of a thinner line.\n    // A DRAFT is an edge missing a tag on EITHER side, which is v12\'s own\n    // definition, so a half-settled edge greys out with a fully unsettled one.\n    // That deliberately drops the distinction between E6 (blocks commit) and\n    // the ordinary backlog: the console is a reading surface and the commit\n    // refusal names E6 by address, which is where it is actionable.\n    //\n    // `style`, never `stroke:css(...)`: `css()` resolves through\n    // getComputedStyle and BAKES the literal in force when the edge was drawn,\n    // so a theme toggle would leave every edge at its old colour. The node\n    // dots were fixed for this; the edge strokes were missed.\n    const isDraft = e.tailTag === "" || e.headTag === "";\n    const p = mk("path",{class:"edge",\n      d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,\n      style:`stroke:${isDraft?"var(--draft)":`var(--${e.relation})`}`});\n    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");\n    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;\n    // An edge reaches AT MOST two lanes \u2014 one per side (ticket 07), which for\n    // a cross-lane edge are two genuinely different lanes. `dataset` only\n    // holds strings, and `laneToken()` is itself a JSON-stringified pair\n    // (`shared/lane-interpretation.ts`), so joining tokens into one dataset\n    // string would need an escaping scheme for no benefit: this is a same-\n    // document, same-JS-context array, so a plain element property carries\n    // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),\n    // never the old single-token string equality.\n    p.laneTokens = edgeLaneTokens(e);\n    p.componentId = edgeComponentId(e);\n    p.addEventListener("mousemove", ev=>tip(ev,\n      `${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}` +\n      (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));\n    p.addEventListener("mouseleave", hideTip);\n    eg.appendChild(p); edgeEls.push(p);\n  }\n\n  // T1529 ruling: an edge that could not be drawn is REPORTED, never swallowed.\n  // The range bar already carries this response\'s scope line, so the warning\n  // lands where the reader is told what they are looking at.\n  if (undrawnEdges > 0) {\n    const warn = document.createElement("span");\n    warn.className = "rangeWarn";\n    warn.textContent = `\u26A0 ${undrawnEdges} \u6761\u8FB9\u7684\u7AEF\u70B9\u4E0D\u5728\u672C\u6B21\u8F7D\u5165\u7684\u8282\u70B9\u96C6\u5185,\u672A\u80FD\u7ED8\u5236`;\n    rangeBar.appendChild(warn);\n    rangeBar.style.display = "flex";\n  }\n\n  const ng = mk("g",{}); svg.appendChild(ng);\n  const labelEls = [], titleEls = [];\n  for (const t of turns) {\n    const y = yOf(t.id);\n    // hit target covers node + text only \u2014 the arc rail stays BLANK, and blank\n    // clicks (svg background) clear all focus (T1386 ruling 2).\n    const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});\n    hit.addEventListener("click", ()=>select(t.id));\n    bgg.appendChild(hit);\n\n    const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});\n    const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));\n    const r = 5.5;\n    // `style`, never the `fill` ATTRIBUTE: a presentation attribute does not\n    // accept `var()`, a style property does.\n    if (!tys.length) g.appendChild(mk("circle",{r,style:"fill:var(--none)"}));\n    else if (tys.length===1) g.appendChild(mk("circle",{r,style:`fill:${typeColor(tys[0])}`}));\n    else {\n      let a0 = -Math.PI/2;\n      for (const ty of tys) {\n        const a1 = a0 + 2*Math.PI/tys.length;\n        const large = (a1-a0)>Math.PI?1:0;\n        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,style:`fill:${typeColor(ty)}`}));\n        a0 = a1;\n      }\n    }\n    // The selection ring, one per node whatever the body shape (circle or\n    // pie slices) \u2014 hidden until paintFilters adds `sel` ([S15069/T1863]).\n    g.appendChild(mk("circle",{class:"selring",r:r+2.5}));\n    // NO PER-NODE MARK. `t.laneMemberships` carries one entry PER LANE this\n    // turn belongs to, and both marks this block used to draw from it are\n    // deleted: the cross over a node dead in every lane (ticket 04 \u2014 node\n    // death does not exist) and the terminus ring (lane-state-retirement\n    // ticket 01 \u2014 a lane has no terminus). The payload carries neither flag,\n    // so neither glyph has anything to read; an index declaration shows only\n    // as an `indexes`-coloured EDGE now (console-focus-encoding ticket 01 \u2014\n    // the fan no longer thins itself to stand out; see path.edge above).\n    g.addEventListener("click", ()=>select(t.id));\n    ng.appendChild(g); nodeEls.set(t.id,g);\n\n    const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});\n    lb.textContent = addrOf(t.id);\n    // x is set AFTER the loop, from the measured label column \u2014 see below.\n    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),y:y+3.5});\n    const tt = t.title || "(\u65E0\u7B14\u8BB0)";\n    // Code-point slice, never `.slice()` \u2014 a UTF-16 code-unit slice cuts\n    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the\n    // server\'s own codePointExcerpt for the prompt/content excerpt caps).\n    // `Array.from` iterates a string by code point.\n    const ttCp = Array.from(tt);\n    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"\u2026" : tt; // textContent \u2014 no esc() needed\n    ng.appendChild(lb); ng.appendChild(title);\n    labelEls.push(lb); titleEls.push(title);\n    rowEls.set(t.id,[hit,lb,title]);\n  }\n\n  // The label column is MEASURED, never a constant. The retired fixed 52px\n  // gutter was sized for the old `T<dbid>` label and painted the title straight\n  // through the wider `S<session>/T<prompt>` form the address ruling\n  // introduced. Ticket 10 (one address grammar) widens it again: a segment\n  // scope used to print a short per-segment ordinal (`E7/T2`) for its own\n  // members, narrower than most rows will now ever be \u2014 every row can run as\n  // wide as its session/prompt digits allow (`S15069/T15829`). Measure once\n  // per render \u2014 `ng` is already in the document, so getComputedTextLength\n  // reports real typeset widths \u2014 and fall back to a per-character estimate for\n  // an unattached or hidden SVG, where every measurement reads 0.\n  let labelW = 0, maxChars = 0;\n  for (const lb of labelEls) {\n    labelW = Math.max(labelW, lb.getComputedTextLength());\n    maxChars = Math.max(maxChars, lb.textContent.length);\n  }\n  if (!(labelW > 0)) labelW = maxChars * 6.8;\n  const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;\n  for (const el of titleEls) el.setAttribute("x", titleX);\n}\n\n/* ---- interactions ---- */\n// Server-computed connectivity ([S15069/T1696]): every membership entry\n// already carries its own `componentId` (lane-checker report 2\'s islands,\n// republished), so "the components touching this turn" is a read off the\n// payload, never a client-side graph traversal.\nfunction compsTouchingTurn(turnId){\n  const t = turns[idx.get(turnId)];\n  if (!t || !t.laneMemberships.length) return [];\n  return [...new Set(t.laneMemberships.map(m=>m.componentId))];\n}\nfunction anchorOf(tok){\n  // Where the view scrolls when a lane chip is pressed. It used to prefer the\n  // lane\'s terminus and fall back to its newest loaded member; ticket 01\n  // deleted the terminus, so the fallback is the whole rule \u2014 which is also\n  // the more useful anchor, since it is always inside the rendered set.\n  if (!laneByToken.has(tok)) return null;\n  const members = turnsByLaneToken.get(tok) || [];\n  return members.length ? members[members.length-1] : null;\n}\nfunction paintFilters(){\n  const anyFocus = selComps.size>0 || solo!==null;\n  const litLanes = focusedLaneTokens();\n  for (const p of edgeEls){\n    p.classList.remove("off","gray","hot","inc");\n    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }\n    // Width\'s WHOLE rule, independent of colour/focus below: user ruling\n    // 2026-08-28 [S15069/T1859], revising console-focus-encoding ticket 01\n    // (cf32918) \u2014 that ticket thickened the whole focused SUBGRAPH; this\n    // narrows thickness to the clicked node\'s own neighbourhood. `touchesSel`\n    // is true for an edge\'s in- or out-direction alike (direction does not\n    // matter \u2014 \u51FA\u8FB9\u6216\u5165\u8FB9\u90FD\u7B97), and is checked with no `anyFocus` gate: with\n    // no node clicked (`sel===null`) it is always false, which is how "no\n    // focus -> all thin" and "lane-only focus -> width uniformly thin" both\n    // fall out of the SAME predicate rather than a separate branch.\n    const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (touchesSel) p.classList.add("inc");\n    if (!anyFocus) continue;\n    // Only an edge INTERNAL to a focused component lights as structure: it is\n    // the edge that made those two turns connected in the first place. A\n    // cross-lane edge is in no component and stays gray \u2014 it joins nothing \u2014\n    // unless the panel\'s own node is one of its ends (`selDirect` below).\n    const inComp = p.componentId !== null && selComps.has(p.componentId);\n    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);\n    // \u5361\u7247\u8282\u70B9(sel)\u7684\u5165\u8FB9\u51FA\u8FB9\u4E00\u5F8B\u4E0A\u8272,\u5E26\u4E0D\u5E26 tag \u90FD\u662F\u2014\u2014T1416 ruling;\n    // \u6743\u91CD/\u865A\u7EBF\u8BED\u4E49\u4E0D\u53D8,\u53EA\u89E3\u9664\u7070\u5316\u3002\n    const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (inComp || soloDirect || selDirect) p.classList.add("hot");\n    else p.classList.add("gray");\n  }\n  // The ring, width\'s sibling ([S15069/T1861]): mark the ONE node `sel`\n  // names. Keyed on `sel` alone \u2014 same authority as `touchesSel` above \u2014\n  // so clearFocus (sel=null) strips every ring in the same repaint.\n  for (const [id, el] of nodeEls) el.classList.toggle("sel", id===sel);\n  for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));\n  const dimRow = (id, dim) => {\n    nodeEls.get(id).classList.toggle("dim", dim);\n    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);\n  };\n  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }\n  const keep = new Set();\n  for (const cid of selComps) for (const m of (turnsByComp.get(cid) || [])) keep.add(m);\n  if (solo!==null){\n    keep.add(solo);\n    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }\n  }\n  if (sel!==null) keep.add(sel);\n  for (const t of turns) dimRow(t.id, !keep.has(t.id));\n}\n// Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the\n// bare `T<dbid>` \u2014 every id here comes from `select(id)`, always a turn\n// already present in the currently-loaded `turns`. The one id that could ever\n// fall outside it was a lane\'s terminus, and lane-state-retirement ticket 01\n// removed that field, so the addrOf fallback is now unreachable everywhere.\nfunction syncBadge(){\n  if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }\n  // Both numbers, always: they answer different questions and the pair is the\n  // point. A node in two lanes reads "2 \u6761 lane \xB7 2 \u4E2A\u5206\u91CF"; one shattered\n  // lane\'s chip reads "1 \u6761 lane \xB7 47 \u4E2A\u5206\u91CF", which is the lane telling you\n  // its members are not joined by edges yet.\n  const laneCount = focusedLaneTokens().size;\n  selBadge.textContent = (selComps.size\n    ? `\u805A\u7126 ${laneCount} \u6761\u6CF3\u9053 \xB7 ${selComps.size} \u4E2A\u5206\u91CF${sel!==null ? ` \xB7 \u9762\u677F ${addrOf(sel)}` : ""}`\n    : solo!==null ? `\u805A\u7126 ${addrOf(solo)}(\u65E0\u6CF3\u9053,\u4EAE\u76F4\u8FDE\u8FB9)` : `\u9762\u677F ${addrOf(sel)}`) + " \xB7 \u7A7A\u767D\u5904/Esc \u6E05\u9664";\n  selBadge.style.display = "inline-block";\n}\nselBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };\naddEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });\n// ONE focus system: the component multi-select. Clicking a node SWITCHES\n// focus to ITS components \u2014 one per lane it belongs to ([S15069/T1696]: "\u5C5E\u4E8E\n// \u4E24\u4E2A lane \u7684\u8282\u70B9\u5C31\u540C\u65F6\u70B9\u4EAE\u4E24\u4E2A lane"), the previous focus clearing. On the\n// already-focused set the click is two-stage (T1385): open the panel first;\n// undo the focus only when the panel already shows this node. Laneless nodes\n// focus solo \u2014 their direct edges color.\nfunction select(id){\n  const comps = compsTouchingTurn(id);\n  if (comps.length){\n    if (sameFocus(comps)){\n      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    } else { selComps = new Set(comps); solo = null; }\n  } else {\n    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    selComps = new Set(); solo = id;\n  }\n  sel = id;\n  paintFilters();\n  syncBadge();\n  renderTurnPanel(id);\n}\nfunction renderTurnPanel(id){\n  const t = turns[idx.get(id)];\n  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);\n  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`\u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;\n  // One chip per lane this turn belongs to, and MEMBERSHIP is now all a chip\n  // says. Both marks it used to carry are deleted: the dead-in-this-lane flag\n  // (ticket 04) and the per-lane terminus \u25CE (lane-state-retirement ticket 01).\n  const laneChipsHtml = t.laneMemberships.map(({token: tok}) => {\n    const l = laneByToken.get(tok);\n    // D5, v11 (ticket 05): the panel\'s per-turn lane chips reflect SET\n    // MEMBERSHIP \u2014 one chip per lane token this turn belongs to, each\n    // labelled by that lane\'s own single tag, never a joined tagSet.\n    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;\n  }).join("");\n  // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the\n  // same row as \u6240\u5C5E lane above: that row is what the model resolved, this one\n  // is what the turn carries, and the gap between them is the attribution\n  // debt. A word that IS one of this turn\'s lanes keeps the lane styling so\n  // the correspondence is readable at a glance; everything else \u2014 the\n  // segment\'s own tag, a retired vocabulary word \u2014 is muted, present but\n  // marked as naming no lane.\n  const ownLaneTags = new Set(\n    t.laneMemberships.map(({token: tok}) => (laneByToken.get(tok) || {}).tag).filter(Boolean),\n  );\n  const tagChipsHtml = (t.tags || [])\n    .map(tag => `<span class="chip ${ownLaneTags.has(tag) ? "lane" : "tagoff"}">${esc(tag)}</span>`)\n    .join("");\n  pbody.innerHTML =\n    `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(\u65E0\u7B14\u8BB0)")}</h2>\n     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>\n     ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}\n     ${t.laneMemberships.length?`<div class="flowline">\u6240\u5C5E\u6CF3\u9053:${laneChipsHtml}</div>`:""}\n     ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}\n     <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"\u2014")}</div>\n     <div class="sec">\u51FA\u8FB9 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class=\'flowline\'>\u65E0</div>"}\n     <div class="sec">\u5165\u8FB9 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class=\'flowline\'>\u65E0</div>"}`;\n  document.getElementById("tlbar").style.display="none";\n  panel.style.display="block";\n  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));\n}\nfunction jump(id){\n  if (!idx.has(id)) return;\n  if (sel!==id) select(id);\n  wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});\n}\ndocument.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };\n// Jump by ADDRESS, never by internal id (T1482\'s ruling, which this box was\n// the last holdout of): a full `S15069/T1387` matches exactly, a bare\n// `T1387`/`1387` matches the trailing `/T<n>` of the address every turn now\n// carries, and anything else falls through to a title substring.\ndocument.getElementById("search").addEventListener("keydown", e=>{\n  if (e.key!=="Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const lower = s => s.toLowerCase();\n  const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));\n  if (exact) return jump(exact.id);\n  const m = q.match(/^t?(\\d+)$/i);\n  if (m) {\n    const suffix = "/t"+m[1];\n    const byOrdinal = turns.find(t=>lower(addrOf(t.id)).endsWith(suffix));\n    if (byOrdinal) return jump(byOrdinal.id);\n  }\n  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(lower(q)));\n  if (hit) jump(hit.id);\n});\nfunction tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }\nfunction hideTip(){ tipEl.style.display="none"; }\n\n/* ---- recall & timeline panels (console-recall-timeline-panels ticket 13) ----\n   Both surfaces are server prose (recallMemory/timelineQuery\'s own rendered\n   text, over /api/console/recall and /api/console/timeline) shown through the\n   SAME #panel/#pbody overlay the turn-detail view already uses \u2014 a second\n   competing panel would be exactly the "speculative chrome" the ticket asks\n   this surface to avoid. `.mono` (see the stylesheet) is the one visual\n   difference: monospace, matching every address already on screen. */\n\n// Ticket 11\'s bare-citation grammar, exactly as the ticket names it: a turn\n// address (`S<n>/T<m>`), a segment address (`E<n>`), or a segment+lane\n// address (`E<n>/#<tag>`) \u2014 never a bare `S<n>` (session alone is not a\n// citation form). Matched against the ESCAPED string (see `renderMonoText`):\n// every character either alternative can match \u2014 digits, S/T/E, "/", "#",\n// lowercase letters, "-" \u2014 passes `esc()` unchanged, so escaping first and\n// matching second is safe and never double-escapes a matched address.\nconst ADDRESS_LINK_RE = /\\bS\\d+\\/T\\d+\\b|\\bE\\d+(?:\\/#[a-z0-9-]+)?\\b/g;\nfunction linkifyAddresses(escaped){\n  return escaped.replace(ADDRESS_LINK_RE, addr => `<a href="#" class="addrlink" data-addr="${addr}">${addr}</a>`);\n}\nfunction renderMonoText(raw){ return linkifyAddresses(esc(raw)); }\n\nfunction openTextPanel(title, text, withTimelineBar = false){\n  // Overwrites #pbody outright \u2014 no stale turn-panel content survives under\n  // it \u2014 but leaves graph focus/dimming exactly as it was: a recall/timeline\n  // lookup is not a graph interaction, so it has no business clearing one.\n  // The timeline\u63A7\u4EF6\u6761 rides the panel top only while timeline output is up;\n  // every other panel content hides it.\n  document.getElementById("tlbar").style.display = withTimelineBar ? "flex" : "none";\n  pbody.innerHTML = `<div class="addr">${esc(title)}</div><div class="content mono">${renderMonoText(text)}</div>`;\n  panel.style.display = "block";\n}\n\n// A clicked address navigates through the shell\'s EXISTING mechanisms \u2014\n// loadGraph for scope, jump/select for a turn, a lane chip\'s own click\n// handler for a lane \u2014 never a parallel navigation path.\nasync function navigateToAddress(addr){\n  const turnMatch = addr.match(/^S(\\d+)\\/T(\\d+)$/);\n  if (turnMatch) {\n    const sessionId = Number(turnMatch[1]), promptNumber = Number(turnMatch[2]);\n    if (!(currentScope && currentScope.kind === "session" && currentScope.id === sessionId)) {\n      await loadGraph({ session: sessionId });\n    }\n    const t = turns.find(t => t.sessionId === sessionId && t.promptNumber === promptNumber);\n    if (t) jump(t.id); else toast(`S${sessionId}/T${promptNumber} \u4E0D\u5728\u5F53\u524D\u52A0\u8F7D\u533A\u95F4\u5185`);\n    return;\n  }\n  const laneMatch = addr.match(/^E(\\d+)\\/#(.+)$/);\n  if (laneMatch) {\n    const segmentId = Number(laneMatch[1]), tag = laneMatch[2];\n    if (!(currentScope && currentScope.kind === "segment" && currentScope.id === segmentId)) {\n      await loadGraph({ segment: segmentId });\n    }\n    const lane = lanes.find(l => l.tag === tag);\n    const chip = lane ? laneChips.get(lane.token) : null;\n    if (chip) chip.click(); else toast(`E${segmentId} \u4E2D\u672A\u627E\u5230\u6CF3\u9053 #${tag}`);\n    return;\n  }\n  const segMatch = addr.match(/^E(\\d+)$/);\n  if (segMatch) { await loadGraph({ segment: Number(segMatch[1]) }); }\n}\npbody.addEventListener("click", e => {\n  const a = e.target.closest("a.addrlink");\n  if (!a) return;\n  e.preventDefault();\n  navigateToAddress(a.dataset.addr);\n});\n\n/* ---- recall search: one box, cross-session \u2014 distinct from #search above,\n   which only jumps within the CURRENTLY loaded graph. An input that looks\n   like an address ("S12", "E7/#foo", "T900", "O4", ...) is sent as `id`;\n   anything else is a full-text `query`, same heuristic #search already uses\n   for its own address-vs-title split. ---- */\nconst recallInput = document.getElementById("recallInput");\nconst looksLikeAddress = q => /^[SETO][\\d*]/i.test(q) || /^\\d+$/.test(q);\nrecallInput.addEventListener("keydown", async e => {\n  if (e.key !== "Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const params = new URLSearchParams();\n  params.set(looksLikeAddress(q) ? "id" : "query", q);\n  try {\n    const data = await fetchJson("/api/console/recall?" + params.toString());\n    openTextPanel(`recall: ${q}`, data.text);\n  } catch (err) {\n    toast("recall \u5931\u8D25: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  }\n});\n\n/* ---- timeline: one form (id + view + pageBudget + page) drives every\n   lookup (console-timeline-panel-controls ticket 16) \u2014 the id input takes\n   whatever legal form `timelineQuery` itself accepts (S<n>, S<n>/T-ranges,\n   E<n>, E<n>/#<tag>, E<n>/L<n>, ...) and this shell pre-validates NONE of\n   it: an illegal input surfaces `timelineQuery`\'s own error text verbatim\n   (via the console API\'s typed 400/404 \u2014 `err.body.error.message`, same\n   shape `#recallInput`\'s own error handling already reads), never a second\n   client-side grammar. The context-adaptive trigger (`timelineIdForContext`,\n   unchanged) is now a PREFILL shortcut into this SAME form \u2014 one mechanism\n   (`runTimelineQuery`), two entry points, never a divergent fetch path. ---- */\nfunction timelineIdForContext(){\n  const litLanes = [...focusedLaneTokens()];\n  if (litLanes.length === 1) {\n    const lane = laneByToken.get(litLanes[0]);\n    // `lane.segment` is `String(segmentId)`, except the DEFAULT_SEGMENT\n    // sentinel for a homeless (unsegmented) lane, which has no `E<n>` address\n    // at all \u2014 `Number(...)` on that sentinel is NaN, so the guard below\n    // falls through to the plain session/segment case instead of emitting a\n    // bogus "E<NaN>#tag" id.\n    const segmentId = Number(lane && lane.segment);\n    if (Number.isFinite(segmentId)) return `E${segmentId}/#${lane.tag}`;\n  }\n  if (!currentScope) return null;\n  return currentScope.kind === "segment" ? `E${currentScope.id}` : `S${currentScope.id}`;\n}\nconst timelineIdInput = document.getElementById("timelineIdInput");\nconst timelineViewSelect = document.getElementById("timelineViewSelect");\nconst timelinePageBudgetInput = document.getElementById("timelinePageBudget");\nconst timelinePageInput = document.getElementById("timelinePageInput");\n\nasync function runTimelineQuery(){\n  const id = timelineIdInput.value.trim();\n  if (!id) { toast("\u8BF7\u5148\u8F93\u5165\u65F6\u95F4\u7EBF\u5730\u5740"); return; }\n  const params = new URLSearchParams();\n  params.set("id", id);\n  if (timelineViewSelect.value) params.set("view", timelineViewSelect.value);\n  if (timelinePageBudgetInput.value.trim()) params.set("pageBudget", timelinePageBudgetInput.value.trim());\n  if (timelinePageInput.value.trim()) params.set("page", timelinePageInput.value.trim());\n  try {\n    const data = await fetchJson("/api/console/timeline?" + params.toString());\n    openTextPanel(`timeline: ${id}`, data.text, true);\n  } catch (err) {\n    toast("timeline \u5931\u8D25: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  }\n}\nfor (const el of [timelineIdInput, timelinePageBudgetInput, timelinePageInput]) {\n  el.addEventListener("keydown", e => { if (e.key === "Enter") runTimelineQuery(); });\n}\n// A view change re-runs the CURRENT id \u2014 turns/milestones are the only two\n// real options (lane is implied by the id\'s own E<n>/L*/E<n>/#<tag> form,\n// never a third dropdown entry for a view that does not exist on its own).\ntimelineViewSelect.addEventListener("change", () => { if (timelineIdInput.value.trim()) runTimelineQuery(); });\n// Page navigation: prev/next step the SAME page field the form already\n// exposes and re-run through the one mechanism above \u2014 never a separate\n// pagination path.\ndocument.getElementById("timelinePrev").addEventListener("click", () => {\n  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);\n  timelinePageInput.value = String(Math.max(1, current - 1));\n  runTimelineQuery();\n});\ndocument.getElementById("timelineNext").addEventListener("click", () => {\n  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);\n  timelinePageInput.value = String(current + 1);\n  runTimelineQuery();\n});\ndocument.getElementById("timelineBtn").addEventListener("click", () => {\n  const id = timelineIdForContext();\n  if (!id) { toast("\u5C1A\u65E0\u53EF\u7528\u7684\u4F1A\u8BDD/\u4EFB\u52A1\u4E0A\u4E0B\u6587"); return; }\n  timelineIdInput.value = id;\n  timelineViewSelect.value = "";\n  timelinePageBudgetInput.value = "";\n  timelinePageInput.value = "";\n  runTimelineQuery();\n});\n\n/* ---- bootstrap ---- */\nasync function init(){\n  await loadSidebar();\n  if (sessionsList.length) {\n    await loadGraph({ session: sessionsList[0].id });\n  } else if (segmentsList.length) {\n    await loadGraph({ segment: segmentsList[0].id });\n  } else {\n    scopeTitleEl.textContent = "\u65E0\u4F1A\u8BDD";\n  }\n}\ninit();\n</script>\n</body>\n</html>\n';
+var CONSOLE_SHELL_HTML = '<!doctype html>\n<html lang="zh">\n<head>\n<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'self\'">\n<title>claude-mnemo \xB7 memory console v2</title>\n<script>\n// Runs BEFORE the stylesheet paints anything: reads the saved choice, falls\n// back to the OS, and puts the answer on <html> as `data-theme`. Doing this in\n// <head> rather than with the rest of the script is what stops a dark-mode\n// reader getting a white flash on every load.\n//\n// Every colour below is a CSS custom property, so the attribute IS the switch \u2014\n// no element is re-rendered, no state is recomputed, and a graph the reader has\n// already focused keeps its focus across a toggle.\n(function () {\n  var saved = null;\n  try { saved = localStorage.getItem("mnemo-theme"); } catch (e) { /* private mode */ }\n  var dark = saved === "dark" || (saved === null &&\n    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);\n  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\n})();\n</script>\n<style>\n  :root {\n    --evidence:#3f8fd2; --decision:#e0a63a; --delivery:#59a86c; --none:#c3c9cf;\n    --t-research:#2b6fb5; --t-measure:#6db1e4;\n    --t-design:#d98f14; --t-discuss:#edc45c; --t-correction:#b25c1f;\n    --t-implement:#2f9e60; --t-fix:#157347; --t-refactor:#69bd8a;\n    --t-delegate:#3fa08f; --t-review:#7cb356; --t-ops:#9ab141;\n    /* THE FOUR RELATION CLASSES (main-agent-edges ticket 02). Seven word hues\n       collapse into four: the two corrections keep the retired `override` /\n       `narrows` reds and ambers they absorbed, `verify` keeps `verifies`\' teal,\n       and `use` takes `extends`\' blue \u2014 the four hues a reader had already\n       learned, minus the three that no longer name anything. */\n    --rel-correct-full:#d64541; --rel-correct-partial:#d98e04;\n    --rel-verify:#16a3a3; --rel-use:#3b82c4;\n    /* [S15069/T1760, revised by console-focus-encoding ticket 01] GREY\'S\n       RESERVATION IS RELEASED. It used to say ONE thing only \u2014 this edge has\n       no lane attribution yet, so nothing else may claim it \u2014 and `consume`\n       moved off grey to protect that. The exclusivity cost nothing to keep\n       because the tenant never moved in: an unattributed edge does not\n       render in the graph at all, so `--draft` below has never actually\n       painted a pixel. Focus dimming claims grey now instead (`--edge-gray`,\n       `path.edge.gray` below) \u2014 colour and width both carry focus, not\n       opacity alone. Consequence: grey is spoken for again, by a different\n       claimant \u2014 once draft edges start rendering, an unattributed edge and\n       a merely-unfocused one will both read grey, indistinguishable by\n       colour alone. `consume` still carries the muted taupe this ruling gave\n       it, and `refutes` is still gone with the word itself, folded into\n       `override` in v12. */\n    --draft:#b9bec4;\n    --ink:#2a2e33; --faint:#8a9199; --line:#e4e7ea; --bg:#fbfbfa; --panel:#ffffff;\n    --lane:#6b4d8f; --lane-bg:#f3eefa;\n    /* Tokens the rules below used to hardcode. Named for their ROLE, not their\n       colour, so the dark block can answer each one without a second sweep. */\n    --row-hover:#f5f6f7; --row-active:#f7f5fa; --chip-bg:#eef0f2; --chip-ink:#555;\n    --chip-ph-ink:#fff; --prompt-bg:#f7f7f6; --edge-gray:#c9cdd1;\n    --rowlbl:#6b727a; --rowtitle:#585f66; --rowtitle-none:#b3bac0;\n    --lane-dash:#c9b8dd; --tip-bg:#26292d; --tip-ink:#f4f4f2; --tip-faint:#aab3bb;\n    --tip-lane:#cdb8e8; --badge-hover:#3a3e43; --accent:#555;\n    --sel-ring:#1a1d20;\n  }\n\n  /* NIGHT. One override block, no duplication of the light one \u2014 the resolver\n     in <head> puts `data-theme` on <html> before first paint, so the cascade\n     does all the switching and nothing re-renders.\n\n     The neutrals invert; the SEMANTIC hues do NOT simply invert. Every type and\n     relation colour above was chosen against white and several (`--t-fix`,\n     the greens) are far too dark to read on a dark panel, so each is lifted in\n     lightness and slightly desaturated rather than reused. The hue is what\n     carries the meaning; the lightness is what has to move. */\n  :root[data-theme="dark"] {\n    --evidence:#66a8e0; --decision:#e8bb63; --delivery:#7cc48c; --none:#5a626b;\n    --t-research:#5c9ee0; --t-measure:#8ec8f0;\n    --t-design:#e8a93f; --t-discuss:#f0d07a; --t-correction:#d98244;\n    --t-implement:#4fbc80; --t-fix:#3fa06d; --t-refactor:#8ad0a5;\n    --t-delegate:#5cc0ad; --t-review:#9bcd76; --t-ops:#b6cc64;\n    --rel-correct-full:#e86b67; --rel-correct-partial:#e8a838;\n    --rel-verify:#3cc0c0; --rel-use:#63a3e0;\n    --draft:#5a626b;\n    --ink:#d7dce1; --faint:#8a939d; --line:#2b3138; --bg:#14171a; --panel:#1b1f24;\n    --lane:#b394d6; --lane-bg:#2a2135;\n    --row-hover:#20252b; --row-active:#26212f; --chip-bg:#262c33; --chip-ink:#9aa3ad;\n    /* The type chip paints its own background from the type colour, and those\n       are now LIGHT. White-on-light is the contrast failure this token exists\n       to avoid. */\n    --chip-ph-ink:#14171a;\n    --prompt-bg:#1f242a; --edge-gray:#3d444c;\n    --rowlbl:#8a939d; --rowtitle:#aab3bd; --rowtitle-none:#5a626b;\n    --lane-dash:#4a3f5c; --tip-bg:#0d0f11; --tip-ink:#e8eaec; --tip-faint:#8a939d;\n    --tip-lane:#c4a8e0; --badge-hover:#2f353c; --accent:#8a939d;\n    --sel-ring:#f0f2f4;\n  }\n  * { box-sizing:border-box; margin:0; }\n  html,body { height:100%; }\n  body { font:14px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--ink); background:var(--bg); }\n  #app { display:flex; height:100vh; }\n\n  aside { width:252px; flex:none; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding-bottom:24px; }\n  .brand { padding:16px 16px 12px; font-size:15px; font-weight:600; position:relative; }\n  /* Sits in the brand block\'s own whitespace rather than taking a row of its\n     own \u2014 the sidebar\'s vertical budget is for content. */\n  #themeToggle { position:absolute; top:15px; right:14px; width:24px; height:24px;\n    padding:0; border:1px solid var(--line); border-radius:6px; background:transparent;\n    color:var(--faint); font-size:12px; line-height:1; cursor:pointer; }\n  #themeToggle:hover { border-color:var(--faint); color:var(--ink); }\n  .brand span { display:block; font-size:11px; font-weight:400; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; margin-top:1px; }\n  .side-sec { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--faint); padding:14px 16px 5px; }\n  .srow { padding:7px 14px 7px 16px; cursor:pointer; border-left:2px solid transparent; }\n  .srow:hover { background:var(--row-hover); }\n  .srow.active { border-left-color:var(--lane); background:var(--row-active); }\n  .srow .rid { font-family:"SF Mono",Menlo,monospace; font-size:11.5px; color:var(--faint); }\n  .srow .rt { font-size:12.5px; line-height:1.35; margin:1px 0 2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }\n  .srow .rm { font-size:11px; color:var(--faint); }\n  .sdot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:5px; }\n  .sdot.open { background:#59a86c; } .sdot.delivered { background:#c3c9cf; }\n  .srow .tagline { font-size:10.5px; color:var(--lane); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .srow.more { color:var(--faint); text-align:center; font-size:12px; }\n  .srow.more:hover { color:var(--ink); }\n\n  main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }\n  #stoppedBanner, #partialBanner { display:none; flex:none; padding:7px 24px; font-size:12.5px; }\n  #stoppedBanner { background:#5c1f1f; color:#fbdede; display:none; align-items:center; gap:12px; }\n  #stoppedBanner button { background:#fff; color:#5c1f1f; border:none; border-radius:5px; padding:3px 12px; cursor:pointer; font-size:12px; font-weight:600; }\n  #partialBanner { background:#6b4d10; color:#fdecc8; }\n  header { padding:14px 24px 8px; flex:none; }\n  h1 { font-size:15px; font-weight:600; }\n  h1 span { color:var(--faint); font-weight:400; margin-left:10px; font-size:12.5px; }\n  #bar { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; padding:7px 24px 8px; border-bottom:1px solid var(--line); flex:none; }\n  #bar label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; cursor:pointer; user-select:none; }\n  #bar input[type=checkbox]{ accent-color:var(--accent); }\n  .sw { width:14px; height:0; border-top:2.5px solid; display:inline-block; border-radius:2px; }\n  .sw.dash { border-top-style:dashed; }\n  .sep { width:1px; height:16px; background:var(--line); margin:0 2px; }\n  #search { margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:4px 9px; font-size:12.5px; width:180px; background:var(--panel); }\n\n  /* console-recall-timeline-panels ticket 13: same box-model as #search\n     above, just full-width inside the sidebar\'s own padding \u2014 the two are\n     visually one family (jump-in-graph vs. cross-session recall) but never\n     confusable, since only one of them lives in the sidebar. */\n  .recall-box { padding:4px 16px 12px; }\n  .recall-box input { width:100%; border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12.5px; background:var(--panel); color:var(--ink); }\n\n  /* console-timeline-panel-controls ticket 16: id + view + pageBudget + page\n     in one form \u2014 the context-adaptive header button (`#timelineBtn`) is a\n     PREFILL shortcut into this SAME form, never a second fetch path. */\n  /* The timeline\u63A7\u4EF6\u6761 lives in the overlay panel\'s top-right (user ruling\n     S15069/T2043) \u2014 one quiet row, shown only while timeline output is up.\n     Native form chrome is fully suppressed (appearance:none, no number\n     spinners, no OS focus ring): every control is the same 26px quiet box the\n     theme vars draw, in light and dark alike. */\n  #tlbar { display:none; flex-wrap:nowrap; gap:6px; align-items:center; margin:0 26px 14px 0; }\n  #tlbar input, #tlbar select, #tlbar button {\n    appearance:none; -webkit-appearance:none; outline:none; box-sizing:border-box;\n    height:26px; font-size:12px; padding:0 8px;\n    border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink);\n  }\n  #tlbar input:focus, #tlbar select:focus { border-color:var(--lane); }\n  #tlbar input::placeholder { color:var(--faint); }\n  #tlbar #timelineIdInput { flex:1 1 110px; min-width:0; font-family:"SF Mono",Menlo,monospace; }\n  #tlbar select { padding-right:20px; background-image:url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5" viewBox="0 0 8 5"><path d="M1 1l3 3 3-3" fill="none" stroke="%23888e96" stroke-width="1.2" stroke-linecap="round"/></svg>\'); background-repeat:no-repeat; background-position:right 7px center; }\n  #tlbar input[type=number] { width:46px; padding:0 6px; -moz-appearance:textfield; }\n  #tlbar input[type=number]::-webkit-inner-spin-button, #tlbar input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }\n  #tlbar button { width:26px; padding:0; color:var(--faint); cursor:pointer; line-height:1; }\n  #tlbar button:hover { color:var(--ink); border-color:var(--faint); }\n  .timeline-controls button:hover { border-color:var(--lane); color:var(--lane); }\n\n  /* Context-adaptive: one control, its own target decided at click time by\n     `timelineIdForContext` (session scope, segment scope, or \u2014 when exactly\n     one lane is focused \u2014 that lane) rather than one trigger per row/chip. */\n  #timelineBtn { margin-left:12px; border:1px solid var(--line); background:var(--panel); color:var(--faint); border-radius:6px; padding:2px 10px; font-size:11.5px; cursor:pointer; vertical-align:1px; }\n  #timelineBtn:hover { border-color:var(--lane); color:var(--lane); }\n\n  #rangeBar { display:none; align-items:center; gap:9px; padding:5px 24px; border-bottom:1px solid var(--line); flex:none; font-size:12px; color:var(--faint); }\n  #rangeBar .rangeLabel { font-family:"SF Mono",Menlo,monospace; color:var(--ink); }\n  #rangeBar .rangeNav { border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:5px; padding:2px 9px; font-size:11.5px; cursor:pointer; }\n  #rangeBar .rangeNav:hover { border-color:var(--lane); color:var(--lane); }\n  /* an edge the shell could not place \u2014 loud on purpose, never a silent drop */\n  #rangeBar .rangeWarn { color:var(--rel-correct-full); font-weight:600; }\n\n  #lanes { padding:8px 24px 4px; flex:none; }\n  #lanes .lgroup { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; margin-bottom:5px; }\n  #lanes .lt { font-size:11px; color:var(--faint); margin-right:4px; min-width:72px; }\n  .lchip { font-size:11px; font-family:"SF Mono",Menlo,monospace; padding:2.5px 9px; border-radius:10px; background:var(--lane-bg); color:var(--lane); border:1px solid transparent; cursor:pointer; user-select:none; }\n  .lchip:hover { border-color:var(--lane); }\n  .lchip.on { background:var(--lane); color:#fff; }\n  /* lane-state-retirement ticket 01: the dashed `.openlane` variant is gone\n     with the open/closed axis it styled. Every lane chip renders the same,\n     because there is no longer a per-lane state to distinguish. */\n  .lchip .term { opacity:.75; margin-left:4px; }\n\n  #phases { display:flex; flex-wrap:wrap; gap:4px 12px; padding:4px 24px 6px; font-size:12px; color:var(--faint); flex:none; border-bottom:1px solid var(--line); }\n  #phases .clu { display:inline-flex; gap:8px; align-items:center; padding:1px 8px; border:1px solid var(--line); border-radius:9px; }\n  #phases .clu b { font-weight:600; color:var(--ink); }\n  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:4px; vertical-align:-1px; }\n\n  #wrap { overflow-y:auto; overflow-x:hidden; flex:1; }\n  svg text { font-family:"SF Mono",Menlo,monospace; }\n  .rowlbl { font-size:11px; fill:var(--rowlbl); font-weight:600; }\n  .rowtitle { font-size:11.5px; fill:var(--rowtitle); font-family:-apple-system,"PingFang SC",sans-serif; }\n  .rowtitle.none { fill:var(--rowtitle-none); }\n  rect.rowhit { fill:transparent; cursor:pointer; }\n  rect.rowhit:hover { fill:var(--row-hover); }\n  path.edge { fill:none; cursor:pointer; }\n  /* console-focus-encoding ticket 01 (cf32918) took weight off the relation\n     axis as a channel of its own \u2014 one word used to render thin, alone, for\n     fanning out to the batch it cited, so relation reads by HUE instead of by\n     a thinner line. That part still holds. What that ticket ALSO did \u2014\n     give width to the focused SUBGRAPH, so a whole component read thick\n     under any focus and the resting graph (no focus at all) was uniformly\n     thick \u2014 is revised by user ruling 2026-08-28 [S15069/T1859]: width now\n     answers ONE question, "does this edge touch the CLICKED node", nothing\n     about focus or attribution. The resting default below is therefore\n     THIN; path.edge.inc is the only rule that thickens anything, and it is\n     driven by `touchesSel` in paintFilters, not by `.gray`/`.hot`. */\n  path.edge { stroke-width:1.1; opacity:.78; }\n  path.edge.off { opacity:.04; }\n  /* The node\'s own channel: thick iff one of this edge\'s two ends is the\n     clicked/panel node (`sel`), direction irrelevant \u2014 in-edges and\n     out-edges both qualify. Independent of colour/focus below: an edge can\n     be `.inc` while `.gray` (touches the clicked node but sits outside its\n     coloured subgraph) or plain default (no focus at all, node still\n     clicked \u2014 impossible in the current selection model, since clicking\n     always sets a focus, but the rule does not depend on that fact). */\n  path.edge.inc { stroke-width:2.2; }\n  /* Outside the focused subgraph: grey. Width is NOT this rule\'s concern \u2014\n     path.edge.inc above is the only rule that ever thickens a line, so grey\n     edges stay at the base thin width like everything else that is not\n     incident to the clicked node. `!important`: each edge\'s own colour is\n     set on `style="stroke:..."` inline (so a theme toggle can re-resolve it\n     without a redraw \u2014 see renderGraphSvg\'s own comment), and an inline\n     style outranks any class rule without it. */\n  path.edge.gray:not(.hot) { stroke:var(--edge-gray) !important; }\n  /* hot = inside the focused subgraph: opacity brightens slightly; colour\n     needs no rule here because it already carries the emphasis \u2014 see\n     path.edge.gray above for the outside half of the same decision. Width\n     is not part of this rule either: `.hot` and `.inc` are independent\n     classes an edge may carry in any combination. */\n  path.edge.hot { opacity:.95; }\n  g.node { cursor:pointer; }\n  g.node.dim, text.dim, rect.dim { opacity:.3; }\n  /* The clicked node wears a ring. With the resting graph uniformly thin\n     (node-incidence width, [S15069/T1859]), thick edges radiate FROM the\n     selected node but nothing marked the node itself \u2014 the ring is that\n     mark, toggled in paintFilters on `id===sel` and cleared with sel by\n     clearFocus. The ring is its OWN circle.selring element rather than a\n     stroke on the node body: a multi-type node\'s body is pie-slice paths,\n     not a circle, so a body-stroke rule rings only single-type nodes\n     ([S15069/T1863]). --sel-ring is near-ink per theme so it reads against\n     every type fill. */\n  g.node circle.selring { fill:none; stroke:var(--sel-ring); stroke-width:2; display:none; }\n  g.node.sel circle.selring { display:inline; }\n\n  #tip { position:fixed; pointer-events:none; background:var(--tip-bg); color:var(--tip-ink); padding:6px 10px; border-radius:6px; font-size:12px; max-width:420px; display:none; z-index:20; line-height:1.45; }\n  #tip .t { color:var(--tip-faint); font-size:11px; }\n  #tip .lg { color:var(--tip-lane); }\n  #panel { position:fixed; right:0; top:0; bottom:0; width:400px; background:var(--panel); border-left:1px solid var(--line); padding:20px 22px; overflow-y:auto; display:none; z-index:10; box-shadow:-6px 0 18px rgba(0,0,0,.04); }\n  #panel .addr { font-family:Menlo,monospace; font-size:12px; color:var(--faint); }\n  #panel h2 { font-size:14.5px; font-weight:600; margin:6px 0 10px; }\n  #panel .chips { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:10px; }\n  .chip { font-size:11px; padding:2px 8px; border-radius:9px; background:var(--chip-bg); color:var(--chip-ink); }\n  .chip.ph { color:var(--chip-ph-ink); }\n  .chip.lane { background:var(--lane-bg); color:var(--lane); font-family:"SF Mono",Menlo,monospace; }\n  /* A stored tag the model does NOT recognise as one of this turn\'s lanes \u2014\n     the segment\'s own tag, or a word left over from a retired vocabulary.\n     Shown, because it is what the turn actually carries; muted and outlined,\n     because it names no lane. */\n  .chip.tagoff { background:transparent; color:var(--faint); border:1px dashed var(--line); font-family:"SF Mono",Menlo,monospace; }\n  #panel .sec { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); margin:14px 0 5px; }\n  #panel .content { font-size:13px; white-space:pre-wrap; }\n  /* console-recall-timeline-panels ticket 13: recall/timeline render as\n     plain server prose, same monospace family the shell already uses for\n     every address (.rid, #panel .addr, svg text) \u2014 `.content` alone stays\n     the turn-detail proportional font, unchanged. */\n  #panel .content.mono { font-family:"SF Mono",Menlo,monospace; font-size:12px; }\n  #panel .content.mono a.addrlink { color:var(--lane); text-decoration:none; }\n  #panel .content.mono a.addrlink:hover { text-decoration:underline; }\n  #panel .prompt { font-size:12.5px; color:var(--chip-ink); white-space:pre-wrap; background:#f7f7f6; border-radius:6px; padding:8px 10px; }\n  #panel .erow { font-size:12.5px; font-family:Menlo,monospace; padding:2px 0; cursor:pointer; }\n  #panel .erow:hover { text-decoration:underline; }\n  #panel .erow .etags { color:var(--lane); font-size:11px; }\n  #panel .flowline { font-size:12.5px; color:var(--faint); }\n  #close { position:absolute; top:12px; right:14px; border:none; background:none; font-size:16px; color:var(--faint); cursor:pointer; }\n  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:#26292d; color:#f2f2f0; font-size:12.5px; padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:30; }\n  #selbadge { display:none; margin-left:12px; font-size:11.5px; font-family:"SF Mono",Menlo,monospace; background:#26292d; color:#f2f2f0; padding:2.5px 11px; border-radius:10px; cursor:pointer; vertical-align:1px; }\n  #selbadge:hover { background:var(--badge-hover); }\n</style>\n</head>\n<body>\n<div id="app">\n  <aside>\n    <div class="brand">claude-mnemo<span>memory console</span><button id="themeToggle" type="button" title="\u5207\u6362\u65E5\u95F4 / \u591C\u95F4"></button></div>\n    <div class="side-sec">\u4F1A\u8BDD</div>\n    <div id="sessions"></div>\n    <div class="side-sec">\u4EFB\u52A1</div>\n    <div id="segments"></div>\n    <div class="side-sec">\u56DE\u5FC6</div>\n    <div class="recall-box"><input id="recallInput" placeholder="\u5173\u952E\u8BCD\u6216\u5730\u5740 \u23CE"></div>\n  </aside>\n  <main>\n    <div id="stoppedBanner"><span>worker \u65E0\u54CD\u5E94 \u2014 \u5F53\u524D\u5C55\u793A\u7684\u662F\u6700\u540E\u4E00\u6B21\u6210\u529F\u52A0\u8F7D\u7684\u5FEB\u7167</span><button id="stoppedRetry" type="button">\u91CD\u8BD5</button></div>\n    <div id="partialBanner"></div>\n    <header><h1><span id="scopeTitle"></span><span id="meta"></span><span id="selbadge"></span><button id="timelineBtn" type="button" title="\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD/\u4EFB\u52A1(\u6216\u805A\u7126\u6CF3\u9053)\u7684\u65F6\u95F4\u7EBF">\u23F1 \u65F6\u95F4\u7EBF</button></h1></header>\n    <div id="rangeBar"></div>\n    <div id="bar"></div>\n    <div id="lanes"></div>\n    <div id="phases">\n      <span class="clu"><b>\u53D6\u8BC1</b>\n        <span><span class="dot" style="background:var(--t-research)"></span>research</span>\n        <span><span class="dot" style="background:var(--t-measure)"></span>measure</span>\n      </span>\n      <span class="clu"><b>\u51B3\u7B56</b>\n        <span><span class="dot" style="background:var(--t-design)"></span>design</span>\n        <span><span class="dot" style="background:var(--t-discuss)"></span>discuss</span>\n        <span><span class="dot" style="background:var(--t-correction)"></span>correction</span>\n      </span>\n      <span class="clu"><b>\u843D\u5730</b>\n        <span><span class="dot" style="background:var(--t-implement)"></span>implement</span>\n        <span><span class="dot" style="background:var(--t-fix)"></span>fix</span>\n        <span><span class="dot" style="background:var(--t-refactor)"></span>refactor</span>\n        <span><span class="dot" style="background:var(--t-delegate)"></span>delegate</span>\n        <span><span class="dot" style="background:var(--t-review)"></span>review</span>\n        <span><span class="dot" style="background:var(--t-ops)"></span>ops</span>\n      </span>\n    </div>\n    <div id="wrap"><svg id="svg"></svg></div>\n  </main>\n</div>\n<div id="tip"></div>\n<div id="panel"><button id="close">\u2715</button><div id="tlbar"><input id="timelineIdInput" placeholder="S&lt;n&gt; / E&lt;n&gt; / E&lt;n&gt;/#&lt;tag&gt; \u23CE" title="timelineQuery \u63A5\u53D7\u7684\u4EFB\u610F\u5408\u6CD5\u5730\u5740"><select id="timelineViewSelect" title="view \u2014 \u89C6\u56FE"><option value="">turns</option><option value="milestones">milestones</option></select><input id="timelinePageBudget" type="number" min="1" max="25000" placeholder="\u9884\u7B97" title="pageBudget\uFF081\u201325000\uFF0C\u9ED8\u8BA4 1000\uFF09"><input id="timelinePageInput" type="number" min="1" placeholder="\u9875" title="page\uFF08\u9ED8\u8BA4 1\uFF09"><button id="timelinePrev" type="button" title="\u4E0A\u4E00\u9875">\u2039</button><button id="timelineNext" type="button" title="\u4E0B\u4E00\u9875">\u203A</button></div><div id="pbody"></div></div>\n<div id="toast"></div>\n<script>\n// THE FOUR CLASSES (main-agent-edges ticket 02) \u2014 what `ConsoleGraphEdge.relation`\n// now carries. The seven-word list this replaces was already drawing filter\n// checkboxes for words the write surfaces had stopped producing.\nconst WORDS = ["correct(full)","correct(partial)","verify","use"];\n// CSS custom properties cannot carry parentheses, so each token maps to its own\n// variable name here rather than being interpolated into `--${relation}`.\nconst REL_VAR = {\n  "correct(full)":"--rel-correct-full",\n  "correct(partial)":"--rel-correct-partial",\n  "verify":"--rel-verify",\n  "use":"--rel-use",\n};\n// Short arcs: the two corrections and `use`. It was `narrows`/`extends`/\n// `override` \u2014 three of the four sources of exactly these three tokens, with\n// `extends`\' three absorbed siblings joining it, which is what one class means.\nconst STRUCT = new Set(["correct(full)","correct(partial)","use"]);\n// line style encodes the PHASE axis: solid = same-phase, dashed = cross-phase.\n// Cross-phase words never carry lane tags (lanes are phase-local), so the\n// dash axis and the tag axis can never collide on one edge.\n// [S15069/T1754] The dash used to mean CROSS-PHASE, hardcoded to three relation\n// words. lane-model-v12 deleted the phase axis outright \u2014 "\u76F8\u4F4D" appears zero\n// times in the concepts document \u2014 and one of those three words (`refutes`)\n// no longer exists at all, having folded into `override`. So the mark was\n// keyed on a retired axis through a stale word list.\n//\n// It now says what the model actually distinguishes: SOLID = internal to one\n// lane (both sides resolve to the SAME lane), DASHED = everything else \u2014 a\n// crossing between two lanes, a half-settled edge, or an unattributed one.\n// That is the same predicate the focus domain uses, so the two agree by\n// construction instead of by coincidence.\nconst isInternalEdge = (e) =>\n  e.tailLaneToken !== null && e.tailLaneToken === e.headLaneToken;\nconst TYPE_ORDER = ["research","measure","design","discuss","correction","implement","fix","refactor","delegate","review","ops"];\n// Segment status is a closed, DB-CHECK-enforced set ("open"/"closed" \u2014\n// db/segments.ts SEGMENT_STATUSES); the CSS only ever shipped two dot\n// colors (open=green, "delivered"=grey \u2014 the prototype\'s own demo-data\n// vocabulary), so "closed" maps onto the existing grey bucket rather than\n// inventing a third visual state. Any future status value this map does not\n// know about falls back to the same grey bucket instead of leaking an\n// unmapped word into a class attribute (DOM rule: type words map through a\n// closed-set lookup before touching class/style).\nconst SEGMENT_STATUS_DOT = { open: "open", closed: "delivered" };\nconst css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();\n// Returns a `var()` REFERENCE, not a resolved literal. `getComputedStyle` reads\n// the value in force at RENDER time and bakes it into the attribute, so every\n// colour painted through it would stay frozen at the theme that happened to be\n// active when the graph was drawn. `relationVar` below already had this right;\n// this is the same fix applied to the type colours.\nconst typeColor = t => TYPE_ORDER.includes(t) ? `var(--t-${t})` : "var(--none)";\nconst sortTypes = ts => [...ts].sort((a,b)=>{const ia=TYPE_ORDER.indexOf(a),ib=TYPE_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});\nconst esc = s => { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; };\n// lane-model-v12 ticket 07: an edge carries ONE lane tag PER SIDE\n// (`tailTag` = citing end, `headTag` = cited end; "" = unsettled, i.e. nobody\n// has attributed that end yet \u2014 not a lane named ""). The payload no longer\n// ships a merged `tags` set, because a merged set cannot say WHICH END named\n// which lane: `{a,b}` read equally as "in both lanes at once".\nconst edgeSettled = e => e.tailTag!=="" || e.headTag!=="";\n// The label a reader sees. Same-lane (the ordinary case) renders exactly the\n// `{tag}` the merged set used to render for a one-tag edge; a CROSS-LANE edge\n// renders `{tail\u2192head}`, which is the crossing itself.\nconst edgeLaneLabel = e => {\n  if (!edgeSettled(e)) return "";\n  // ONE escape site per side, deliberately: both sinks below render through\n  // this helper, so this pair of calls IS the DOM-rule boundary for a lane tag\n  // on an edge (tests/worker/console-shell.test.ts\'s field-sink table).\n  const tail = esc(e.tailTag), head = esc(e.headTag);\n  return e.tailTag===e.headTag ? "{"+tail+"}" : "{"+tail+"\u2192"+head+"}";\n};\n// Both sides\' lane tokens, unsettled sides dropped and the same-lane case\n// collapsed to one \u2014 what focus/highlight tests set membership against.\nconst edgeLaneTokens = e => [...new Set([e.tailLaneToken, e.headLaneToken].filter(t => t !== null))];\n// Which component this edge lives INSIDE, or null ([S15069/T1696]). Only an\n// edge whose two sides settle to the SAME lane is internal to anything \u2014 that\n// is the connectivity definition itself, so a cross-lane or half-settled edge\n// answers null rather than picking a side. The component is read off whichever\n// endpoint is loaded (an interval can cut the other one away); both endpoints\n// of an internal edge are in the same component by construction, so either\n// answers identically.\nconst edgeComponentId = e => {\n  if (e.tailLaneToken === null || e.tailLaneToken !== e.headLaneToken) return null;\n  for (const endpoint of [e.citingId, e.citedId]) {\n    const t = idx.has(endpoint) ? turns[idx.get(endpoint)] : null;\n    const m = t && t.laneMemberships.find(x => x.token === e.tailLaneToken);\n    if (m) return m.componentId;\n  }\n  return null;\n};\n// relation is a DB-CHECK-enforced closed set (memory_edges.relation), but a\n// style-attribute sink is still built from it below (turn-panel edge rows) \u2014\n// this is the same closed-set-lookup discipline the DOM rule asks for,\n// applied so the sink can never resolve to anything outside WORDS even if a\n// future schema value slips past the CHECK constraint in production data.\nconst relationVar = rel => WORDS.includes(rel) ? `var(--${rel})` : "inherit";\n// Reader-facing turn text is always the S<n>/T<m> address (floor-and-render-\n// fidelity ticket 03, user ruling S15069/T1482) \u2014 internal `turns.id` stays\n// a DATA KEY only (idx/edge citingId/citedId/nodeEls/rowEls), never printed.\n// The bare `T<id>` fallback below is a marked last resort, same posture as\n// the server-side renderer\'s own `formatTurnRef` (shared/lane-checker-\n// render.ts): every call site this shell has now ships a server-supplied\n// address for any id that can legitimately fall outside the currently-loaded\n// `turns` array. The ONE id that used to (a lane\'s terminus, read off\n// `state.terminusAddress` rather than through `addrOf` \u2014 ticket 03, peer\n// P2-5/P2-6) left the payload with lane state in ticket 01, so every id\n// `addrOf` IS called with (edge endpoints, the focus badge\'s `sel`/`solo`,\n// panel erows) is, by construction, always a member of the currently-loaded\n// `turns`. The fallback is therefore asserted UNREACHABLE on any real graph\n// response, kept only as defensive dead code for a malformed fixture.\n// `t.address` is server-decided ([S15069/T1557] \u2014 ticket 10, "one address\n// grammar"): ALWAYS `S<session>/T<prompt>`, under every scope including\n// segment. A segment appears only as a SCOPE (the header\'s own `E<n>`,\n// `renderHeader` above), never folded into a turn\'s own address \u2014 this\n// supersedes T1524/T1532, which each made a segment scope read\n// `E<segment>/T<k>` for its own members, and supersedes the T1531 toggle that\n// switch existed to reconcile (a segment holding turns it never adopted used\n// to render two address forms interleaved in one column; with one form there\n// is nothing left to switch between). The shell never assembles the address\n// itself \u2014 the `S/T` term below is the same defensive fallback as the bare\n// `T<id>` one, for a fixture predating the field.\nconst sessionAddr = t => `S${t.sessionId}/T${t.promptNumber}`;\nconst addrOf = id => { const t = turns[idx.get(id)]; return t ? (t.address || sessionAddr(t)) : "T"+id; };\n\n/* ---- mutable render state: reset on every graph load ---- */\nlet turns = [], edges = [], lanes = [];\nlet idx = new Map();\nlet laneByToken = new Map();\nlet turnsByLaneToken = new Map();\nlet edgeEls = [];\nlet nodeEls = new Map(), rowEls = new Map();\nconst laneChips = new Map();\nlet sessionsList = [], segmentsList = [];\n// nextCursor from the most recent /api/console/sessions page (peer finding\n// #10) \u2014 null once the last page has been loaded, or before the first load.\nlet sessionsNextCursor = null;\nlet sessionsLoadingMore = false;\nlet currentScope = null; // { kind: "session"|"segment", id }\n// The exact params object behind the CURRENT graph response (floor-and-\n// render-fidelity ticket 04) \u2014 kept so the range bar\'s "\u8F83\u65E9"/"\u6700\u65B0"\n// buttons can re-issue the identical request with only `interval`\n// overridden, never reconstructing session/segment from `currentScope`\n// alone (which drops any `interval` already in effect).\nlet currentGraphTarget = null;\nlet lastLoad = null; // retry hook for the worker-stopped banner\n\n// Focus is a set of COMPONENTS, not of lanes ([S15069/T1696] ruling). A\n// component is one lane\'s members joined by edges carrying that lane\'s tag on\n// BOTH sides, so it belongs to exactly one lane by construction and a lane may\n// hold several. Focusing a turn that belongs to two lanes lights BOTH lanes\'\n// components \u2014 two entries here, never one merged region.\nlet selComps = new Set();\nlet compLaneToken = new Map();   // componentId -> its lane\'s token\nlet turnsByComp = new Map();     // componentId -> member turn ids\nlet compsByLaneToken = new Map();// lane token -> its own component ids\nlet solo = null;\nlet sel = null;\nconst sameFocus = (comps) => selComps.size===comps.length && comps.every(c=>selComps.has(c));\nconst focusedLaneTokens = () => new Set([...selComps].map(c=>compLaneToken.get(c)).filter(Boolean));\nfunction clearFocus(){ selComps = new Set(); solo = null; sel = null; panel.style.display="none"; }\n\n/* ---- fixed DOM refs ---- */\n// The toggle writes `data-theme` and the saved choice; the cascade does the\n// rest. Nothing re-renders, so focus, scroll and the open panel all survive it.\nconst themeToggle = document.getElementById("themeToggle");\nfunction paintThemeToggle(){\n  const dark = document.documentElement.getAttribute("data-theme") === "dark";\n  themeToggle.textContent = dark ? "\u263E" : "\u2600";\n  themeToggle.setAttribute("aria-label", dark ? "\u5207\u6362\u5230\u65E5\u95F4" : "\u5207\u6362\u5230\u591C\u95F4");\n}\nthemeToggle.addEventListener("click", () => {\n  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";\n  document.documentElement.setAttribute("data-theme", next);\n  // A stored choice is a DECISION, so it outranks the OS from here on. Storage\n  // can throw (private mode); the theme still applies, it just stops persisting.\n  try { localStorage.setItem("mnemo-theme", next); } catch (e) { /* ignore */ }\n  paintThemeToggle();\n});\npaintThemeToggle();\n// Follow the OS only while the reader has expressed no preference of their own.\nif (window.matchMedia) {\n  const os = window.matchMedia("(prefers-color-scheme: dark)");\n  const onOsChange = (e) => {\n    let saved = null;\n    try { saved = localStorage.getItem("mnemo-theme"); } catch (err) { /* ignore */ }\n    if (saved !== null) return;\n    document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");\n    paintThemeToggle();\n  };\n  if (os.addEventListener) os.addEventListener("change", onOsChange);\n}\n\nconst sesBox = document.getElementById("sessions");\nconst segBox = document.getElementById("segments");\nconst bar = document.getElementById("bar");\nconst rangeBar = document.getElementById("rangeBar");\nconst laneBox = document.getElementById("lanes");\nconst svg = document.getElementById("svg");\nconst wrap = document.getElementById("wrap");\nconst panel = document.getElementById("panel"), pbody = document.getElementById("pbody");\nconst selBadge = document.getElementById("selbadge");\nconst scopeTitleEl = document.getElementById("scopeTitle");\nconst metaEl = document.getElementById("meta");\nconst stoppedBanner = document.getElementById("stoppedBanner");\nconst partialBanner = document.getElementById("partialBanner");\nconst tipEl = document.getElementById("tip");\n\nscopeTitleEl.textContent = "\u52A0\u8F7D\u4E2D\u2026";\n\n/* ---- worker-stopped snapshot state (spec "Worker lifecycle"): no\n   heartbeat, no auto-retry loop \u2014 a fetch failure keeps the last rendered\n   snapshot on screen and offers exactly one manual retry action. ---- */\nfunction showStopped(retryFn){ lastLoad = retryFn; stoppedBanner.style.display = "flex"; }\nfunction hideStopped(){ stoppedBanner.style.display = "none"; }\ndocument.getElementById("stoppedRetry").addEventListener("click", () => { if (lastLoad) lastLoad(); });\n\nlet toastTimer = null;\nfunction toast(msg){\n  const el = document.getElementById("toast");\n  el.textContent = msg; el.style.opacity = 1; // textContent \u2014 DOM rule\'s own safe path\n  clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.style.opacity=0, 2600);\n}\n\n/**\n * Distinguishes "the worker is unreachable" (network failure \u2014 the\n * lifecycle banner\'s own case) from "the worker answered with an\n * application error" (a well-formed 4xx/5xx envelope \u2014 retrying the exact\n * same request would just fail again identically, so a transient toast is\n * the honest signal, not a persistent banner claiming the worker is down).\n */\nasync function fetchJson(url){\n  let res;\n  try {\n    res = await fetch(url);\n  } catch (networkError) {\n    const err = new Error("network"); err.kind = "network"; throw err;\n  }\n  if (!res.ok) {\n    let body = null;\n    try { body = await res.json(); } catch {}\n    const err = new Error("http " + res.status);\n    err.kind = "http"; err.status = res.status; err.body = body;\n    throw err;\n  }\n  return res.json();\n}\n\n/* ---- sidebar: populated from /api/console/sessions + /api/console/segments ---- */\nasync function loadSidebar(){\n  try {\n    const [sessionsRes, segmentsRes] = await Promise.all([\n      fetchJson("/api/console/sessions"),\n      fetchJson("/api/console/segments"),\n    ]);\n    sessionsList = sessionsRes.sessions;\n    sessionsNextCursor = sessionsRes.nextCursor ?? null;\n    segmentsList = segmentsRes.segments;\n    renderSidebar();\n    hideStopped();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u4F1A\u8BDD/\u4EFB\u52A1\u5217\u8868\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(loadSidebar);\n    }\n  }\n}\n\n/* ---- sessions load-more: page max is SESSIONS_PAGE_MAX server-side (peer\n   finding #10) \u2014 older sessions are unreachable without walking nextCursor. ---- */\nasync function loadMoreSessions(){\n  if (!sessionsNextCursor || sessionsLoadingMore) return;\n  sessionsLoadingMore = true;\n  try {\n    const res = await fetchJson("/api/console/sessions?cursor=" + encodeURIComponent(sessionsNextCursor));\n    sessionsList = sessionsList.concat(res.sessions);\n    sessionsNextCursor = res.nextCursor ?? null;\n    renderSidebar();\n  } catch (e) {\n    toast("\u52A0\u8F7D\u66F4\u591A\u4F1A\u8BDD\u5931\u8D25: " + (e.kind === "http" && e.body && e.body.error && e.body.error.message ? e.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  } finally {\n    sessionsLoadingMore = false;\n  }\n}\n\nfunction renderSidebar(){\n  sesBox.innerHTML = "";\n  for (const s of sessionsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="session" && currentScope.id===s.id ? " active" : "");\n    div.innerHTML = `<div class="rid">S${s.id}</div><div class="rt">${esc(s.title || "(\u65E0\u6807\u9898)")}</div>\n      <div class="rm">${s.turnCount} turns \xB7 ${esc(s.date)}</div>`;\n    div.addEventListener("click", () => loadGraph({ session: s.id }));\n    sesBox.appendChild(div);\n  }\n  if (sessionsNextCursor) {\n    const more = document.createElement("div");\n    more.className = "srow more";\n    more.textContent = "\u66F4\u591A\u2026"; // textContent \u2014 a static app-authored label, not payload text\n    more.addEventListener("click", loadMoreSessions);\n    sesBox.appendChild(more);\n  }\n  segBox.innerHTML = "";\n  for (const g of segmentsList) {\n    const div = document.createElement("div");\n    div.className = "srow" + (currentScope && currentScope.kind==="segment" && currentScope.id===g.id ? " active" : "");\n    const dotClass = SEGMENT_STATUS_DOT[g.status] ?? "delivered";\n    div.innerHTML = `<div class="rid"><span class="sdot ${dotClass}"></span>E${g.id}</div>\n      <div class="rt">${esc(g.title)}</div>\n      <div class="rm">${g.memberCount} \u6210\u5458 \xB7 ${esc(g.status)}</div>\n      ${g.tags.length?`<div class="tagline">${g.tags.map(t=>"#"+esc(t)).join(" ")}</div>`:""}`;\n    div.addEventListener("click", () => loadGraph({ segment: g.id }));\n    segBox.appendChild(div);\n  }\n}\n\n/* ---- filter bar: built once \u2014 WORDS is a closed, app-authored set, never graph data ---- */\n// [S15069/T1754] The swatch is SOLID for every word. Dashing is no longer a\n// property of the relation word \u2014 it says whether one EDGE stayed inside a\n// lane \u2014 so a per-word swatch cannot honestly carry it: the same word draws\n// solid on one edge and dashed on the next. The legend states the rule; the\n// swatch states only the colour, which IS per-word.\nconst on = Object.fromEntries(WORDS.map(w=>[w,true]));\nfor (const w of WORDS) {\n  const l = document.createElement("label");\n  l.innerHTML = `<input type="checkbox" checked data-w="${w}"><span class="sw" style="border-color:var(--${w})"></span>${w}`;\n  bar.appendChild(l);\n}\nbar.insertAdjacentHTML("beforeend", `<span class="sep"></span><input id="search" placeholder="\u8DF3\u8F6C:\u5730\u5740\u6216\u6807\u9898\u5173\u952E\u8BCD \u23CE">`);\nbar.addEventListener("change", e => { if (e.target.dataset.w){ on[e.target.dataset.w]=e.target.checked; paintFilters(); }});\n\n/* ---- graph load: session or segment scope -> /api/console/graph ---- */\nasync function loadGraph(target){\n  const params = new URLSearchParams();\n  if (target.session !== undefined) params.set("session", target.session);\n  if (target.segment !== undefined) params.set("segment", target.segment);\n  if (target.interval !== undefined && target.interval !== null) params.set("interval", target.interval);\n  const url = "/api/console/graph?" + params.toString();\n  try {\n    const data = await fetchJson(url);\n    currentScope = target.session !== undefined\n      ? { kind: "session", id: target.session }\n      : { kind: "segment", id: target.segment };\n    currentGraphTarget = target;\n    applyGraph(data);\n    hideStopped();\n    renderSidebar();\n  } catch (e) {\n    if (e.kind === "http") {\n      toast("\u52A0\u8F7D\u56FE\u6570\u636E\u5931\u8D25: " + (e.body && e.body.error && e.body.error.message ? e.body.error.message : ("HTTP " + e.status)));\n    } else {\n      showStopped(() => loadGraph(target));\n    }\n  }\n}\n\nfunction applyGraph(data){\n  turns = data.turns; edges = data.edges; lanes = data.lanes;\n  idx = new Map(turns.map((t,i)=>[t.id,i]));\n  laneByToken = new Map(lanes.map(l=>[l.token,l]));\n  turnsByLaneToken = new Map();\n  compLaneToken = new Map(); turnsByComp = new Map(); compsByLaneToken = new Map();\n  for (const t of turns) {\n    for (const m of t.laneMemberships) {\n      if (!turnsByLaneToken.has(m.token)) turnsByLaneToken.set(m.token, []);\n      turnsByLaneToken.get(m.token).push(t.id);\n      // Every component index is READ off the payload\'s own membership\n      // entries, never derived by splitting the id string: `componentId`\n      // embeds a `laneToken`, which is itself a JSON pair, so parsing it back\n      // apart here would be inventing a second grammar for a fact the payload\n      // already states next to it.\n      compLaneToken.set(m.componentId, m.token);\n      if (!turnsByComp.has(m.componentId)) turnsByComp.set(m.componentId, []);\n      turnsByComp.get(m.componentId).push(t.id);\n      if (!compsByLaneToken.has(m.token)) compsByLaneToken.set(m.token, new Set());\n      compsByLaneToken.get(m.token).add(m.componentId);\n    }\n  }\n  clearFocus();\n  renderHeader(data.meta);\n  renderRangeBar(data.meta);\n  renderLanes();\n  renderGraphSvg();\n  paintFilters();\n  syncBadge();\n}\n\nfunction renderHeader(meta){\n  let title = "";\n  if (meta.scope.kind === "range") title = `S${meta.scope.sessionId} \xB7 T${meta.scope.from}\u2013T${meta.scope.to}`;\n  else if (meta.scope.kind === "segment") title = `E${meta.scope.segmentId}`;\n  scopeTitleEl.textContent = title; // textContent \u2014 no markup ever reaches this sink\n  metaEl.textContent = ` ${turns.length} turns \xB7 ${edges.length} edges \xB7 ${lanes.length} lanes \xB7 ${meta.asOf}`;\n\n  if (meta.stateCoverage === "partial") {\n    const bounds = meta.appliedBounds.map(b => `${b.bound} ${b.requested}\u2192${b.applied}`).join(", ");\n    // Ticket 04 banner semantics update (T1496/T1498 rulings): "partial"\n    // means an OLDER interval is not currently shown \u2014 never that rows\n    // inside the shown interval were silently removed (the old drop-edges-\n    // then-turns amputation is retired; the interval selector always ships\n    // a COMPLETE sub-graph for whatever interval it picked).\n    // Ticket 03 (peer P2-5/P2-6): lanes and laneCheckText are ONE declared\n    // semantics \u2014 FULL SNAPSHOT, same posture as election tier \u2014 never\n    // projected down to whichever interval the graph happens to be showing.\n    // The old copy claimed lane_check fell short of the full picture, when\n    // the payload was already whole-scope; this states the true, single\n    // semantics instead.\n    const boundsNote = bounds ? `(${bounds})` : "";\n    partialBanner.textContent =\n      `\u90E8\u5206\u7ED3\u679C \u2014 \u66F4\u65E9\u7684\u533A\u95F4\u672A\u663E\u793A,\u53EF\u70B9\u51FB\u4E0B\u65B9\u300C\u8F83\u65E9\u300D\u67E5\u770B;\u5F53\u524D\u663E\u793A\u533A\u95F4\u5185\u5BB9\u5B8C\u6574;` +\n      `\u6CF3\u9053\u4E0E\u68C0\u9A8C\u6587\u672C\u8986\u76D6\u6574\u4E2A\u8303\u56F4,\u56FE\u4EC5\u663E\u793A\u5F53\u524D\u6240\u9009\u533A\u95F4;` +\n      `election tier \u6309\u5B8C\u6574\u5FEB\u7167\u8BA1\u7B97,\u4E0D\u53D7\u533A\u95F4\u9009\u62E9\u5F71\u54CD ${boundsNote}`;\n    partialBanner.style.display = "block";\n  } else {\n    partialBanner.style.display = "none";\n  }\n}\n\n/* ---- range bar: the interval selector (floor-and-render-fidelity ticket\n   04, T1498 ruling) \u2014 shows the interval this response actually renders and\n   lets the user page to an older one. `meta.interval` is `null` only for a\n   zero-turn graph response, in which case the bar stays hidden. ---- */\nfunction renderRangeBar(meta){\n  const iv = meta.interval;\n  if (!iv) { rangeBar.style.display = "none"; return; }\n  rangeBar.style.display = "flex";\n  rangeBar.innerHTML = "";\n  const label = document.createElement("span");\n  label.className = "rangeLabel";\n  // textContent \u2014 addresses are server-formatted, not raw payload text. The\n  // node count rides along because it is the one number the endpoints alone\n  // never give: how much of the scope this interval actually holds.\n  label.textContent = `\u533A\u95F4 ${iv.fromAddress}\u2013${iv.toAddress} \xB7 ${turns.length} \u4E2A\u8282\u70B9`;\n  rangeBar.appendChild(label);\n  if (!iv.isOldest) {\n    const older = document.createElement("button");\n    older.type = "button"; older.className = "rangeNav";\n    older.textContent = "\u2039 \u8F83\u65E9";\n    older.addEventListener("click", () => loadGraph({ ...currentGraphTarget, interval: iv.fromTurnId - 1 }));\n    rangeBar.appendChild(older);\n  }\n  if (!iv.isNewest) {\n    const newest = document.createElement("button");\n    newest.type = "button"; newest.className = "rangeNav";\n    newest.textContent = "\u6700\u65B0 \u203A";\n    newest.addEventListener("click", () => {\n      const target = { ...currentGraphTarget };\n      delete target.interval;\n      loadGraph(target);\n    });\n    rangeBar.appendChild(newest);\n  }\n}\n\n/* ---- lane strip: ONE group (lane-state-retirement ticket 01) ----\n   The strip used to split "open (live work)" from "closed", which is exactly\n   the distinction the model dropped: nothing here can know whether a lane will\n   continue. One group, the payload\'s own order, count in the label. */\nfunction renderLanes(){\n  laneBox.innerHTML = "";\n  laneChips.clear();\n  const g = document.createElement("div"); g.className="lgroup";\n  g.innerHTML = `<span class="lt">\u6CF3\u9053 (${lanes.length})</span>`;\n  for (const l of lanes) g.appendChild(laneChip(l));\n  laneBox.appendChild(g);\n}\nfunction laneChip(l){\n  const c = document.createElement("span");\n  // ONE styling for every lane. Ticket 04 removed the validity verdict (node\n  // death is deleted); ticket 01 removed closure, which was the last per-lane\n  // state this class list branched on.\n  c.className = "lchip";\n  // What the chip says beside the tag is the lane\'s SIZE \u2014 a fact the payload\n  // carries whole-snapshot and that stays true however the interval narrows.\n  // It replaces the terminus address (`\u25CES\u2026/T\u2026` / `\u2026\u25CES\u2026/T\u2026` / `\u65E0\u5BA3\u544A`), which\n  // named a latest-wins seat the model no longer computes; a lane that\n  // converged five times never had one.\n  const term = `${l.memberCount}`;\n  // D5, v11 (lane-declaration ticket 05): a lane\'s identity is ONE tag now\n  // (`ConsoleGraphLane.tag`, never an array) \u2014 the prototype\'s `tagSet.join`\n  // is retired along with the exact-set identity it rendered.\n  c.innerHTML = `${esc(l.tag)}<span class="term">${term}</span>`;\n  c.addEventListener("click", () => {\n    // A chip is the WHOLE lane \u2014 every component it split into. That is the\n    // one place the shattering is visible as a single act: press the chip and\n    // the badge says how many islands this lane\'s members fall into.\n    const comps = [...(compsByLaneToken.get(l.token) || [])];\n    if (comps.length && sameFocus(comps)) { clearFocus(); }\n    else {\n      selComps = new Set(comps); solo = null;\n      if (sel!==null && !(turnsByLaneToken.get(l.token)||[]).includes(sel)) { sel=null; panel.style.display="none"; }\n      const anchor = anchorOf(l.token);\n      if (anchor != null && idx.has(anchor))\n        wrap.scrollTo({top: yOf(anchor)-innerHeight/2, behavior:"smooth"});\n    }\n    paintFilters();\n    syncBadge();\n  });\n  laneChips.set(l.token, c);\n  return c;\n}\n\n/* ---- vertical graph: one row per turn, arcs on the left rails ---- */\nconst ROW = 22, TOP = 16, NODE_X = 352, TEXT_X = 372, LABEL_GAP = 12;\nconst yOf = id => TOP + idx.get(id)*ROW + ROW/2;\nconst W = 1080;\nconst NS = "http://www.w3.org/2000/svg";\nconst mk = (n,a) => { const el=document.createElementNS(NS,n); for(const k in a) el.setAttribute(k,a[k]); return el; };\n\n// any blank click (svg background or the baseline) clears all focus. Attached\n// once \u2014 the listener checks the event target\'s tag generically, so it stays\n// correct across every renderGraphSvg() rebuild of svg\'s own children.\nsvg.addEventListener("click", e => {\n  if (e.target === svg || e.target.tagName === "line") { clearFocus(); paintFilters(); syncBadge(); }\n});\n\nfunction renderGraphSvg(){\n  svg.innerHTML = "";\n  edgeEls = []; nodeEls = new Map(); rowEls = new Map();\n  const H = TOP*2 + turns.length*ROW;\n  svg.setAttribute("width", W); svg.setAttribute("height", H);\n  svg.appendChild(mk("line",{x1:NODE_X,y1:TOP,x2:NODE_X,y2:H-TOP,stroke:"#eceef0"}));\n\n  // row hover/click layer sits UNDER the edges: the hover band may never mask\n  // an arc, and it doubles as a full-width row guide across the rail.\n  const bgg = mk("g",{}); svg.appendChild(bgg);\n  const eg = mk("g",{}); svg.appendChild(eg);\n  let undrawnEdges = 0;\n  for (const e of edges) {\n    const y1=yOf(e.citingId), y2=yOf(e.citedId);\n    // Asserted unreachable \u2014 the server only ships an edge whose BOTH endpoints\n    // are in the interval it selected. Counted and reported below rather than\n    // dropped in silence (T1529 ruling, "\u4E0D\u8981\u9759\u9ED8\u9690\u85CF\u8BE5\u6709\u7684\u7EBF"): a line the data\n    // says exists must never just fail to appear.\n    if (!Number.isFinite(y1)||!Number.isFinite(y2)) { undrawnEdges++; continue; }\n    const span = Math.abs(idx.get(e.citingId)-idx.get(e.citedId));\n    // Arc depth is REACH. The wide band\'s old slope (150 + span*1.9) spent 9px\n    // across spans 1..6 while 76% of real wide-band edges live at span <= 5, so\n    // two citations from one node came out as one stroke (T1527). At span*12\n    // the same band separates them by 60px and saturates only past span 15,\n    // where the endpoints are already far enough apart to tell the arcs apart.\n    const depth = STRUCT.has(e.relation)\n      ? Math.min(120, 16 + span*2.4)\n      : Math.min(330, 150 + span*12);\n    // [S15069/T1760, revised by console-focus-encoding ticket 01, revised\n    // again by user ruling 2026-08-28 S15069/T1859] Colour and dash are\n    // decided here, at draw time; width never is \u2014 it is decided in\n    // paintFilters, from whether the edge touches the CLICKED node\n    // (`touchesSel`, path.edge.inc), never from this edge\'s own attribution\n    // or from which focused subgraph it may or may not sit inside.\n    //   colour \u2014 attributed at all (grey = draft), else which relation word\n    //   dash   \u2014 did the edge stay inside one lane\n    // Width is never a relation channel: an earlier encoding rendered a\n    // convergence-declaring edge thin for fanning out to the batch it cited,\n    // and that reading collided with the one channel a reader is actually\n    // steering by. Relation reads by HUE alone.\n    // A DRAFT is an edge missing a tag on EITHER side, which is v12\'s own\n    // definition, so a half-settled edge greys out with a fully unsettled one.\n    // That deliberately drops the distinction between E6 (blocks commit) and\n    // the ordinary backlog: the console is a reading surface and the commit\n    // refusal names E6 by address, which is where it is actionable.\n    //\n    // `style`, never `stroke:css(...)`: `css()` resolves through\n    // getComputedStyle and BAKES the literal in force when the edge was drawn,\n    // so a theme toggle would leave every edge at its old colour. The node\n    // dots were fixed for this; the edge strokes were missed.\n    const isDraft = e.tailTag === "" || e.headTag === "";\n    const p = mk("path",{class:"edge",\n      d:`M ${NODE_X} ${y1} Q ${NODE_X-depth} ${(y1+y2)/2} ${NODE_X} ${y2}`,\n      style:`stroke:${isDraft?"var(--draft)":`var(${REL_VAR[e.relation]||"--draft"})`}`});\n    if (!isInternalEdge(e)) p.setAttribute("stroke-dasharray","5 3");\n    p.dataset.r=e.relation; p.dataset.s=e.citingId; p.dataset.t=e.citedId;\n    // An edge reaches AT MOST two lanes \u2014 one per side (ticket 07), which for\n    // a cross-lane edge are two genuinely different lanes. `dataset` only\n    // holds strings, and `laneToken()` is itself a JSON-stringified pair\n    // (`shared/lane-interpretation.ts`), so joining tokens into one dataset\n    // string would need an escaping scheme for no benefit: this is a same-\n    // document, same-JS-context array, so a plain element property carries\n    // it losslessly. `paintFilters` below tests SET MEMBERSHIP (`.some`),\n    // never the old single-token string equality.\n    p.laneTokens = edgeLaneTokens(e);\n    p.componentId = edgeComponentId(e);\n    p.addEventListener("mousemove", ev=>tip(ev,\n      `${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}` +\n      (edgeSettled(e)?` <span class="lg">${edgeLaneLabel(e)}</span>`:"")));\n    p.addEventListener("mouseleave", hideTip);\n    eg.appendChild(p); edgeEls.push(p);\n  }\n\n  // T1529 ruling: an edge that could not be drawn is REPORTED, never swallowed.\n  // The range bar already carries this response\'s scope line, so the warning\n  // lands where the reader is told what they are looking at.\n  if (undrawnEdges > 0) {\n    const warn = document.createElement("span");\n    warn.className = "rangeWarn";\n    warn.textContent = `\u26A0 ${undrawnEdges} \u6761\u8FB9\u7684\u7AEF\u70B9\u4E0D\u5728\u672C\u6B21\u8F7D\u5165\u7684\u8282\u70B9\u96C6\u5185,\u672A\u80FD\u7ED8\u5236`;\n    rangeBar.appendChild(warn);\n    rangeBar.style.display = "flex";\n  }\n\n  const ng = mk("g",{}); svg.appendChild(ng);\n  const labelEls = [], titleEls = [];\n  for (const t of turns) {\n    const y = yOf(t.id);\n    // hit target covers node + text only \u2014 the arc rail stays BLANK, and blank\n    // clicks (svg background) clear all focus (T1386 ruling 2).\n    const hit = mk("rect",{class:"rowhit",x:NODE_X-10,y:y-ROW/2,width:W-(NODE_X-10),height:ROW});\n    hit.addEventListener("click", ()=>select(t.id));\n    bgg.appendChild(hit);\n\n    const g = mk("g",{class:"node",transform:`translate(${NODE_X},${y})`});\n    const tys = sortTypes(t.type.filter(x=>TYPE_ORDER.includes(x)));\n    const r = 5.5;\n    // `style`, never the `fill` ATTRIBUTE: a presentation attribute does not\n    // accept `var()`, a style property does.\n    if (!tys.length) g.appendChild(mk("circle",{r,style:"fill:var(--none)"}));\n    else if (tys.length===1) g.appendChild(mk("circle",{r,style:`fill:${typeColor(tys[0])}`}));\n    else {\n      let a0 = -Math.PI/2;\n      for (const ty of tys) {\n        const a1 = a0 + 2*Math.PI/tys.length;\n        const large = (a1-a0)>Math.PI?1:0;\n        g.appendChild(mk("path",{d:`M 0 0 L ${r*Math.cos(a0)} ${r*Math.sin(a0)} A ${r} ${r} 0 ${large} 1 ${r*Math.cos(a1)} ${r*Math.sin(a1)} Z`,style:`fill:${typeColor(ty)}`}));\n        a0 = a1;\n      }\n    }\n    // The selection ring, one per node whatever the body shape (circle or\n    // pie slices) \u2014 hidden until paintFilters adds `sel` ([S15069/T1863]).\n    g.appendChild(mk("circle",{class:"selring",r:r+2.5}));\n    // NO PER-NODE MARK. `t.laneMemberships` carries one entry PER LANE this\n    // turn belongs to, and both marks this block used to draw from it are\n    // deleted: the cross over a node dead in every lane (ticket 04 \u2014 node\n    // death does not exist) and the terminus ring (lane-state-retirement\n    // ticket 01 \u2014 a lane has no terminus). The payload carries neither flag,\n    // so neither glyph has anything to read; an index declaration shows only\n    // as an `indexes`-coloured EDGE now (console-focus-encoding ticket 01 \u2014\n    // the fan no longer thins itself to stand out; see path.edge above).\n    g.addEventListener("click", ()=>select(t.id));\n    ng.appendChild(g); nodeEls.set(t.id,g);\n\n    const lb = mk("text",{class:"rowlbl",x:TEXT_X,y:y+3.5});\n    lb.textContent = addrOf(t.id);\n    // x is set AFTER the loop, from the measured label column \u2014 see below.\n    const title = mk("text",{class:"rowtitle"+(t.title?"":" none"),y:y+3.5});\n    const tt = t.title || "(\u65E0\u7B14\u8BB0)";\n    // Code-point slice, never `.slice()` \u2014 a UTF-16 code-unit slice cuts\n    // mid-surrogate-pair on non-BMP titles (peer finding #14b, matching the\n    // server\'s own codePointExcerpt for the prompt/content excerpt caps).\n    // `Array.from` iterates a string by code point.\n    const ttCp = Array.from(tt);\n    title.textContent = ttCp.length>62 ? ttCp.slice(0,62).join("")+"\u2026" : tt; // textContent \u2014 no esc() needed\n    ng.appendChild(lb); ng.appendChild(title);\n    labelEls.push(lb); titleEls.push(title);\n    rowEls.set(t.id,[hit,lb,title]);\n  }\n\n  // The label column is MEASURED, never a constant. The retired fixed 52px\n  // gutter was sized for the old `T<dbid>` label and painted the title straight\n  // through the wider `S<session>/T<prompt>` form the address ruling\n  // introduced. Ticket 10 (one address grammar) widens it again: a segment\n  // scope used to print a short per-segment ordinal (`E7/T2`) for its own\n  // members, narrower than most rows will now ever be \u2014 every row can run as\n  // wide as its session/prompt digits allow (`S15069/T15829`). Measure once\n  // per render \u2014 `ng` is already in the document, so getComputedTextLength\n  // reports real typeset widths \u2014 and fall back to a per-character estimate for\n  // an unattached or hidden SVG, where every measurement reads 0.\n  let labelW = 0, maxChars = 0;\n  for (const lb of labelEls) {\n    labelW = Math.max(labelW, lb.getComputedTextLength());\n    maxChars = Math.max(maxChars, lb.textContent.length);\n  }\n  if (!(labelW > 0)) labelW = maxChars * 6.8;\n  const titleX = TEXT_X + Math.ceil(labelW) + LABEL_GAP;\n  for (const el of titleEls) el.setAttribute("x", titleX);\n}\n\n/* ---- interactions ---- */\n// Server-computed connectivity ([S15069/T1696]): every membership entry\n// already carries its own `componentId` (lane-checker report 2\'s islands,\n// republished), so "the components touching this turn" is a read off the\n// payload, never a client-side graph traversal.\nfunction compsTouchingTurn(turnId){\n  const t = turns[idx.get(turnId)];\n  if (!t || !t.laneMemberships.length) return [];\n  return [...new Set(t.laneMemberships.map(m=>m.componentId))];\n}\nfunction anchorOf(tok){\n  // Where the view scrolls when a lane chip is pressed. It used to prefer the\n  // lane\'s terminus and fall back to its newest loaded member; ticket 01\n  // deleted the terminus, so the fallback is the whole rule \u2014 which is also\n  // the more useful anchor, since it is always inside the rendered set.\n  if (!laneByToken.has(tok)) return null;\n  const members = turnsByLaneToken.get(tok) || [];\n  return members.length ? members[members.length-1] : null;\n}\nfunction paintFilters(){\n  const anyFocus = selComps.size>0 || solo!==null;\n  const litLanes = focusedLaneTokens();\n  for (const p of edgeEls){\n    p.classList.remove("off","gray","hot","inc");\n    if (!on[p.dataset.r]) { p.classList.add("off"); continue; }\n    // Width\'s WHOLE rule, independent of colour/focus below: user ruling\n    // 2026-08-28 [S15069/T1859], revising console-focus-encoding ticket 01\n    // (cf32918) \u2014 that ticket thickened the whole focused SUBGRAPH; this\n    // narrows thickness to the clicked node\'s own neighbourhood. `touchesSel`\n    // is true for an edge\'s in- or out-direction alike (direction does not\n    // matter \u2014 \u51FA\u8FB9\u6216\u5165\u8FB9\u90FD\u7B97), and is checked with no `anyFocus` gate: with\n    // no node clicked (`sel===null`) it is always false, which is how "no\n    // focus -> all thin" and "lane-only focus -> width uniformly thin" both\n    // fall out of the SAME predicate rather than a separate branch.\n    const touchesSel = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (touchesSel) p.classList.add("inc");\n    if (!anyFocus) continue;\n    // Only an edge INTERNAL to a focused component lights as structure: it is\n    // the edge that made those two turns connected in the first place. A\n    // cross-lane edge is in no component and stays gray \u2014 it joins nothing \u2014\n    // unless the panel\'s own node is one of its ends (`selDirect` below).\n    const inComp = p.componentId !== null && selComps.has(p.componentId);\n    const soloDirect = solo!==null && (p.dataset.s==solo || p.dataset.t==solo);\n    // \u5361\u7247\u8282\u70B9(sel)\u7684\u5165\u8FB9\u51FA\u8FB9\u4E00\u5F8B\u4E0A\u8272,\u5E26\u4E0D\u5E26 tag \u90FD\u662F\u2014\u2014T1416 ruling;\n    // \u6743\u91CD/\u865A\u7EBF\u8BED\u4E49\u4E0D\u53D8,\u53EA\u89E3\u9664\u7070\u5316\u3002\n    const selDirect = sel!==null && (p.dataset.s==sel || p.dataset.t==sel);\n    if (inComp || soloDirect || selDirect) p.classList.add("hot");\n    else p.classList.add("gray");\n  }\n  // The ring, width\'s sibling ([S15069/T1861]): mark the ONE node `sel`\n  // names. Keyed on `sel` alone \u2014 same authority as `touchesSel` above \u2014\n  // so clearFocus (sel=null) strips every ring in the same repaint.\n  for (const [id, el] of nodeEls) el.classList.toggle("sel", id===sel);\n  for (const [tok, el] of laneChips) el.classList.toggle("on", litLanes.has(tok));\n  const dimRow = (id, dim) => {\n    nodeEls.get(id).classList.toggle("dim", dim);\n    for (const el of rowEls.get(id)) el.classList.toggle("dim", dim);\n  };\n  if (!anyFocus){ for (const t of turns) dimRow(t.id,false); return; }\n  const keep = new Set();\n  for (const cid of selComps) for (const m of (turnsByComp.get(cid) || [])) keep.add(m);\n  if (solo!==null){\n    keep.add(solo);\n    for (const p of edgeEls) if (on[p.dataset.r]&&(p.dataset.s==solo||p.dataset.t==solo)){ keep.add(+p.dataset.s); keep.add(+p.dataset.t); }\n  }\n  if (sel!==null) keep.add(sel);\n  for (const t of turns) dimRow(t.id, !keep.has(t.id));\n}\n// Ticket 03 (peer P2-5/P2-6): `sel`/`solo` print through `addrOf`, never the\n// bare `T<dbid>` \u2014 every id here comes from `select(id)`, always a turn\n// already present in the currently-loaded `turns`. The one id that could ever\n// fall outside it was a lane\'s terminus, and lane-state-retirement ticket 01\n// removed that field, so the addrOf fallback is now unreachable everywhere.\nfunction syncBadge(){\n  if (selComps.size===0 && solo===null && sel===null){ selBadge.style.display="none"; return; }\n  // Both numbers, always: they answer different questions and the pair is the\n  // point. A node in two lanes reads "2 \u6761 lane \xB7 2 \u4E2A\u5206\u91CF"; one shattered\n  // lane\'s chip reads "1 \u6761 lane \xB7 47 \u4E2A\u5206\u91CF", which is the lane telling you\n  // its members are not joined by edges yet.\n  const laneCount = focusedLaneTokens().size;\n  selBadge.textContent = (selComps.size\n    ? `\u805A\u7126 ${laneCount} \u6761\u6CF3\u9053 \xB7 ${selComps.size} \u4E2A\u5206\u91CF${sel!==null ? ` \xB7 \u9762\u677F ${addrOf(sel)}` : ""}`\n    : solo!==null ? `\u805A\u7126 ${addrOf(solo)}(\u65E0\u6CF3\u9053,\u4EAE\u76F4\u8FDE\u8FB9)` : `\u9762\u677F ${addrOf(sel)}`) + " \xB7 \u7A7A\u767D\u5904/Esc \u6E05\u9664";\n  selBadge.style.display = "inline-block";\n}\nselBadge.onclick = () => { clearFocus(); paintFilters(); syncBadge(); };\naddEventListener("keydown", e => { if (e.key==="Escape") selBadge.onclick(); });\n// ONE focus system: the component multi-select. Clicking a node SWITCHES\n// focus to ITS components \u2014 one per lane it belongs to ([S15069/T1696]: "\u5C5E\u4E8E\n// \u4E24\u4E2A lane \u7684\u8282\u70B9\u5C31\u540C\u65F6\u70B9\u4EAE\u4E24\u4E2A lane"), the previous focus clearing. On the\n// already-focused set the click is two-stage (T1385): open the panel first;\n// undo the focus only when the panel already shows this node. Laneless nodes\n// focus solo \u2014 their direct edges color.\nfunction select(id){\n  const comps = compsTouchingTurn(id);\n  if (comps.length){\n    if (sameFocus(comps)){\n      if (sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    } else { selComps = new Set(comps); solo = null; }\n  } else {\n    if (solo === id && sel === id){ clearFocus(); paintFilters(); syncBadge(); return; }\n    selComps = new Set(); solo = id;\n  }\n  sel = id;\n  paintFilters();\n  syncBadge();\n  renderTurnPanel(id);\n}\nfunction renderTurnPanel(id){\n  const t = turns[idx.get(id)];\n  const outE = edges.filter(e=>e.citingId===id), inE = edges.filter(e=>e.citedId===id);\n  const erow = (e,dir) => `<div class="erow" data-j="${dir==="out"?e.citedId:e.citingId}" style="color:${relationVar(e.relation)}">${dir==="out"?`\u2014${esc(e.relation)}\u2192 ${addrOf(e.citedId)}`:`${addrOf(e.citingId)} \u2014${esc(e.relation)}\u2192`}${edgeSettled(e)?` <span class="etags">${edgeLaneLabel(e)}</span>`:""}</div>`;\n  // One chip per lane this turn belongs to, and MEMBERSHIP is now all a chip\n  // says. Both marks it used to carry are deleted: the dead-in-this-lane flag\n  // (ticket 04) and the per-lane terminus \u25CE (lane-state-retirement ticket 01).\n  const laneChipsHtml = t.laneMemberships.map(({token: tok}) => {\n    const l = laneByToken.get(tok);\n    // D5, v11 (ticket 05): the panel\'s per-turn lane chips reflect SET\n    // MEMBERSHIP \u2014 one chip per lane token this turn belongs to, each\n    // labelled by that lane\'s own single tag, never a joined tagSet.\n    return `<span class="chip lane">${esc(l ? l.tag : tok)}</span>`;\n  }).join("");\n  // The RAW stored tags, every word ([S15069/T1696]). Deliberately NOT the\n  // same row as \u6240\u5C5E lane above: that row is what the model resolved, this one\n  // is what the turn carries, and the gap between them is the attribution\n  // debt. A word that IS one of this turn\'s lanes keeps the lane styling so\n  // the correspondence is readable at a glance; everything else \u2014 the\n  // segment\'s own tag, a retired vocabulary word \u2014 is muted, present but\n  // marked as naming no lane.\n  const ownLaneTags = new Set(\n    t.laneMemberships.map(({token: tok}) => (laneByToken.get(tok) || {}).tag).filter(Boolean),\n  );\n  const tagChipsHtml = (t.tags || [])\n    .map(tag => `<span class="chip ${ownLaneTags.has(tag) ? "lane" : "tagoff"}">${esc(tag)}</span>`)\n    .join("");\n  pbody.innerHTML =\n    `<div class="addr">${esc(addrOf(t.id))}</div><h2>${esc(t.title||"(\u65E0\u7B14\u8BB0)")}</h2>\n     <div class="chips">${sortTypes(t.type).map(x=>`<span class="chip ph" style="background:${typeColor(x)}">${esc(x)}</span>`).join("")}</div>\n     ${(t.tags||[]).length?`<div class="flowline">tags:${tagChipsHtml}</div>`:""}\n     ${t.laneMemberships.length?`<div class="flowline">\u6240\u5C5E\u6CF3\u9053:${laneChipsHtml}</div>`:""}\n     ${t.promptExcerpt?`<div class="sec">prompt</div><div class="prompt">${esc(t.promptExcerpt)}</div>`:""}\n     <div class="sec">content</div><div class="content">${esc(t.contentExcerpt||"\u2014")}</div>\n     <div class="sec">\u51FA\u8FB9 ${outE.length}</div>${outE.map(e=>erow(e,"out")).join("")||"<div class=\'flowline\'>\u65E0</div>"}\n     <div class="sec">\u5165\u8FB9 ${inE.length}</div>${inE.map(e=>erow(e,"in")).join("")||"<div class=\'flowline\'>\u65E0</div>"}`;\n  document.getElementById("tlbar").style.display="none";\n  panel.style.display="block";\n  pbody.querySelectorAll(".erow").forEach(el=>el.addEventListener("click",()=>jump(+el.dataset.j)));\n}\nfunction jump(id){\n  if (!idx.has(id)) return;\n  if (sel!==id) select(id);\n  wrap.scrollTo({top: yOf(id)-innerHeight/2, behavior:"smooth"});\n}\ndocument.getElementById("close").onclick = ()=>{ sel=null; paintFilters(); syncBadge(); panel.style.display="none"; };\n// Jump by ADDRESS, never by internal id (T1482\'s ruling, which this box was\n// the last holdout of): a full `S15069/T1387` matches exactly, a bare\n// `T1387`/`1387` matches the trailing `/T<n>` of the address every turn now\n// carries, and anything else falls through to a title substring.\ndocument.getElementById("search").addEventListener("keydown", e=>{\n  if (e.key!=="Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const lower = s => s.toLowerCase();\n  const exact = turns.find(t=>lower(addrOf(t.id))===lower(q));\n  if (exact) return jump(exact.id);\n  const m = q.match(/^t?(\\d+)$/i);\n  if (m) {\n    const suffix = "/t"+m[1];\n    const byOrdinal = turns.find(t=>lower(addrOf(t.id)).endsWith(suffix));\n    if (byOrdinal) return jump(byOrdinal.id);\n  }\n  const hit = turns.find(t=>(t.title||"").toLowerCase().includes(lower(q)));\n  if (hit) jump(hit.id);\n});\nfunction tip(ev,html){ tipEl.innerHTML=html; tipEl.style.display="block"; tipEl.style.left=Math.min(ev.clientX+14,innerWidth-440)+"px"; tipEl.style.top=(ev.clientY+16)+"px"; }\nfunction hideTip(){ tipEl.style.display="none"; }\n\n/* ---- recall & timeline panels (console-recall-timeline-panels ticket 13) ----\n   Both surfaces are server prose (recallMemory/timelineQuery\'s own rendered\n   text, over /api/console/recall and /api/console/timeline) shown through the\n   SAME #panel/#pbody overlay the turn-detail view already uses \u2014 a second\n   competing panel would be exactly the "speculative chrome" the ticket asks\n   this surface to avoid. `.mono` (see the stylesheet) is the one visual\n   difference: monospace, matching every address already on screen. */\n\n// Ticket 11\'s bare-citation grammar, exactly as the ticket names it: a turn\n// address (`S<n>/T<m>`), a segment address (`E<n>`), or a segment+lane\n// address (`E<n>/#<tag>`) \u2014 never a bare `S<n>` (session alone is not a\n// citation form). Matched against the ESCAPED string (see `renderMonoText`):\n// every character either alternative can match \u2014 digits, S/T/E, "/", "#",\n// lowercase letters, "-" \u2014 passes `esc()` unchanged, so escaping first and\n// matching second is safe and never double-escapes a matched address.\nconst ADDRESS_LINK_RE = /\\bS\\d+\\/T\\d+\\b|\\bE\\d+(?:\\/#[a-z0-9-]+)?\\b/g;\nfunction linkifyAddresses(escaped){\n  return escaped.replace(ADDRESS_LINK_RE, addr => `<a href="#" class="addrlink" data-addr="${addr}">${addr}</a>`);\n}\nfunction renderMonoText(raw){ return linkifyAddresses(esc(raw)); }\n\nfunction openTextPanel(title, text, withTimelineBar = false){\n  // Overwrites #pbody outright \u2014 no stale turn-panel content survives under\n  // it \u2014 but leaves graph focus/dimming exactly as it was: a recall/timeline\n  // lookup is not a graph interaction, so it has no business clearing one.\n  // The timeline\u63A7\u4EF6\u6761 rides the panel top only while timeline output is up;\n  // every other panel content hides it.\n  document.getElementById("tlbar").style.display = withTimelineBar ? "flex" : "none";\n  pbody.innerHTML = `<div class="addr">${esc(title)}</div><div class="content mono">${renderMonoText(text)}</div>`;\n  panel.style.display = "block";\n}\n\n// A clicked address navigates through the shell\'s EXISTING mechanisms \u2014\n// loadGraph for scope, jump/select for a turn, a lane chip\'s own click\n// handler for a lane \u2014 never a parallel navigation path.\nasync function navigateToAddress(addr){\n  const turnMatch = addr.match(/^S(\\d+)\\/T(\\d+)$/);\n  if (turnMatch) {\n    const sessionId = Number(turnMatch[1]), promptNumber = Number(turnMatch[2]);\n    if (!(currentScope && currentScope.kind === "session" && currentScope.id === sessionId)) {\n      await loadGraph({ session: sessionId });\n    }\n    const t = turns.find(t => t.sessionId === sessionId && t.promptNumber === promptNumber);\n    if (t) jump(t.id); else toast(`S${sessionId}/T${promptNumber} \u4E0D\u5728\u5F53\u524D\u52A0\u8F7D\u533A\u95F4\u5185`);\n    return;\n  }\n  const laneMatch = addr.match(/^E(\\d+)\\/#(.+)$/);\n  if (laneMatch) {\n    const segmentId = Number(laneMatch[1]), tag = laneMatch[2];\n    if (!(currentScope && currentScope.kind === "segment" && currentScope.id === segmentId)) {\n      await loadGraph({ segment: segmentId });\n    }\n    const lane = lanes.find(l => l.tag === tag);\n    const chip = lane ? laneChips.get(lane.token) : null;\n    if (chip) chip.click(); else toast(`E${segmentId} \u4E2D\u672A\u627E\u5230\u6CF3\u9053 #${tag}`);\n    return;\n  }\n  const segMatch = addr.match(/^E(\\d+)$/);\n  if (segMatch) { await loadGraph({ segment: Number(segMatch[1]) }); }\n}\npbody.addEventListener("click", e => {\n  const a = e.target.closest("a.addrlink");\n  if (!a) return;\n  e.preventDefault();\n  navigateToAddress(a.dataset.addr);\n});\n\n/* ---- recall search: one box, cross-session \u2014 distinct from #search above,\n   which only jumps within the CURRENTLY loaded graph. An input that looks\n   like an address ("S12", "E7/#foo", "T900", "O4", ...) is sent as `id`;\n   anything else is a full-text `query`, same heuristic #search already uses\n   for its own address-vs-title split. ---- */\nconst recallInput = document.getElementById("recallInput");\nconst looksLikeAddress = q => /^[SETO][\\d*]/i.test(q) || /^\\d+$/.test(q);\nrecallInput.addEventListener("keydown", async e => {\n  if (e.key !== "Enter") return;\n  const q = e.target.value.trim();\n  if (!q) return;\n  const params = new URLSearchParams();\n  params.set(looksLikeAddress(q) ? "id" : "query", q);\n  try {\n    const data = await fetchJson("/api/console/recall?" + params.toString());\n    openTextPanel(`recall: ${q}`, data.text);\n  } catch (err) {\n    toast("recall \u5931\u8D25: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  }\n});\n\n/* ---- timeline: one form (id + view + pageBudget + page) drives every\n   lookup (console-timeline-panel-controls ticket 16) \u2014 the id input takes\n   whatever legal form `timelineQuery` itself accepts (S<n>, S<n>/T-ranges,\n   E<n>, E<n>/#<tag>, E<n>/L<n>, ...) and this shell pre-validates NONE of\n   it: an illegal input surfaces `timelineQuery`\'s own error text verbatim\n   (via the console API\'s typed 400/404 \u2014 `err.body.error.message`, same\n   shape `#recallInput`\'s own error handling already reads), never a second\n   client-side grammar. The context-adaptive trigger (`timelineIdForContext`,\n   unchanged) is now a PREFILL shortcut into this SAME form \u2014 one mechanism\n   (`runTimelineQuery`), two entry points, never a divergent fetch path. ---- */\nfunction timelineIdForContext(){\n  const litLanes = [...focusedLaneTokens()];\n  if (litLanes.length === 1) {\n    const lane = laneByToken.get(litLanes[0]);\n    // `lane.segment` is `String(segmentId)`, except the DEFAULT_SEGMENT\n    // sentinel for a homeless (unsegmented) lane, which has no `E<n>` address\n    // at all \u2014 `Number(...)` on that sentinel is NaN, so the guard below\n    // falls through to the plain session/segment case instead of emitting a\n    // bogus "E<NaN>#tag" id.\n    const segmentId = Number(lane && lane.segment);\n    if (Number.isFinite(segmentId)) return `E${segmentId}/#${lane.tag}`;\n  }\n  if (!currentScope) return null;\n  return currentScope.kind === "segment" ? `E${currentScope.id}` : `S${currentScope.id}`;\n}\nconst timelineIdInput = document.getElementById("timelineIdInput");\nconst timelineViewSelect = document.getElementById("timelineViewSelect");\nconst timelinePageBudgetInput = document.getElementById("timelinePageBudget");\nconst timelinePageInput = document.getElementById("timelinePageInput");\n\nasync function runTimelineQuery(){\n  const id = timelineIdInput.value.trim();\n  if (!id) { toast("\u8BF7\u5148\u8F93\u5165\u65F6\u95F4\u7EBF\u5730\u5740"); return; }\n  const params = new URLSearchParams();\n  params.set("id", id);\n  if (timelineViewSelect.value) params.set("view", timelineViewSelect.value);\n  if (timelinePageBudgetInput.value.trim()) params.set("pageBudget", timelinePageBudgetInput.value.trim());\n  if (timelinePageInput.value.trim()) params.set("page", timelinePageInput.value.trim());\n  try {\n    const data = await fetchJson("/api/console/timeline?" + params.toString());\n    openTextPanel(`timeline: ${id}`, data.text, true);\n  } catch (err) {\n    toast("timeline \u5931\u8D25: " + (err.kind === "http" && err.body && err.body.error && err.body.error.message ? err.body.error.message : "\u7F51\u7EDC\u9519\u8BEF"));\n  }\n}\nfor (const el of [timelineIdInput, timelinePageBudgetInput, timelinePageInput]) {\n  el.addEventListener("keydown", e => { if (e.key === "Enter") runTimelineQuery(); });\n}\n// A view change re-runs the CURRENT id \u2014 turns/milestones are the only two\n// real options (lane is implied by the id\'s own E<n>/L*/E<n>/#<tag> form,\n// never a third dropdown entry for a view that does not exist on its own).\ntimelineViewSelect.addEventListener("change", () => { if (timelineIdInput.value.trim()) runTimelineQuery(); });\n// Page navigation: prev/next step the SAME page field the form already\n// exposes and re-run through the one mechanism above \u2014 never a separate\n// pagination path.\ndocument.getElementById("timelinePrev").addEventListener("click", () => {\n  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);\n  timelinePageInput.value = String(Math.max(1, current - 1));\n  runTimelineQuery();\n});\ndocument.getElementById("timelineNext").addEventListener("click", () => {\n  const current = Math.max(1, parseInt(timelinePageInput.value, 10) || 1);\n  timelinePageInput.value = String(current + 1);\n  runTimelineQuery();\n});\ndocument.getElementById("timelineBtn").addEventListener("click", () => {\n  const id = timelineIdForContext();\n  if (!id) { toast("\u5C1A\u65E0\u53EF\u7528\u7684\u4F1A\u8BDD/\u4EFB\u52A1\u4E0A\u4E0B\u6587"); return; }\n  timelineIdInput.value = id;\n  timelineViewSelect.value = "";\n  timelinePageBudgetInput.value = "";\n  timelinePageInput.value = "";\n  runTimelineQuery();\n});\n\n/* ---- bootstrap ---- */\nasync function init(){\n  await loadSidebar();\n  if (sessionsList.length) {\n    await loadGraph({ session: sessionsList[0].id });\n  } else if (segmentsList.length) {\n    await loadGraph({ segment: segmentsList[0].id });\n  } else {\n    scopeTitleEl.textContent = "\u65E0\u4F1A\u8BDD";\n  }\n}\ninit();\n</script>\n</body>\n</html>\n';
 
 // src/worker/server.ts
 var WORKER_PORT = 37778;

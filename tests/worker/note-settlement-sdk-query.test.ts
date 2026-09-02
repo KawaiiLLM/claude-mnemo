@@ -5806,10 +5806,11 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       const before = computeSettlementShapeNumbers(db, fixture.job.id);
       const alphaShape = before.lanes.find((lane) => lane.laneTag === "alpha")!;
       expect(alphaShape.memberCount).toBe(3);
-      // THREE in-lane rows now: the declared `a2 -> a1`, the fixture's own
-      // undeclared draft on the same pair, and the half-declared `a3 -> a2`.
-      // All three derive `alpha` on every blank side.
-      expect(alphaShape.edgeCount).toBe(3);
+      // TWO in-lane rows: the placed `a2 -> a1` (the fixture's draft on that
+      // pair was retracted above — main-agent-edges D5 holds one row per pair,
+      // so the draft and the placement can no longer coexist) and the
+      // half-declared `a3 -> a2`, whose blank head DERIVES `alpha`.
+      expect(alphaShape.edgeCount).toBe(2);
       // …so every member is connected: `a3 -> a2 -> a1`. The edgeless-member
       // property is asserted on `beta` below, which genuinely has one.
       expect(alphaShape.componentCount).toBe(1);
