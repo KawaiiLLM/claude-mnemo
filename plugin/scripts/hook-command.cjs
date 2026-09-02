@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjyel99" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjynnc9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2330,7 +2330,32 @@ function setSegmentTags(db, segmentId, tags, nowEpoch) {
 function segmentTagOf(segment) {
   return segment.tags[0] ?? null;
 }
-function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
+function frozenOwnerSegmentIds(db, turnId) {
+  return db.query(
+    `SELECT sm.segment_id AS segmentId
+         FROM segment_members sm
+         JOIN segments s ON s.id = sm.segment_id
+        WHERE sm.turn_id = ?
+          AND json_array_length(s.tags) = 0
+        ORDER BY sm.segment_id ASC`
+  ).all(turnId).map((row) => row.segmentId);
+}
+var MembershipFrozenOwnerError = class extends Error {
+  constructor(turnId, frozenSegmentId, wouldJoinSegmentId, message) {
+    super(message);
+    this.turnId = turnId;
+    this.frozenSegmentId = frozenSegmentId;
+    this.wouldJoinSegmentId = wouldJoinSegmentId;
+    this.name = "MembershipFrozenOwnerError";
+  }
+  turnId;
+  frozenSegmentId;
+  wouldJoinSegmentId;
+};
+function formatFrozenOwnerRefusal(db, turnId, frozenSegmentId, wouldJoinSegmentId) {
+  return `${turnAddress(db, turnId)} is owned by unnamed E${frozenSegmentId}; name it or detach first. Legacy ownership is frozen \u2014 it is never extended, so this turn cannot also join E${wouldJoinSegmentId}. remember(retag, id="E${frozenSegmentId}", tag=\u2026) names it and thaws its members into the single truth; remember(clear, id="E${frozenSegmentId}") detaches them.`;
+}
+function segmentTagIndex(db) {
   const index = /* @__PURE__ */ new Map();
   for (const row of db.query(
     `SELECT id, json_extract(tags, '$[0]') AS tag
@@ -2340,28 +2365,131 @@ function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
       index.set(row.tag, row.id);
     }
   }
-  let target = null;
+  return index;
+}
+function derivedTarget(index, tags) {
   for (const tag of tags) {
     const segmentId = index.get(tag);
     if (segmentId !== void 0) {
-      target = segmentId;
-      break;
+      return segmentId;
     }
   }
+  return null;
+}
+function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch, operation = "normal") {
+  const index = segmentTagIndex(db);
+  const target = derivedTarget(index, tags);
   const priorSegmentIds = db.query(
     "SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id = ?"
   ).all(turnId).map((row) => row.segmentId);
-  if (priorSegmentIds.length === (target === null ? 0 : 1) && priorSegmentIds[0] === target) {
+  const frozen = new Set(operation === "forced-detach" ? [] : frozenOwnerSegmentIds(db, turnId));
+  if (operation === "normal") {
+    const owner = [...frozen].find((id) => id !== target);
+    if (target !== null && owner !== void 0) {
+      throw new MembershipFrozenOwnerError(
+        turnId,
+        owner,
+        target,
+        formatFrozenOwnerRefusal(db, turnId, owner, target)
+      );
+    }
+  }
+  const removable = priorSegmentIds.filter((id) => id !== target && !frozen.has(id));
+  const alreadyThere = target !== null && priorSegmentIds.includes(target);
+  if (removable.length === 0 && (target === null || alreadyThere)) {
     return target;
   }
-  db.query("DELETE FROM segment_members WHERE turn_id = ?").run(turnId);
-  if (target !== null) {
+  if (removable.length > 0) {
+    const placeholders = removable.map(() => "?").join(",");
+    db.query(
+      `DELETE FROM segment_members WHERE turn_id = ? AND segment_id IN (${placeholders})`
+    ).run(turnId, ...removable);
+  }
+  if (target !== null && !alreadyThere) {
     addSegmentMembers(db, target, [turnId], nowEpoch);
   }
-  for (const segmentId of priorSegmentIds.filter((id) => id !== target)) {
+  for (const segmentId of removable) {
     recomputeSegmentFacets(db, segmentId);
   }
   return target;
+}
+function writeMembershipTags(db, input) {
+  const { operation, writes, nowEpoch } = input;
+  if (writes.length === 0) {
+    return { ok: true, operation, changedTurnIds: [], membership: [] };
+  }
+  const index = segmentTagIndex(db);
+  const refusals = [];
+  for (const write of writes) {
+    const target = derivedTarget(index, write.tags);
+    if (operation === "normal") {
+      const owner = frozenOwnerSegmentIds(db, write.turnId).find((id) => id !== target);
+      if (target !== null && owner !== void 0) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message: formatFrozenOwnerRefusal(db, write.turnId, owner, target)
+        });
+        continue;
+      }
+    }
+    if (operation === "thaw-owner" && input.thawingSegmentId !== void 0) {
+      if (target !== input.thawingSegmentId) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress(db, write.turnId),
+          message: `thaw-owner may only move a member into E${input.thawingSegmentId}, the task being named \u2014 this write derives into ${target === null ? "no task" : `E${target}`}.`
+        });
+        continue;
+      }
+    }
+    const strandings = findMembershipLaneStrandings(db, [write.turnId], target);
+    if (strandings.length > 0) {
+      refusals.push({
+        turnId: write.turnId,
+        address: turnAddress(db, write.turnId),
+        message: formatMembershipLaneStrandingRejection(db, target, strandings)
+      });
+    }
+  }
+  if (refusals.length > 0) {
+    return {
+      ok: false,
+      refusals,
+      message: `${refusals.length} of ${writes.length} turn(s) refused; nothing was written. ` + refusals.map((entry) => `${entry.address}: ${entry.message}`).join(" ")
+    };
+  }
+  const readTags = db.query(
+    "SELECT tags FROM turns WHERE id = ?"
+  );
+  const updateTurnTags = db.query(
+    "UPDATE turns SET tags = ? WHERE id = ?"
+  );
+  const changedTurnIds = [];
+  const membership = [];
+  for (const write of writes) {
+    const raw = readTags.get(write.turnId)?.tags ?? "[]";
+    let stored;
+    try {
+      const parsed = JSON.parse(raw);
+      stored = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      stored = [];
+    }
+    const next = [...write.tags];
+    const moved = next.length !== stored.length || next.some((value, at) => value !== stored[at]);
+    if (moved) {
+      updateTurnTags.run(JSON.stringify(next), write.turnId);
+      stampField(db, "turn", write.turnId, "tags", input.writer ?? ANONYMOUS_WRITER, nowEpoch);
+      changedTurnIds.push(write.turnId);
+    }
+    const segmentId = deriveTurnSegmentMembership(db, write.turnId, next, nowEpoch, operation);
+    membership.push({ turnId: write.turnId, segmentId });
+    if (moved) {
+      recomputeSegmentFacetsForTurn(db, write.turnId);
+    }
+  }
+  return { ok: true, operation, changedTurnIds, membership };
 }
 function recomputeSegmentFacetsForTurn(db, turnId) {
   const rows = db.query(
@@ -2422,6 +2550,97 @@ function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
     recomputeSegmentFacets(db, segmentId);
   }
   return added;
+}
+function turnAddress(db, turnId) {
+  const row = db.query(
+    "SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?"
+  ).get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn #${turnId}`;
+}
+function findMembershipLaneStrandings(db, turnIds, targetSegmentId) {
+  const moving = new Set(turnIds);
+  if (moving.size === 0) {
+    return [];
+  }
+  const ids = [...moving];
+  const placeholders = ids.map(() => "?").join(",");
+  const edges = db.query(
+    `SELECT citing_id AS citingId, cited_id AS citedId, relation,
+              tail_tag AS tailTag, head_tag AS headTag
+         FROM memory_edges
+        WHERE citing_kind = 'turn' AND cited_kind = 'turn'
+          AND relation IS NOT NULL
+          AND (tail_tag <> '' OR head_tag <> '')
+          AND (citing_id IN (${placeholders}) OR cited_id IN (${placeholders}))`
+  ).all(...ids, ...ids);
+  if (edges.length === 0) {
+    return [];
+  }
+  const owningBefore = /* @__PURE__ */ new Map();
+  const segmentOf = (turnId, after) => {
+    if (after && moving.has(turnId)) {
+      return targetSegmentId;
+    }
+    if (!owningBefore.has(turnId)) {
+      owningBefore.set(turnId, getOwningSegmentId(db, turnId));
+    }
+    return owningBefore.get(turnId) ?? null;
+  };
+  const declaredCache = /* @__PURE__ */ new Map();
+  const declares = (segmentId, tag) => {
+    if (segmentId === null) {
+      return false;
+    }
+    let declared = declaredCache.get(segmentId);
+    if (declared === void 0) {
+      declared = new Set(
+        db.query("SELECT tag FROM lanes WHERE segment_id = ?").all(segmentId).map((row) => row.tag)
+      );
+      declaredCache.set(segmentId, declared);
+    }
+    return declared.has(tag);
+  };
+  const strandings = [];
+  for (const edge of edges) {
+    const sides = [
+      { endpoint: "citing", turnId: edge.citingId, tag: edge.tailTag },
+      { endpoint: "cited", turnId: edge.citedId, tag: edge.headTag }
+    ];
+    for (const side of sides) {
+      if (side.tag === "") {
+        continue;
+      }
+      const before = segmentOf(side.turnId, false);
+      const after = segmentOf(side.turnId, true);
+      if (before === after) {
+        continue;
+      }
+      if (!declares(before, side.tag)) {
+        continue;
+      }
+      if (declares(after, side.tag)) {
+        continue;
+      }
+      strandings.push({
+        citingTurnId: edge.citingId,
+        citedTurnId: edge.citedId,
+        relation: edge.relation,
+        tag: side.tag,
+        endpoint: side.endpoint,
+        segmentIdAfter: after
+      });
+    }
+  }
+  return strandings;
+}
+function formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings) {
+  const clauses = strandings.map((stranding) => {
+    const arrow = `${turnAddress(db, stranding.citingTurnId)} --${stranding.relation}--> ${turnAddress(db, stranding.citedTurnId)} {${stranding.tag}}`;
+    const where = stranding.segmentIdAfter === null ? `the ${stranding.endpoint} turn would belong to NO segment, and a lane is declared on a segment` : `E${stranding.segmentIdAfter} \u2014 the ${stranding.endpoint} turn's segment after this move \u2014 has not declared lane "${stranding.tag}"`;
+    return `${arrow}: ${where}`;
+  });
+  const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
+  return `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved \u2014 ${clauses.join("; ")}. Mint the lane in the destination segment first (remember create, id="E<n>/#<tag>"), or retract the edge.`;
 }
 function getSegmentsForTurn(db, turnId) {
   return db.query(
@@ -9854,15 +10073,16 @@ function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
            content = NULL,
            insight = NULL,
            type = '[]',
-           tags = ?,
            updated_at_epoch = ?
        WHERE id = ?`
-  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
+  ).run(updatedAtEpoch, turnId);
   reindexTurnFromDb(db, turnId);
   const resetTagsMoved = JSON.stringify(existing.tags) !== stringifyArray(keptTags);
-  if (resetTagsMoved) {
-    deriveTurnSegmentMembership(db, turnId, keptTags, updatedAtEpoch);
-  }
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: keptTags }],
+    nowEpoch: updatedAtEpoch
+  });
   if (existing.type.length > 0 || resetTagsMoved) {
     recomputeSegmentFacetsForTurn(db, turnId);
   }
@@ -30487,7 +30707,6 @@ function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
          title = '/compact',
          compact_boundary_uuid = ?,
          updated_at_epoch = ?,
-         tags = ?,
          content = NULL,
          insight = NULL,
          significance_grade = NULL,
@@ -30502,9 +30721,13 @@ function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
   ).run(
     claim.uuid,
     nowEpoch,
-    JSON.stringify(compactMetadataTags(claim)),
     turnId
   );
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: compactMetadataTags(claim) }],
+    nowEpoch
+  });
   const pruned = db.query(
     "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?"
   ).run(turnId);

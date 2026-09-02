@@ -4,7 +4,7 @@
 
 **Blocked by:** 00.
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2411 at bcd10be5 (merged 024e6325, no conflicts)**: tsc 0; merged tree 4780/0/263 (+48/+2 accounted); my probes RED — unnaming allowed while members exist (1), task merge accepting an unnamed source (1). `reassignSegmentMembers` deleted and every `segment_members` mutation pinned to segments.ts by a sweep test. Batch form confirmed settlement-only (`noteInputShape` pinned to have none of turns/task/addTags).
 
 - [x] The primitive with operations `normal` / `thaw-owner` / `forced-detach`. Under `normal`, a turn with a FROZEN owner (a `segment_members` row of an unnamed task) refuses any write that would create membership in another task, naming the owner. Derive never touches rows of an unnamed task (neither deletes nor creates).
 - [x] Routed through the primitive, each listed in the report with its operation: batch and single `note` tag writes; `create … members` at both tiers (task-tier with empty `tag` refuses; lane-tier under an unnamed parent refuses); task `retag` — unnamed→named = `thaw-owner` backfilling every frozen member atomically, named→new replaces the tag on every owned member, named→null refuses while members exist; task merge (an UNNAMED source refuses: "name the source first"); lane merge / clear / retag; task-tier `clear` = `forced-detach`; `resetTurnExtractionFields`; compact occupied-turn repair (derive runs; frozen rows preserved); the ticket-03 migration. `reassignSegmentMembers` deleted or migration-private, proven by a call-site sweep. Any path left outside is named with its reason.

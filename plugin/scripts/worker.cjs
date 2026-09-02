@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtjyel99" : "dev";
+var BUILD_ID = true ? "0.29.0-mtjynnc9" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -2576,7 +2576,32 @@ function setSegmentTags(db, segmentId, tags, nowEpoch) {
 function segmentTagOf(segment) {
   return segment.tags[0] ?? null;
 }
-function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
+function frozenOwnerSegmentIds(db, turnId) {
+  return db.query(
+    `SELECT sm.segment_id AS segmentId
+         FROM segment_members sm
+         JOIN segments s ON s.id = sm.segment_id
+        WHERE sm.turn_id = ?
+          AND json_array_length(s.tags) = 0
+        ORDER BY sm.segment_id ASC`
+  ).all(turnId).map((row) => row.segmentId);
+}
+var MembershipFrozenOwnerError = class extends Error {
+  constructor(turnId, frozenSegmentId, wouldJoinSegmentId, message) {
+    super(message);
+    this.turnId = turnId;
+    this.frozenSegmentId = frozenSegmentId;
+    this.wouldJoinSegmentId = wouldJoinSegmentId;
+    this.name = "MembershipFrozenOwnerError";
+  }
+  turnId;
+  frozenSegmentId;
+  wouldJoinSegmentId;
+};
+function formatFrozenOwnerRefusal(db, turnId, frozenSegmentId, wouldJoinSegmentId) {
+  return `${turnAddress(db, turnId)} is owned by unnamed E${frozenSegmentId}; name it or detach first. Legacy ownership is frozen \u2014 it is never extended, so this turn cannot also join E${wouldJoinSegmentId}. remember(retag, id="E${frozenSegmentId}", tag=\u2026) names it and thaws its members into the single truth; remember(clear, id="E${frozenSegmentId}") detaches them.`;
+}
+function segmentTagIndex(db) {
   const index = /* @__PURE__ */ new Map();
   for (const row of db.query(
     `SELECT id, json_extract(tags, '$[0]') AS tag
@@ -2586,25 +2611,50 @@ function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
       index.set(row.tag, row.id);
     }
   }
-  let target = null;
+  return index;
+}
+function derivedTarget(index, tags) {
   for (const tag of tags) {
     const segmentId = index.get(tag);
     if (segmentId !== void 0) {
-      target = segmentId;
-      break;
+      return segmentId;
     }
   }
+  return null;
+}
+function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch, operation = "normal") {
+  const index = segmentTagIndex(db);
+  const target = derivedTarget(index, tags);
   const priorSegmentIds = db.query(
     "SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id = ?"
   ).all(turnId).map((row) => row.segmentId);
-  if (priorSegmentIds.length === (target === null ? 0 : 1) && priorSegmentIds[0] === target) {
+  const frozen = new Set(operation === "forced-detach" ? [] : frozenOwnerSegmentIds(db, turnId));
+  if (operation === "normal") {
+    const owner = [...frozen].find((id) => id !== target);
+    if (target !== null && owner !== void 0) {
+      throw new MembershipFrozenOwnerError(
+        turnId,
+        owner,
+        target,
+        formatFrozenOwnerRefusal(db, turnId, owner, target)
+      );
+    }
+  }
+  const removable = priorSegmentIds.filter((id) => id !== target && !frozen.has(id));
+  const alreadyThere = target !== null && priorSegmentIds.includes(target);
+  if (removable.length === 0 && (target === null || alreadyThere)) {
     return target;
   }
-  db.query("DELETE FROM segment_members WHERE turn_id = ?").run(turnId);
-  if (target !== null) {
+  if (removable.length > 0) {
+    const placeholders = removable.map(() => "?").join(",");
+    db.query(
+      `DELETE FROM segment_members WHERE turn_id = ? AND segment_id IN (${placeholders})`
+    ).run(turnId, ...removable);
+  }
+  if (target !== null && !alreadyThere) {
     addSegmentMembers(db, target, [turnId], nowEpoch);
   }
-  for (const segmentId of priorSegmentIds.filter((id) => id !== target)) {
+  for (const segmentId of removable) {
     recomputeSegmentFacets(db, segmentId);
   }
   return target;
@@ -2668,6 +2718,12 @@ function addSegmentMembers(db, segmentId, turnIds, nowEpoch) {
     recomputeSegmentFacets(db, segmentId);
   }
   return added;
+}
+function turnAddress(db, turnId) {
+  const row = db.query(
+    "SELECT session_id AS sessionId, prompt_number AS promptNumber FROM turns WHERE id = ?"
+  ).get(turnId);
+  return row ? `S${row.sessionId}/T${row.promptNumber}` : `turn #${turnId}`;
 }
 function getSegmentsForTurn(db, turnId) {
   return db.query(
@@ -20622,7 +20678,7 @@ function readSettlementFrozenScope(db, jobId) {
 function laneAddress(lane) {
   return laneSnapshotKey(lane.segmentId, lane.laneTag);
 }
-function turnAddress(db, turnId) {
+function turnAddress2(db, turnId) {
   const turn = getTurnById(db, turnId);
   return turn ? `S${turn.sessionId}/T${turn.promptNumber}` : `turn #${turnId}`;
 }
@@ -20639,24 +20695,24 @@ function buildSettlementWorklistRendering(db, jobId) {
     }
     const existing = homelessByGroup.get(disposition.groupId);
     if (existing) {
-      existing.memberAddresses.push(turnAddress(db, turnId));
+      existing.memberAddresses.push(turnAddress2(db, turnId));
       continue;
     }
     homelessByGroup.set(disposition.groupId, {
       label: disposition.canonicalLabel,
       reason: disposition.reason,
-      memberAddresses: [turnAddress(db, turnId)]
+      memberAddresses: [turnAddress2(db, turnId)]
     });
   }
   return {
     lanes: scope.worklist.map((lane) => ({
       address: laneAddress(lane),
-      memberAddresses: (scope.laneMembers.get(laneSnapshotKey(lane.segmentId, lane.laneTag)) ?? []).map((turnId) => turnAddress(db, turnId))
+      memberAddresses: (scope.laneMembers.get(laneSnapshotKey(lane.segmentId, lane.laneTag)) ?? []).map((turnId) => turnAddress2(db, turnId))
     })),
     debts: scope.debts.map((debt) => ({
       edgeId: debt.edgeId,
       removedLaneTag: debt.removedLaneTag,
-      citingAddress: turnAddress(db, debt.citingTurnId)
+      citingAddress: turnAddress2(db, debt.citingTurnId)
     })),
     homeless: [...homelessByGroup.values()]
   };
@@ -23517,7 +23573,7 @@ function buildMeta(input) {
     interval: input.interval
   };
 }
-function turnAddress2(turn) {
+function turnAddress3(turn) {
   return turn.address || `S${turn.sessionId}/T${turn.promptNumber}`;
 }
 function handleSessionsRoute(reader, url, ctx) {
@@ -23842,8 +23898,8 @@ function applyGraphAutoInterval(input) {
     return {
       fromTurnId: first.id,
       toTurnId: last.id,
-      fromAddress: turnAddress2(first),
-      toAddress: turnAddress2(last),
+      fromAddress: turnAddress3(first),
+      toAddress: turnAddress3(last),
       isOldest: first.id === fullOldestId,
       isNewest: last.id === fullNewestId
     };
@@ -23942,8 +23998,8 @@ function applyGraphAutoInterval(input) {
     const candidateInterval = {
       fromTurnId: candidateTurn.id,
       toTurnId: (newestIncluded ?? candidateTurn).id,
-      fromAddress: turnAddress2(candidateTurn),
-      toAddress: turnAddress2(newestIncluded ?? candidateTurn),
+      fromAddress: turnAddress3(candidateTurn),
+      toAddress: turnAddress3(newestIncluded ?? candidateTurn),
       isOldest: candidateTurn.id === fullOldestId,
       isNewest: (newestIncluded ?? candidateTurn).id === fullNewestId
     };
@@ -24000,7 +24056,7 @@ function applyPostIntervalCountBounds(input) {
     edges = edges.filter((e) => keptIds.has(e.citingId) && keptIds.has(e.citedId));
     if (interval && turns.length > 0) {
       const newOldest = turns[0];
-      interval = { ...interval, fromTurnId: newOldest.id, fromAddress: turnAddress2(newOldest), isOldest: false };
+      interval = { ...interval, fromTurnId: newOldest.id, fromAddress: turnAddress3(newOldest), isOldest: false };
     }
     stateCoverage = "partial";
   }

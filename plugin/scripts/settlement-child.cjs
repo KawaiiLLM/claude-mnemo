@@ -39211,7 +39211,32 @@ function setSegmentTag(db, segmentId, tag, nowEpoch) {
   const updated = setSegmentTags(db, segmentId, normalized, nowEpoch);
   return updated ? { ok: true, segment: updated } : { ok: false, message: `E${segmentId} no longer exists.` };
 }
-function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
+function frozenOwnerSegmentIds(db, turnId) {
+  return db.query(
+    `SELECT sm.segment_id AS segmentId
+         FROM segment_members sm
+         JOIN segments s ON s.id = sm.segment_id
+        WHERE sm.turn_id = ?
+          AND json_array_length(s.tags) = 0
+        ORDER BY sm.segment_id ASC`
+  ).all(turnId).map((row) => row.segmentId);
+}
+var MembershipFrozenOwnerError = class extends Error {
+  constructor(turnId, frozenSegmentId, wouldJoinSegmentId, message) {
+    super(message);
+    this.turnId = turnId;
+    this.frozenSegmentId = frozenSegmentId;
+    this.wouldJoinSegmentId = wouldJoinSegmentId;
+    this.name = "MembershipFrozenOwnerError";
+  }
+  turnId;
+  frozenSegmentId;
+  wouldJoinSegmentId;
+};
+function formatFrozenOwnerRefusal(db, turnId, frozenSegmentId, wouldJoinSegmentId) {
+  return `${turnAddress2(db, turnId)} is owned by unnamed E${frozenSegmentId}; name it or detach first. Legacy ownership is frozen \u2014 it is never extended, so this turn cannot also join E${wouldJoinSegmentId}. remember(retag, id="E${frozenSegmentId}", tag=\u2026) names it and thaws its members into the single truth; remember(clear, id="E${frozenSegmentId}") detaches them.`;
+}
+function segmentTagIndex(db) {
   const index = /* @__PURE__ */ new Map();
   for (const row of db.query(
     `SELECT id, json_extract(tags, '$[0]') AS tag
@@ -39221,28 +39246,143 @@ function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch) {
       index.set(row.tag, row.id);
     }
   }
-  let target = null;
+  return index;
+}
+function derivedTarget(index, tags) {
   for (const tag of tags) {
     const segmentId = index.get(tag);
     if (segmentId !== void 0) {
-      target = segmentId;
-      break;
+      return segmentId;
     }
   }
+  return null;
+}
+function checkMembershipTagWrite(db, turnId, tags, operation = "normal") {
+  if (operation !== "normal") {
+    return null;
+  }
+  const target = derivedTarget(segmentTagIndex(db), tags);
+  if (target === null) {
+    return null;
+  }
+  const frozen = frozenOwnerSegmentIds(db, turnId);
+  const owner = frozen.find((id) => id !== target);
+  return owner === void 0 ? null : formatFrozenOwnerRefusal(db, turnId, owner, target);
+}
+function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch, operation = "normal") {
+  const index = segmentTagIndex(db);
+  const target = derivedTarget(index, tags);
   const priorSegmentIds = db.query(
     "SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id = ?"
   ).all(turnId).map((row) => row.segmentId);
-  if (priorSegmentIds.length === (target === null ? 0 : 1) && priorSegmentIds[0] === target) {
+  const frozen = new Set(operation === "forced-detach" ? [] : frozenOwnerSegmentIds(db, turnId));
+  if (operation === "normal") {
+    const owner = [...frozen].find((id) => id !== target);
+    if (target !== null && owner !== void 0) {
+      throw new MembershipFrozenOwnerError(
+        turnId,
+        owner,
+        target,
+        formatFrozenOwnerRefusal(db, turnId, owner, target)
+      );
+    }
+  }
+  const removable = priorSegmentIds.filter((id) => id !== target && !frozen.has(id));
+  const alreadyThere = target !== null && priorSegmentIds.includes(target);
+  if (removable.length === 0 && (target === null || alreadyThere)) {
     return target;
   }
-  db.query("DELETE FROM segment_members WHERE turn_id = ?").run(turnId);
-  if (target !== null) {
+  if (removable.length > 0) {
+    const placeholders = removable.map(() => "?").join(",");
+    db.query(
+      `DELETE FROM segment_members WHERE turn_id = ? AND segment_id IN (${placeholders})`
+    ).run(turnId, ...removable);
+  }
+  if (target !== null && !alreadyThere) {
     addSegmentMembers(db, target, [turnId], nowEpoch);
   }
-  for (const segmentId of priorSegmentIds.filter((id) => id !== target)) {
+  for (const segmentId of removable) {
     recomputeSegmentFacets(db, segmentId);
   }
   return target;
+}
+function writeMembershipTags(db, input) {
+  const { operation, writes, nowEpoch } = input;
+  if (writes.length === 0) {
+    return { ok: true, operation, changedTurnIds: [], membership: [] };
+  }
+  const index = segmentTagIndex(db);
+  const refusals = [];
+  for (const write of writes) {
+    const target = derivedTarget(index, write.tags);
+    if (operation === "normal") {
+      const owner = frozenOwnerSegmentIds(db, write.turnId).find((id) => id !== target);
+      if (target !== null && owner !== void 0) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress2(db, write.turnId),
+          message: formatFrozenOwnerRefusal(db, write.turnId, owner, target)
+        });
+        continue;
+      }
+    }
+    if (operation === "thaw-owner" && input.thawingSegmentId !== void 0) {
+      if (target !== input.thawingSegmentId) {
+        refusals.push({
+          turnId: write.turnId,
+          address: turnAddress2(db, write.turnId),
+          message: `thaw-owner may only move a member into E${input.thawingSegmentId}, the task being named \u2014 this write derives into ${target === null ? "no task" : `E${target}`}.`
+        });
+        continue;
+      }
+    }
+    const strandings = findMembershipLaneStrandings(db, [write.turnId], target);
+    if (strandings.length > 0) {
+      refusals.push({
+        turnId: write.turnId,
+        address: turnAddress2(db, write.turnId),
+        message: formatMembershipLaneStrandingRejection(db, target, strandings)
+      });
+    }
+  }
+  if (refusals.length > 0) {
+    return {
+      ok: false,
+      refusals,
+      message: `${refusals.length} of ${writes.length} turn(s) refused; nothing was written. ` + refusals.map((entry) => `${entry.address}: ${entry.message}`).join(" ")
+    };
+  }
+  const readTags = db.query(
+    "SELECT tags FROM turns WHERE id = ?"
+  );
+  const updateTurnTags = db.query(
+    "UPDATE turns SET tags = ? WHERE id = ?"
+  );
+  const changedTurnIds = [];
+  const membership = [];
+  for (const write of writes) {
+    const raw = readTags.get(write.turnId)?.tags ?? "[]";
+    let stored;
+    try {
+      const parsed = JSON.parse(raw);
+      stored = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      stored = [];
+    }
+    const next = [...write.tags];
+    const moved = next.length !== stored.length || next.some((value, at) => value !== stored[at]);
+    if (moved) {
+      updateTurnTags.run(JSON.stringify(next), write.turnId);
+      stampField(db, "turn", write.turnId, "tags", input.writer ?? ANONYMOUS_WRITER, nowEpoch);
+      changedTurnIds.push(write.turnId);
+    }
+    const segmentId = deriveTurnSegmentMembership(db, write.turnId, next, nowEpoch, operation);
+    membership.push({ turnId: write.turnId, segmentId });
+    if (moved) {
+      recomputeSegmentFacetsForTurn(db, write.turnId);
+    }
+  }
+  return { ok: true, operation, changedTurnIds, membership };
 }
 function recomputeSegmentFacetsForTurn(db, turnId) {
   const rows = db.query(
@@ -39385,31 +39525,6 @@ function formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings)
   const destination = targetSegmentId === null ? "no segment (homeless)" : `E${targetSegmentId}`;
   return `Refused: moving to ${destination} would strand ${strandings.length} tagged edge(s), so nothing was moved \u2014 ${clauses.join("; ")}. Mint the lane in the destination segment first (remember create, id="E<n>/#<tag>"), or retract the edge.`;
 }
-function reassignSegmentMembers(db, turnIds, targetSegmentId, nowEpoch) {
-  if (turnIds.length === 0) {
-    return { ok: true, vacatedSegmentIds: [], addedTurnIds: [], targetSegmentId };
-  }
-  const strandings = findMembershipLaneStrandings(db, turnIds, targetSegmentId);
-  if (strandings.length > 0) {
-    return {
-      ok: false,
-      message: formatMembershipLaneStrandingRejection(db, targetSegmentId, strandings)
-    };
-  }
-  const placeholders = turnIds.map(() => "?").join(",");
-  const priorSegmentIds = db.query(
-    `SELECT DISTINCT segment_id AS segmentId FROM segment_members WHERE turn_id IN (${placeholders})`
-  ).all(...turnIds).map((row) => row.segmentId);
-  db.query(
-    `DELETE FROM segment_members WHERE turn_id IN (${placeholders})`
-  ).run(...turnIds);
-  const addedTurnIds = targetSegmentId === null ? [] : addSegmentMembers(db, targetSegmentId, turnIds, nowEpoch);
-  const vacatedSegmentIds = priorSegmentIds.filter((id) => id !== targetSegmentId);
-  for (const segmentId of vacatedSegmentIds) {
-    recomputeSegmentFacets(db, segmentId);
-  }
-  return { ok: true, vacatedSegmentIds, addedTurnIds, targetSegmentId };
-}
 function getSegmentMemberTurnIds(db, segmentId) {
   return db.query(
     `SELECT sm.turn_id AS turnId
@@ -39526,9 +39641,7 @@ function clearSegmentMembers(db, segmentId, nowEpoch) {
   const readTags = db.query(
     "SELECT tags FROM turns WHERE id = ?"
   );
-  const updateTurnTags = db.query(
-    "UPDATE turns SET tags = ? WHERE id = ?"
-  );
+  const writes = [];
   for (const turnId of memberTurnIds) {
     const raw = readTags.get(turnId)?.tags ?? "[]";
     let stored;
@@ -39538,12 +39651,12 @@ function clearSegmentMembers(db, segmentId, nowEpoch) {
     } catch {
       stored = [];
     }
-    const next = ownTag !== null ? stored.filter((value) => value !== ownTag) : stored;
-    if (next.length !== stored.length) {
-      updateTurnTags.run(JSON.stringify(next), turnId);
-    }
-    deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+    writes.push({
+      turnId,
+      tags: ownTag !== null ? stored.filter((value) => value !== ownTag) : stored
+    });
   }
+  writeMembershipTags(db, { operation: "forced-detach", writes, nowEpoch });
   return memberTurnIds.length;
 }
 function deleteSegmentRow(db, segmentId) {
@@ -39641,19 +39754,18 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
         message: `E${intoId} has no task tag, and membership is derived from one \u2014 moving E${fromId}'s ${memberTurnIds.length} member turn(s) there would leave every one of them unowned. Name E${intoId} first (remember(retag, id="E${intoId}", tag=\u2026)), then merge.`
       };
     }
-    const moved = reassignSegmentMembers(db, memberTurnIds, intoId, nowEpoch);
-    if (!moved.ok) {
-      return { kind: "members-blocked", message: moved.message };
+    if (fromTag === null) {
+      return {
+        kind: "members-blocked",
+        message: `E${fromId} has no task tag, so its ${memberTurnIds.length} member turn(s) are FROZEN legacy ownership \u2014 membership is derived from a task tag and none put them there. Name the source first (remember(retag, id="E${fromId}", tag=\u2026)), which thaws them into the single truth, then merge. remember(clear, id="E${fromId}") detaches them instead.`
+      };
     }
-    membersMoved = memberTurnIds.length;
     const intoSegment = getSegment(db, intoId);
     const intoTag = intoSegment ? segmentTagOf(intoSegment) : null;
     const readTags = db.query(
       "SELECT tags FROM turns WHERE id = ?"
     );
-    const updateTurnTags = db.query(
-      "UPDATE turns SET tags = ? WHERE id = ?"
-    );
+    const writes = [];
     for (const turnId of memberTurnIds) {
       const raw = readTags.get(turnId)?.tags ?? "[]";
       let stored;
@@ -39663,16 +39775,21 @@ function mergeSegments(db, fromId, intoId, nowEpoch, options = {}) {
       } catch {
         stored = [];
       }
-      let next = fromTag !== null ? stored.filter((value) => value !== fromTag) : stored.slice();
+      let next = stored.filter((value) => value !== fromTag);
       if (intoTag !== null && !next.includes(intoTag)) {
         next = [intoTag, ...next];
       }
-      const changed = next.length !== stored.length || next.some((value, index) => value !== stored[index]);
-      if (changed) {
-        updateTurnTags.run(JSON.stringify(next), turnId);
-      }
-      deriveTurnSegmentMembership(db, turnId, next, nowEpoch);
+      writes.push({ turnId, tags: next });
     }
+    const moved = writeMembershipTags(db, {
+      operation: "normal",
+      writes,
+      nowEpoch
+    });
+    if (!moved.ok) {
+      return { kind: "members-blocked", message: moved.message };
+    }
+    membersMoved = memberTurnIds.length;
   }
   const stillCarrying = fromTag !== null ? db.query(
     `SELECT t.id AS id FROM turns t
@@ -40050,10 +40167,8 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
               END
         ORDER BY t.id ASC`
   ).all(segmentId, from);
-  const updateTurnTags = db.query(
-    "UPDATE turns SET tags = ? WHERE id = ?"
-  );
   let turnsDeduplicated = 0;
+  const memberWrites = [];
   for (const turn of memberTurns) {
     const stored = JSON.parse(turn.tags).filter(
       (tag) => typeof tag === "string"
@@ -40068,9 +40183,9 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
         next.push(rewritten);
       }
     }
-    updateTurnTags.run(JSON.stringify(next), turn.id);
-    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
+    memberWrites.push({ turnId: turn.id, tags: next });
   }
+  writeMembershipTags(db, { operation: "normal", writes: memberWrites, nowEpoch });
   const stillCarrying = db.query(
     `SELECT t.id AS id FROM turns t
         WHERE CASE
@@ -40278,17 +40393,14 @@ function clearLane(db, segmentId, tag, nowEpoch, force) {
               END
         ORDER BY t.id ASC`
   ).all(segmentId, tag);
-  const updateTurnTags = db.query(
-    "UPDATE turns SET tags = ? WHERE id = ?"
-  );
-  for (const turn of memberTurns) {
-    const stored = JSON.parse(turn.tags).filter(
-      (value) => typeof value === "string"
-    );
-    const next = stored.filter((value) => value !== tag);
-    updateTurnTags.run(JSON.stringify(next), turn.id);
-    deriveTurnSegmentMembership(db, turn.id, next, nowEpoch);
-  }
+  writeMembershipTags(db, {
+    operation: "normal",
+    writes: memberTurns.map((turn) => ({
+      turnId: turn.id,
+      tags: JSON.parse(turn.tags).filter((value) => typeof value === "string").filter((value) => value !== tag)
+    })),
+    nowEpoch
+  });
   const dropSideTagRows = db.query(
     "DELETE FROM memory_edge_side_tags WHERE edge_row_id = ?"
   );
@@ -48997,6 +49109,10 @@ function handleTurnWrite(db, address, input, options) {
           fail2(gate.message);
         }
         tagsResolution.value = gate.effectiveTags;
+        const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+        if (frozen !== null) {
+          fail2(frozen);
+        }
         topics = gate.topics;
         priorOwningSegmentId = getOwningSegmentId(db, turn.id);
       }
@@ -51575,6 +51691,18 @@ function resolveMemberAddresses(db, addresses) {
   }
   return { turnIds: accepted.map((entry) => entry.node.id), rejections };
 }
+function memberTagsOf(db, turnId) {
+  const raw = db.query("SELECT tags FROM turns WHERE id = ?").get(turnId)?.tags;
+  if (typeof raw !== "string") {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
 function handleCreate(db, input, options) {
   if (input.id !== void 0 && input.id !== null) {
     if (typeof input.id !== "string" || input.id.trim() === "") {
@@ -51582,7 +51710,7 @@ function handleCreate(db, input, options) {
         'id must be a lane address ("E<n>/#<tag>") when present \u2014 omit it to mint a task instead.'
       );
     }
-    return handleCreateLane(db, input.id, options);
+    return handleCreateLane(db, input.id, input, options);
   }
   let title;
   let goal;
@@ -51613,6 +51741,11 @@ function handleCreate(db, input, options) {
       }
     } else {
       fail3("tag must be a single string when present \u2014 the segment's one globally unique tag.");
+    }
+    if (memberAddresses.length > 0 && tags.length === 0) {
+      fail3(
+        "members needs a tag \u2014 membership is derived from the task's own tag, so a task with no name can hold no members. Pass tag=\u2026 in this same call, or create the task first and name it with remember(retag) before seeding it."
+      );
     }
   } catch (error49) {
     if (error49 instanceof RememberValidationError) {
@@ -51651,7 +51784,14 @@ function handleCreate(db, input, options) {
         nowEpoch
       });
       if (turnIds.length > 0) {
-        const seeded = reassignSegmentMembers(db, turnIds, segment.id, nowEpoch);
+        const seeded = writeMembershipTags(db, {
+          operation: "normal",
+          writes: turnIds.map((turnId) => ({
+            turnId,
+            tags: [wanted, ...memberTagsOf(db, turnId).filter((value) => value !== wanted)]
+          })),
+          nowEpoch
+        });
         if (!seeded.ok) {
           fail3(seeded.message);
         }
@@ -51707,7 +51847,7 @@ function parseLaneCreateAddress(raw) {
   }
   return { ok: true, segmentId: Number(match[1]), tag };
 }
-function handleCreateLane(db, rawId, options) {
+function handleCreateLane(db, rawId, input, options) {
   const parsed = parseLaneCreateAddress(rawId);
   if (!parsed.ok) {
     return parameterError2(parsed.message);
@@ -51726,34 +51866,73 @@ function handleCreateLane(db, rawId, options) {
       `E${segment.id} is closed \u2014 a lane may only be created on an open segment; remember(close, id="E${segment.id}") reopens it.`
     );
   }
+  let memberAddresses = [];
+  if (input.members !== void 0) {
+    if (!Array.isArray(input.members) || !input.members.every((value) => typeof value === "string")) {
+      return parameterError2("members must be an array of strings when present.");
+    }
+    memberAddresses = input.members;
+  }
+  const parentTag = segmentTagOf(segment);
+  if (memberAddresses.length > 0 && parentTag === null) {
+    return parameterError2(
+      `E${segment.id} has no task tag, so a lane inside it can take no members \u2014 a lane tag rides only on a turn that already carries its task's tag. Name the task first (remember(retag, id="E${segment.id}", tag=\u2026)), then seed the lane. Nothing was written.`
+    );
+  }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(db, () => {
-    const existing = getLane(db, segmentId, tag);
-    if (existing) {
-      return { kind: "duplicate", lane: existing };
-    }
-    const fresh = getSegment(db, segmentId);
-    if (fresh?.tags.includes(tag)) {
-      return { kind: "curated-collision" };
-    }
-    const holder = findTagNamespaceHolder(db, "lane", tag);
-    if (holder) {
-      return { kind: "namespace-collision", message: formatTagNamespaceRefusal("lane", holder) };
-    }
-    const conscripted = countTurnsCarryingTag(db, tag, segmentId);
-    const lane = insertLane(db, segmentId, tag, nowEpoch);
-    if (!lane) {
-      return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
-    }
-    insertImpressionDebt(db, {
-      segmentId,
-      laneTag: tag,
-      kind: "declare",
-      nowEpoch
+  let outcome;
+  try {
+    outcome = writeTransaction(db, () => {
+      const existing = getLane(db, segmentId, tag);
+      if (existing) {
+        return { kind: "duplicate", lane: existing };
+      }
+      const fresh = getSegment(db, segmentId);
+      if (fresh?.tags.includes(tag)) {
+        return { kind: "curated-collision" };
+      }
+      const holder = findTagNamespaceHolder(db, "lane", tag);
+      if (holder) {
+        return { kind: "namespace-collision", message: formatTagNamespaceRefusal("lane", holder) };
+      }
+      const conscripted = countTurnsCarryingTag(db, tag, segmentId);
+      const lane = insertLane(db, segmentId, tag, nowEpoch);
+      if (!lane) {
+        return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
+      }
+      insertImpressionDebt(db, {
+        segmentId,
+        laneTag: tag,
+        kind: "declare",
+        nowEpoch
+      });
+      let membersSeeded = 0;
+      if (memberAddresses.length > 0) {
+        const { turnIds, rejections } = resolveMemberAddresses(db, memberAddresses);
+        if (rejections.length > 0) {
+          fail3(formatMemberRejections(rejections));
+        }
+        const writes = turnIds.map((turnId) => {
+          const stored = memberTagsOf(db, turnId).filter(
+            (value) => value !== parentTag && value !== tag
+          );
+          return { turnId, tags: [parentTag, tag, ...stored] };
+        });
+        const seeded2 = writeMembershipTags(db, { operation: "normal", writes, nowEpoch });
+        if (!seeded2.ok) {
+          fail3(seeded2.message);
+        }
+        membersSeeded = turnIds.length;
+      }
+      return { kind: "created", lane, conscripted, membersSeeded };
     });
-    return { kind: "created", lane, conscripted };
-  });
+  } catch (error49) {
+    if (error49 instanceof RememberValidationError) {
+      return parameterError2(`${error49.message} Nothing was written.`);
+    }
+    throw error49;
+  }
   if (outcome.kind === "duplicate") {
     return parameterError2(
       `E${segmentId} already declares lane "${tag}" (lane #${outcome.lane.id}).`
@@ -51769,8 +51948,9 @@ function handleCreateLane(db, rawId, options) {
   }
   const { total, inSegment } = outcome.conscripted;
   const conscription = total === 0 ? " No existing turn carries that word." : ` ${total} existing turn(s) already carry "${tag}"${inSegment === total ? "" : `, ${inSegment} of them in E${segmentId}`} \u2014 they are its members from now on. A large number means the word is too generic to be a lane; remember(delete, id="E${segmentId}/#${tag}") takes it back.`;
+  const seeded = outcome.membersSeeded > 0 ? ` ${outcome.membersSeeded} member(s) seeded \u2014 each now carries "${parentTag}" and "${tag}".` : "";
   return textResult2(
-    `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}`
+    `Created lane "${tag}" on E${segmentId} (lane #${outcome.lane.id}).${conscription}${seeded}`
   );
 }
 var SEGMENT_ATTACH_MENU_LIMIT = 50;
@@ -52128,24 +52308,59 @@ function handleRetag(db, input, options) {
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
-  const outcome = writeTransaction(db, () => {
-    const named2 = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
-    if (named2.ok) {
-      insertImpressionDebt(db, {
-        segmentId: resolution.segment.id,
-        laneTag: null,
-        kind: "task-retag",
-        nowEpoch
-      });
+  const priorTag = segmentTagOf(resolution.segment);
+  const ownedMemberIds = getSegmentMemberTurnIds(db, resolution.segment.id);
+  if (tag === null && priorTag !== null && ownedMemberIds.length > 0) {
+    return parameterError2(
+      `E${resolution.segment.id} owns ${ownedMemberIds.length} member turn(s), so its tag cannot be cleared \u2014 membership is derived from that word, and unnaming the task would turn every one of them into frozen legacy ownership no tag explains. remember(clear, id="E${resolution.segment.id}") detaches them first, explicitly. Nothing was written.`
+    );
+  }
+  let retaggedMembers = 0;
+  let outcome;
+  try {
+    outcome = writeTransaction(db, () => {
+      const named2 = setSegmentTag(db, resolution.segment.id, tag, nowEpoch);
+      if (named2.ok && tag !== null && ownedMemberIds.length > 0) {
+        const writes = ownedMemberIds.map((turnId) => {
+          const stored = memberTagsOf(db, turnId).filter(
+            (value) => value !== tag && value !== priorTag
+          );
+          return { turnId, tags: [tag, ...stored] };
+        });
+        const moved = writeMembershipTags(db, {
+          operation: priorTag === null ? "thaw-owner" : "normal",
+          writes,
+          nowEpoch,
+          thawingSegmentId: priorTag === null ? resolution.segment.id : void 0
+        });
+        if (!moved.ok) {
+          fail3(moved.message);
+        }
+        retaggedMembers = ownedMemberIds.length;
+      }
+      if (named2.ok) {
+        insertImpressionDebt(db, {
+          segmentId: resolution.segment.id,
+          laneTag: null,
+          kind: "task-retag",
+          nowEpoch
+        });
+      }
+      return named2;
+    });
+  } catch (error49) {
+    if (error49 instanceof RememberValidationError) {
+      return parameterError2(`${error49.message} Nothing was written.`);
     }
-    return named2;
-  });
+    throw error49;
+  }
   if (!outcome.ok) {
     return parameterError2(outcome.message);
   }
   const named = segmentTagOf(outcome.segment);
+  const memberClause = retaggedMembers === 0 ? " It owns no member turns." : priorTag === null ? ` ${retaggedMembers} frozen member turn(s) thawed \u2014 each now carries "${named}".` : ` ${retaggedMembers} member turn(s) re-tagged from "${priorTag}" to "${named}".`;
   return textResult2(
-    named === null ? `Cleared E${outcome.segment.id}'s segment tag \u2014 nothing derives into it until it is named again. Existing members are untouched.` : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment; existing members are untouched.`
+    named === null ? `Cleared E${outcome.segment.id}'s segment tag \u2014 nothing derives into it until it is named again. It owned no members, so no legacy ownership was minted.` : `E${outcome.segment.id} is now "${named}". A turn carrying that tag belongs to this segment.` + memberClause
   );
 }
 function handleRetagLane(db, segmentId, rawFromTag, input, options) {
@@ -54821,6 +55036,34 @@ function formatSessionFieldUsage(field, storedValue) {
 var settlementTurnWriteInputShape = {
   ...settlementNoteInputShape,
   /**
+   * THE BATCH TAG WRITE (settlement-read-once spec D4, user stories 5–8;
+   * RULED T2386 — a batch of TAGS, and no assignment verb). SETTLEMENT-ONLY,
+   * and that is a scope decision rather than an accident of where the key was
+   * typed: every user story behind it is the settlement writer's, and the
+   * public per-turn `note` stays exactly as it is (story 13). It therefore
+   * lands on THIS shape and never on `noteInputShape`, the same one-ticket
+   * discipline `typeReason` above states.
+   *
+   * `note(turns: ["S12/T4", …], task: "E7", addTags: ["#pager"])` — tags-only,
+   * ADDITIVE, all-or-nothing, one transaction. `turns` and `turn` are mutually
+   * exclusive, and any other content field beside `turns` refuses.
+   */
+  turns: external_exports.array(external_exports.string().min(1)).min(1).optional().describe(
+    'The turns this one call tags \u2014 fully qualified "S<session>/T<prompt>" addresses. Requires task and addTags, refuses every other field, and is mutually exclusive with turn. The write is ADDITIVE (each turn keeps its topic: words and whatever else it carries) and ALL-OR-NOTHING: one member that fails a check means nothing is written and every failure is named, so one repair call fixes the batch.'
+  ),
+  /**
+   * The batch's explicit task coordinate. There is no per-member owner
+   * inference: the task tag that rides along is THIS task's, every `addTags`
+   * entry must be a lane declared in THIS task, and a member already carrying
+   * a DIFFERENT task's tag refuses the batch naming it.
+   */
+  task: external_exports.string().min(1).optional().describe(
+    `The task these turns belong to, as "E<n>". Its own tag rides along onto any member that lacks one, every addTags entry must be a lane declared in it, and a member already carrying a DIFFERENT task's tag refuses the whole batch naming it. Batch writes only.`
+  ),
+  addTags: external_exports.array(external_exports.string().min(1)).min(1).optional().describe(
+    "The lane tags to ADD to every turn in turns \u2014 each one a lane DECLARED in task. Nothing is ever removed by this call. Batch writes only."
+  ),
+  /**
    * STAGED-SETTLEMENT TICKET 06 (spec Rev 5, §`topic:` grammar — "the only
    * removal path is stage 1's explicit correction form"). The gate has taken
    * `retiringTopicTag` since ticket 01 and `mcp/note.ts` has passed it since
@@ -55019,6 +55262,169 @@ function recordHomelessMotivatedRetractions(db, context, deleted, restored, nowE
     });
   }
 }
+var BATCH_ALLOWED_KEYS = /* @__PURE__ */ new Set(["turns", "task", "addTags"]);
+function evaluateSettlementBatchTagWrite(db, context, rawInput, nowEpoch) {
+  const stray = Object.keys(rawInput).filter(
+    (key) => rawInput[key] !== void 0 && !BATCH_ALLOWED_KEYS.has(key)
+  );
+  if (stray.length > 0) {
+    return {
+      ok: false,
+      message: `the batch tag write is TAGS-ONLY \u2014 ${stray.sort().join(", ")} may not ride along with turns. Write the tags in one call, then correct fields per turn with the ordinary form.`
+    };
+  }
+  const addresses = rawInput.turns ?? [];
+  if (rawInput.task === void 0 || rawInput.addTags === void 0) {
+    return {
+      ok: false,
+      message: "the batch tag write requires turns, task and addTags together."
+    };
+  }
+  const taskRef = parseBareAddressReference(rawInput.task.trim());
+  if (!taskRef || taskRef.kind !== "segment") {
+    return { ok: false, message: `task must be an "E<n>" task address; got "${rawInput.task}".` };
+  }
+  const segmentId = taskRef.segmentId;
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return { ok: false, message: `no task E${segmentId}.` };
+  }
+  const taskTag = segmentTagOf(segment);
+  if (taskTag === null) {
+    return {
+      ok: false,
+      message: `E${segmentId} has no task tag, and membership is derived from one \u2014 an unnamed task takes no members. Name it first, in front of the user; a headless run does not open or name a container because nothing fit.`
+    };
+  }
+  const declared = loadDeclaredLaneTags(db, segmentId);
+  const addTags = [...new Set(rawInput.addTags.map((tag) => tag.trim()))];
+  const undeclared = addTags.filter((tag) => !declared.has(tag));
+  if (undeclared.length > 0) {
+    return {
+      ok: false,
+      message: `${undeclared.map((tag) => JSON.stringify(tag)).join(", ")} ${undeclared.length === 1 ? "is not a lane" : "are not lanes"} declared in E${segmentId} \u2014 every addTags entry must be one. Declared there now: ${declared.size === 0 ? "(none)" : [...declared].sort().join(", ")}.`
+    };
+  }
+  if (addTags.includes(taskTag)) {
+    return {
+      ok: false,
+      message: `"${taskTag}" is E${segmentId}'s own task tag, not a lane \u2014 it rides along automatically onto any member that lacks it. Name only lanes in addTags.`
+    };
+  }
+  const writer = claimWriterId(context.jobId, context.claimGeneration, context.stage);
+  const segmentTags = loadSegmentTagIndex(db);
+  const members = [];
+  const failures = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of addresses) {
+    const parsed = parseTurnAddress(raw);
+    if (!parsed) {
+      failures.push(`"${raw}": not a fully qualified "S<session>/T<prompt>" address`);
+      continue;
+    }
+    const ref = `S${parsed.sessionId}/T${parsed.promptNumber}`;
+    if (seen.has(ref)) {
+      failures.push(`${ref}: named twice in the same batch`);
+      continue;
+    }
+    seen.add(ref);
+    const turn = getTurn(db, parsed.sessionId, parsed.promptNumber);
+    if (!turn) {
+      failures.push(`${ref}: no such turn`);
+      continue;
+    }
+    if (turn.type.includes("compact")) {
+      failures.push(`${ref}: a compact marker, not a turn`);
+      continue;
+    }
+    if (!context.reviewableTurnIds.has(turn.id)) {
+      failures.push(`${ref}: outside this dispatch's reviewable window`);
+      continue;
+    }
+    if (!settlementTurnPermissions(context.writableProvenance, turn.id).fields) {
+      failures.push(
+        `${ref}: writable to this dispatch for its RELATIONS ONLY \u2014 its tags belong to whichever window owns this turn's fields`
+      );
+      continue;
+    }
+    const foreign = turn.tags.find((tag) => segmentTags.has(tag) && tag !== taskTag);
+    if (foreign !== void 0) {
+      failures.push(
+        `${ref}: already carries "${foreign}", which is E${segmentTags.get(foreign)}'s task tag \u2014 this batch names E${segmentId}, and a turn belongs to at most one task. There is no assignment verb: correct the turn's own tags first if it belongs here`
+      );
+      continue;
+    }
+    const nextTags = [...turn.tags];
+    if (!nextTags.includes(taskTag)) {
+      nextTags.push(taskTag);
+    }
+    for (const tag of addTags) {
+      if (!nextTags.includes(tag)) {
+        nextTags.push(tag);
+      }
+    }
+    const gate = checkTurnTagWrite(db, { nextTags, priorTags: turn.tags });
+    if (!gate.ok) {
+      failures.push(`${ref}: ${gate.message}`);
+      continue;
+    }
+    const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+    if (frozen !== null) {
+      failures.push(`${ref}: ${frozen}`);
+      continue;
+    }
+    const verdict = checkFieldGate(db, writer, "turn", turn.id, "tags", ref);
+    if (!verdict.ok) {
+      failures.push(`${ref}: ${verdict.message}`);
+      continue;
+    }
+    members.push({ ref, turn, nextTags: gate.effectiveTags });
+  }
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      message: `${failures.length} of ${addresses.length} turn(s) refused, so NOTHING was written \u2014 ${failures.join("; ")}. Fix every one of them and resend the batch.`
+    };
+  }
+  if (members.length === 0) {
+    return { ok: false, message: "turns named no addresses." };
+  }
+  const written = writeMembershipTags(db, {
+    operation: "normal",
+    writes: members.map((member) => ({ turnId: member.turn.id, tags: member.nextTags })),
+    writer,
+    nowEpoch
+  });
+  if (!written.ok) {
+    return { ok: false, message: written.message };
+  }
+  const laneTouches = [];
+  for (const member of members) {
+    for (const tag of [taskTag, ...addTags]) {
+      laneTouches.push({ turnId: member.turn.id, tag });
+    }
+  }
+  return {
+    ok: true,
+    outcome: {
+      ref: `E${segmentId}`,
+      turnId: null,
+      batch: {
+        segmentId,
+        taskTag,
+        addedTags: addTags,
+        members: members.map((member) => member.ref),
+        changed: written.changedTurnIds.length
+      },
+      review: null,
+      relations: null,
+      prose: null,
+      session: null,
+      laneTouches,
+      laneKeyTouches: []
+    }
+  };
+}
 function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
   const syntaxAddressLabel = rawAddressLabel(rawInput);
   let modeMap;
@@ -55029,6 +55435,21 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
       return { ok: false, message: fieldModeErrorMessage(error49, syntaxAddressLabel) };
     }
     throw error49;
+  }
+  if (rawInput.turns !== void 0) {
+    if (rawInput.turn !== void 0 || rawInput.session !== void 0) {
+      return {
+        ok: false,
+        message: "turns is the batch tag write and is mutually exclusive with turn and session \u2014 one call tags many turns, or writes one turn's fields, never both."
+      };
+    }
+    return evaluateSettlementBatchTagWrite(db, context, rawInput, nowEpoch);
+  }
+  if (rawInput.task !== void 0 || rawInput.addTags !== void 0) {
+    return {
+      ok: false,
+      message: "task and addTags belong to the batch tag write and require turns \u2014 a single-turn call states its whole tag set in tags."
+    };
   }
   if (rawInput.session !== void 0) {
     if (rawInput.turn !== void 0) {
@@ -55121,6 +55542,10 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
     });
     if (!gate.ok) {
       return { ok: false, message: `${ref}: ${gate.message}` };
+    }
+    const frozen = checkMembershipTagWrite(db, turn.id, gate.effectiveTags, "normal");
+    if (frozen !== null) {
+      return { ok: false, message: `${ref}: ${frozen}` };
     }
     effectiveTags = gate.effectiveTags;
   }
@@ -55518,6 +55943,11 @@ function evaluateSettlementTurnWrite(db, context, rawInput, nowEpoch) {
 function renderSettlementTurnWriteReceipt(outcome) {
   const verb = "Landed";
   const parts = [];
+  if (outcome.batch) {
+    parts.push(
+      `${verb} tags on ${outcome.batch.members.length} turn(s) in E${outcome.batch.segmentId}: +${outcome.batch.addedTags.join(", +")} (task tag "${outcome.batch.taskTag}" rides along). ${outcome.batch.changed} turn(s) changed; the rest already carried them. Members: ${outcome.batch.members.join(", ")}.`
+    );
+  }
   if (outcome.review) {
     const landedBits = [];
     const yieldedBits = [];
@@ -55601,6 +56031,9 @@ function emptyCommitCounts() {
   };
 }
 function accumulateTurnWriteCounts(counts, outcome) {
+  if (outcome.batch) {
+    counts.turnsReviewed += outcome.batch.members.length;
+  }
   if (outcome.review) {
     counts.turnsReviewed += 1;
     const anyYielded = outcome.review.type !== void 0 && !outcome.review.type.landed || outcome.review.tags !== void 0 && !outcome.review.tags.landed;
