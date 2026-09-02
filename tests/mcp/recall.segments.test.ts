@@ -1021,6 +1021,14 @@ describe("lane addressing E<n>/#<tag> (container-unification ticket 03, spec D2)
       const cut = recallMemoryDelivery(db, {
         id: `E${segmentId}/#write-gate`,
         turn: 5_000,
+        // Settlement-read-once ticket 01: this route now packs its page by
+        // RENDERED COST, so six 20K-character members no longer land on one
+        // page under the default budget — which is the defect that fix
+        // removes (a page could silently overrun the envelope). An explicit,
+        // absurd page budget is what still assembles the oversized page this
+        // test needs, so the receipt rule stays pinned against a response the
+        // envelope really does cut.
+        pageBudget: 1_000_000,
         readerId: READER,
         now: () => CUTOFF,
       });

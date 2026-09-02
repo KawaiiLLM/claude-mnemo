@@ -71,6 +71,121 @@ export const RENDER_INDENT_STEP = "    ";
 export const REWIND_MARKER = " [rewind]";
 
 /**
+ * Settlement-read-once ticket 01 (spec D1): the RENDER cap on a turn's label
+ * text, in characters.
+ *
+ * The label line is structurally immortal — `capRenderWithOutcome` keeps line
+ * 0 however small the budget — so before this cap a single long title could
+ * spend an unbounded share of a turn's budget in the one place no budget
+ * reaches. The D1 budget contract prices the label at THIS cap, which makes
+ * "the footer cannot cut itself" rest on an invariant rather than on an
+ * observed p100.
+ *
+ * 180 characters: production's longest stored title today is 171 (2026-09-02,
+ * read-only clone; the rubric teaches ~20 tokens, p50 = 76 characters, p95 =
+ * 109), so the cap bounds the overhead without cutting anything that exists.
+ * A future longer title is cut and SAID SO (`title cut`), which is the whole
+ * point — the alternative, a silent unbounded label, is what the contract
+ * cannot price.
+ */
+export const TURN_TITLE_RENDER_CAP_CHARS = 180;
+
+/**
+ * Settlement-read-once ticket 01 (spec D2): what one rendered turn did with
+ * one selected field.
+ *
+ *   - `complete` — delivered whole;
+ *   - `bounded`  — named in the call's `boundedFields` and shortened to its
+ *                  own cap: INTENTIONAL, and never actionable;
+ *   - `cut`      — a REQUIRED field shortened, by its own cap or by the
+ *                  whole-turn ladder;
+ *   - `dropped`  — never rendered a byte of its value.
+ *
+ * Only `cut` and `dropped` reach the reader (the `truncated:` footer below).
+ */
+export type TurnFieldReadState = "complete" | "bounded" | "cut" | "dropped";
+
+/**
+ * The vocabulary the D2 footer speaks (spec D1's "budgetable fields"), plus
+ * `title`, which enters it only through the render cap above.
+ *
+ * `response`, `files` and `observations` are deliberately OUT. The footer's
+ * budget is RESERVED — its worst case is subtracted from every turn's budget
+ * before the body ladder runs — so every name admitted here is a standing tax
+ * on every rendered turn, and the three left out are exactly the ones the read
+ * contract does not budget and settlement's field union never selects. They
+ * keep HEAD's behaviour (dropped silently by the ladder).
+ */
+export const REPORTABLE_TURN_FIELDS = [
+  "metadata",
+  "content",
+  "prompt",
+  "insight",
+  "relations",
+] as const;
+
+export type ReportableTurnField = (typeof REPORTABLE_TURN_FIELDS)[number];
+
+const TRUNCATION_FOOTER_PREFIX = "truncated: ";
+
+/**
+ * `truncated: <field>, <field> cut; <field> dropped` — the item's own report,
+ * listing ONLY the two actionable states. Empty string when there is nothing
+ * to report, which is the overwhelmingly common case.
+ */
+function renderTruncationFooter(
+  fieldIndent: string,
+  cut: readonly string[],
+  dropped: readonly string[],
+): string {
+  if (cut.length === 0 && dropped.length === 0) {
+    return "";
+  }
+  const parts: string[] = [];
+  if (cut.length > 0) {
+    parts.push(`${cut.join(", ")} cut`);
+  }
+  if (dropped.length > 0) {
+    parts.push(`${dropped.join(", ")} dropped`);
+  }
+  return `${fieldIndent}${TRUNCATION_FOOTER_PREFIX}${parts.join("; ")}`;
+}
+
+/**
+ * The RESERVED footer (spec D2): the longest `truncated:` line THIS render
+ * could possibly need, given which fields it selected.
+ *
+ * Its cost is subtracted from the turn budget before the body ladder runs, so
+ * the report can never itself cause a cut — the failure a footer appended
+ * afterwards would have: the last field would be evicted by the very line that
+ * announces the eviction.
+ *
+ * Which arrangement is longest is arithmetic, not taste. Every selected name
+ * appears exactly once whatever the split, so the only variable is the
+ * separators: two groups cost `", "` × (n-2) plus `" cut"`, `" dropped"` and
+ * `"; "`; one group costs `", "` × (n-1) plus its own keyword. Two groups wins
+ * by four characters for any n ≥ 2, and for n = 1 the single name in the
+ * `dropped` group (the longer keyword) wins — unless that name is `title`,
+ * which can only ever be `cut`.
+ */
+function worstCaseTruncationFooter(
+  fieldIndent: string,
+  fields: TurnRenderFields,
+): string {
+  const reportable = REPORTABLE_TURN_FIELDS.filter((field) => fields.has(field));
+  const titleSelected = fields.has("title");
+  if (reportable.length === 0) {
+    return titleSelected ? renderTruncationFooter(fieldIndent, ["title"], []) : "";
+  }
+  if (!titleSelected) {
+    return reportable.length === 1
+      ? renderTruncationFooter(fieldIndent, [], reportable)
+      : renderTruncationFooter(fieldIndent, [reportable[0]!], reportable.slice(1));
+  }
+  return renderTruncationFooter(fieldIndent, ["title"], reportable);
+}
+
+/**
  * Render-scoped "did anything get cut" flag (spec D1). Discoverability — "you
  * can read the full text, and here is how" — is a property of the WHOLE
  * response, not of each truncated field, so it is recorded once per response
@@ -336,6 +451,22 @@ export interface RenderNodeOptions {
    * but has no additional effect past what already held for it.
    */
   fieldBudgets?: Partial<Record<RecallTurnField, number>>;
+  /**
+   * Settlement-read-once ticket 01 (spec D1): the fields whose `fieldBudgets`
+   * cap the caller declared INTENTIONAL. Reaching such a cap is the contract,
+   * not a loss, so the D2 report calls it `bounded` and never names it on the
+   * `truncated:` footer. Every other budgeted field is REQUIRED whole: its cap
+   * is a ceiling meant to hold the p95, and reaching it is a `cut` the reader
+   * is told about.
+   *
+   * Intent NEVER reaches the write gate: a bounded field that was actually
+   * shortened still records `complete=false` (see
+   * `recordTurnFieldCompleteness`), because "do not nag me" is not "treat as
+   * read whole". `relations` is refused entry to this set at the input layer
+   * (`recall.ts`) — it is delivery-gated, so a cut set already grants and
+   * there is no nagging to suppress.
+   */
+  boundedFields?: TurnRenderFields;
   /**
    * Ticket 04 (view-render-repair, spec "命中即展示" — matched-field probe):
    * per-row fields whose text contains one of the search's own query terms,
@@ -731,6 +862,15 @@ export function capRenderToTokenBudget(
 interface RenderCapOutcome {
   text: string;
   keptSourceLines: number;
+  /**
+   * Ticket 01 (spec D2): whether the LAST contributing source line
+   * (`keptSourceLines - 1`) delivered only part of itself. A field whose last
+   * line is that one is `cut`, not `complete` — and a field that ends one line
+   * earlier is genuinely whole, which is the distinction a bare line count
+   * cannot make and which decides whether the footer names a field the reader
+   * actually saw in full.
+   */
+  lastLinePartial: boolean;
 }
 
 function capRenderWithOutcome(
@@ -740,11 +880,11 @@ function capRenderWithOutcome(
 ): RenderCapOutcome {
   const wholeLineCount = () => rendered.split("\n").length;
   if (budgetTokens === undefined || !Number.isFinite(budgetTokens)) {
-    return { text: rendered, keptSourceLines: wholeLineCount() };
+    return { text: rendered, keptSourceLines: wholeLineCount(), lastLinePartial: false };
   }
 
   if (estimateTokens(rendered) <= budgetTokens) {
-    return { text: rendered, keptSourceLines: wholeLineCount() };
+    return { text: rendered, keptSourceLines: wholeLineCount(), lastLinePartial: false };
   }
 
   const lines = rendered.split("\n");
@@ -761,7 +901,7 @@ function capRenderWithOutcome(
     if (remaining <= 0) {
       markTruncated(signal);
       kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-      return { text: kept.join("\n"), keptSourceLines: index };
+      return { text: kept.join("\n"), keptSourceLines: index, lastLinePartial: false };
     }
 
     if (lineTokens <= remaining) {
@@ -781,18 +921,22 @@ function capRenderWithOutcome(
     // A partial line still DELIVERED bytes of its source line, so it counts;
     // an empty partial (the remaining budget did not reach the first word)
     // delivered nothing and does not.
-    return { text: kept.join("\n"), keptSourceLines: partial ? index + 1 : index };
+    return {
+      text: kept.join("\n"),
+      keptSourceLines: partial ? index + 1 : index,
+      lastLinePartial: partial.length > 0,
+    };
   }
 
   if (kept.length === lines.length) {
     // Every line fit once the marker's own cost was accounted for — nothing
     // was actually cut, so no marker is owed.
-    return { text: rendered, keptSourceLines: lines.length };
+    return { text: rendered, keptSourceLines: lines.length, lastLinePartial: false };
   }
 
   markTruncated(signal);
   kept.push(TURN_BUDGET_TRUNCATION_MARKER);
-  return { text: kept.join("\n"), keptSourceLines: kept.length - 1 };
+  return { text: kept.join("\n"), keptSourceLines: kept.length - 1, lastLinePartial: false };
 }
 
 /**
@@ -1008,7 +1152,7 @@ function formatTurnLabel(
     sessionId,
     includeSessionPrefix = false,
   }: RenderNodeOptions,
-): string {
+): { text: string; titleCut: boolean } {
   // Bare `T<n>` on purpose: the `:L<line>` suffix this once carried was the
   // JSONL-first replay handoff coordinate, retired when replay went
   // SQLite-first — the replay skill itself forbids locating content by
@@ -1031,12 +1175,27 @@ function formatTurnLabel(
   // the grants of every field that WAS asked for (the [S15069/T1469]
   // incident). The prompt still renders, as its own budgeted field row in
   // `formatTurnBody`, whenever the caller selects it or the search matched it.
-  const titleText = fields.has("title") ? turn.title : null;
+  // Settlement-read-once ticket 01 (spec D1): the label is the one line no
+  // budget can cut, so its cost has to be bounded SOMEWHERE or the structural
+  // overhead the turn budget is derived from has no ceiling. It is bounded
+  // here, in the renderer, at `TURN_TITLE_RENDER_CAP_CHARS` — and the cut is
+  // REPORTED (`title cut`, the one case `title` reaches the D2 footer) rather
+  // than performed silently. No write-side refusal joins it: `note` titles
+  // stay unconstrained on both schemas, so no new eligibility predicate enters
+  // the product on the back of a render bound.
+  const storedTitle = fields.has("title") ? turn.title : null;
+  const titleCut = storedTitle !== null && storedTitle.length > TURN_TITLE_RENDER_CAP_CHARS;
+  const titleText = titleCut
+    ? `${storedTitle!.slice(0, TURN_TITLE_RENDER_CAP_CHARS)}${FIELD_TRUNCATION_SUFFIX}`
+    : storedTitle;
   const titleSegment = titleText ? ` ${titleText}` : "";
 
   const rewindSegment = turn.wasRolledBack ? REWIND_MARKER : "";
 
-  return `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`;
+  return {
+    text: `${prefix}${titleSegment}${formatStatus(turn.status)}${rewindSegment}`,
+    titleCut,
+  };
 }
 
 function formatObservationLabel(
@@ -1216,28 +1375,29 @@ function renderTurnChildren(
  * `recordTurnFieldCompleteness`).
  */
 /**
- * Settlement-read-once ticket 00 (spec D0/D2): where a selected `relations`
- * field ended up in the assembled body, which is what decides whether the
- * whole-turn ladder DELIVERED it. Four shapes, and only the last two need a
- * line number:
+ * Settlement-read-once ticket 01 (spec D2): what `formatTurnBody` did with one
+ * REPORTABLE field, in terms the whole-turn ladder's own outcome can then be
+ * applied to.
  *
- *   - `absent`  — the field was not selected, so this render says nothing
- *                 about it (unchanged: no completeness row is pushed);
- *   - `empty`   — selected, and the set itself is empty. Nothing rendered
- *                 because there was nothing to render, so delivery is
- *                 "did the ladder reach the END of the block" — the field
- *                 sits last, so that is exactly `capped === body`;
- *   - `elided`  — selected, the set is NOT empty, and zero atom lines
- *                 survived the field's OWN budget. Never delivered: the
- *                 reader saw no atom;
- *   - `atoms`   — selected, at least one atom line was assembled, starting
- *                 one line after `labelLine` (the `- relations:` header).
+ *   - `lines`             — its value occupies `[startLine, endLine]` of the
+ *                           assembled body (a list field's own header line is
+ *                           NOT part of it), and `ownCut` says whether the
+ *                           field's own `fieldBudgets` cap already shortened
+ *                           it before the ladder ever ran;
+ *   - `nothing-to-render` — selected, and the turn has no value for it. There
+ *                           is nothing a re-read could recover, so this is
+ *                           `complete`, never `dropped`;
+ *   - `elided`            — its own budget left room for not one line. The
+ *                           reader saw nothing of it: `dropped`;
+ *   - `empty-at-end`      — `relations` alone: selected, the set is empty, and
+ *                           the field sits LAST, so "was it reached" is "did
+ *                           the ladder reach the end of the block".
  */
-type TurnRelationsPlacement =
-  | { kind: "absent" }
-  | { kind: "empty" }
+type FieldRenderMark =
+  | { kind: "lines"; startLine: number; endLine: number; ownCut: boolean }
+  | { kind: "nothing-to-render" }
   | { kind: "elided" }
-  | { kind: "atoms"; labelLine: number };
+  | { kind: "empty-at-end" };
 
 function formatTurnBody(
   turn: FormattedTurn,
@@ -1246,13 +1406,31 @@ function formatTurnBody(
 ): {
   text: string;
   ownComplete: Map<RecallTurnField, boolean>;
-  relations: TurnRelationsPlacement;
+  titleCut: boolean;
+  marks: Map<ReportableTurnField, FieldRenderMark>;
 } {
   const { indent = "", fieldBudgets, signal } = options;
   const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
   const bulletIndent = `${fieldIndent}${RENDER_INDENT_STEP}`;
-  const lines = [formatTurnLabel(turn, fields, options)];
+  const label = formatTurnLabel(turn, fields, options);
+  const lines = [label.text];
   const ownComplete = new Map<RecallTurnField, boolean>();
+  // Ticket 01 (spec D2): where each reportable field's VALUE landed in
+  // `lines`, recorded as it is pushed rather than re-derived afterwards by
+  // parsing the assembled text back apart.
+  const marks = new Map<ReportableTurnField, FieldRenderMark>();
+  const markLines = (
+    field: ReportableTurnField,
+    startLine: number,
+    ownCut: boolean,
+  ): void => {
+    marks.set(
+      field,
+      lines.length > startLine
+        ? { kind: "lines", startLine, endLine: lines.length - 1, ownCut }
+        : { kind: "elided" },
+    );
+  };
 
   // `metadata` leads, and it is the ONE unprefixed field line (spec 金样例
   // 补充): it annotates the row above it rather than naming a stored field,
@@ -1260,13 +1438,21 @@ function formatTurnBody(
   if (fields.has("metadata") && turn.metadata) {
     const cut = cutFieldText("metadata", turn.metadata, fieldBudgets, signal);
     ownComplete.set("metadata", cut.complete);
+    const startLine = lines.length;
     lines.push(`${fieldIndent}${cut.text}`);
+    markLines("metadata", startLine, !cut.complete);
+  } else if (fields.has("metadata")) {
+    marks.set("metadata", { kind: "nothing-to-render" });
   }
 
   if (fields.has("content") && turn.content) {
     const cut = cutFieldText("content", turn.content, fieldBudgets, signal);
     ownComplete.set("content", cut.complete);
+    const startLine = lines.length;
     lines.push(`${fieldIndent}- content: ${cut.text}`);
+    markLines("content", startLine, !cut.complete);
+  } else if (fields.has("content")) {
+    marks.set("content", { kind: "nothing-to-render" });
   }
 
   // `prompt` is a field like any other (ticket 02): it renders exactly when
@@ -1290,9 +1476,13 @@ function formatTurnBody(
     // feed's own per-field cut uses (cut first, decorate after).
     const cut = cutFieldText("prompt", turn.promptPreview, fieldBudgets, signal);
     ownComplete.set("prompt", cut.complete);
+    const startLine = lines.length;
     lines.push(
       `${fieldIndent}- prompt: "${collapseToSingleLine(cut.text)}"`,
     );
+    markLines("prompt", startLine, !cut.complete);
+  } else if (isTurnFieldActive("prompt", fields, options.matchedFields)) {
+    marks.set("prompt", { kind: "nothing-to-render" });
   }
 
   if (fields.has("response") && turn.responsePreview) {
@@ -1308,8 +1498,18 @@ function formatTurnBody(
     ownComplete.set("insight", cut.complete);
     if (cut.lines.length > 0) {
       lines.push(`${fieldIndent}- insight:`);
+      // The label line is NOT the field: a reader who got `- insight:` and the
+      // truncation marker saw a header, not a bullet — the same rule
+      // `relations` applies below, and the same rule the delivery gate rests
+      // on.
+      const startLine = lines.length;
       pushBullets(lines, bulletIndent, cut.lines);
+      markLines("insight", startLine, !cut.complete);
+    } else {
+      marks.set("insight", { kind: "elided" });
     }
+  } else if (fields.has("insight")) {
+    marks.set("insight", { kind: "nothing-to-render" });
   }
 
   if (fields.has("files") && turn.filesRead && turn.filesRead.length > 0) {
@@ -1338,27 +1538,36 @@ function formatTurnBody(
   // shape (a relation word or a `<-` stroke in the leading position, spec D8)
   // IS the format — `pushBullets`' own `- ` prefix would read as part of it,
   // so this pushes the pre-formatted lines directly.
-  let relations: TurnRelationsPlacement = fields.has("relations")
-    ? { kind: "empty" }
-    : { kind: "absent" };
+  if (fields.has("relations")) {
+    // Selected and empty until proven otherwise: an empty set renders nothing,
+    // so its report — like its gate row — turns on whether the ladder reached
+    // the END of the block, which is where the field sits.
+    marks.set("relations", { kind: "empty-at-end" });
+  }
   if (fields.has("relations") && turn.relations && turn.relations.length > 0) {
     const cut = cutFieldLines("relations", turn.relations, fieldBudgets, signal);
     ownComplete.set("relations", cut.complete);
     if (cut.lines.length > 0) {
-      relations = { kind: "atoms", labelLine: lines.length };
       lines.push(`${fieldIndent}- relations:`);
+      const startLine = lines.length;
       for (const line of cut.lines) {
         lines.push(`${bulletIndent}${line}`);
       }
+      markLines("relations", startLine, !cut.complete);
     } else {
       // A non-empty set whose own budget left room for not one atom. The
       // reader saw nothing of it, so this is a DROP however small the cut
       // that caused it (spec D0: "dropped" is "not seen").
-      relations = { kind: "elided" };
+      marks.set("relations", { kind: "elided" });
     }
   }
 
-  return { text: lines.join("\n"), ownComplete, relations };
+  return {
+    text: lines.join("\n"),
+    ownComplete,
+    titleCut: label.titleCut,
+    marks,
+  };
 }
 
 /**
@@ -1411,6 +1620,12 @@ function recordTurnFieldCompleteness(
   signal: TruncationSignal | undefined,
   ownComplete: ReadonlyMap<RecallTurnField, boolean>,
   relationsDelivered: boolean,
+  // Ticket 01 (spec D1): the render-side title cap is the ONE thing that can
+  // shorten the otherwise-immortal label, so `title`'s ledger row stops being
+  // an unconditional `true`. Same never-overclaim direction as every other
+  // field here: a cut label records incomplete, which costs a re-read and
+  // never licenses a write over a title this render did not show whole.
+  titleCut: boolean,
 ): void {
   const fieldComplete = (field: RecallTurnField): boolean =>
     (ownComplete.get(field) ?? true) && bodyComplete;
@@ -1451,36 +1666,61 @@ function recordTurnFieldCompleteness(
       "turn",
       turnId,
       field,
-      field === "title" ? true : fieldComplete(field),
+      field === "title" ? !titleCut : fieldComplete(field),
     );
   }
 }
 
 /**
- * Settlement-read-once ticket 00 (spec D0): did the whole-turn ladder put a
- * byte of the turn's `relations` ATOMS in front of the reader?
+ * Settlement-read-once ticket 01 (spec D2): one field's mark, plus what the
+ * whole-turn ladder actually delivered, resolved into one of the four states.
  *
- * The `- relations:` header on its own is not delivery — a reader who got
- * "- relat…" and the truncation marker saw a label, not a set — so the test is
- * that a line PAST the header survived. The last surviving line may itself be
- * a partial atom; that still counts, and it is the `cut` state D0 rules grants
- * on: some atoms rendered, the budget stopped the rest.
+ * The conservative direction is fixed and deliberate: where the evidence is
+ * ambiguous the answer is `cut`, never `complete`. An unnecessary `cut` costs a
+ * re-read; a false `complete` licenses a write over text this render never
+ * showed. The one place ambiguity arises is the LAST contributing line, which
+ * may have been cut mid-way — `lastLinePartial` is what resolves it exactly
+ * rather than by assumption.
+ *
+ * `bounded` is intent, not outcome: it applies only where the field's OWN cap
+ * did the shortening and the caller declared that cap intentional. A field the
+ * LADDER shortened is `cut` however it was declared — the caller asked for its
+ * first N tokens, and it did not even get those.
  */
-function relationsWereDelivered(
-  relations: TurnRelationsPlacement,
+function classifyFieldState(
+  mark: FieldRenderMark,
   capped: RenderCapOutcome,
-  body: string,
-): boolean {
-  switch (relations.kind) {
-    case "absent":
+  bodyWhole: boolean,
+  bounded: boolean,
+): TurnFieldReadState {
+  switch (mark.kind) {
+    case "nothing-to-render":
+      return "complete";
     case "elided":
-      return false;
-    case "empty":
-      // The field renders LAST, so an empty set was reached exactly when the
-      // ladder reached the end of the block.
-      return capped.text === body;
-    case "atoms":
-      return capped.keptSourceLines > relations.labelLine + 1;
+      return "dropped";
+    case "empty-at-end":
+      return bodyWhole ? "complete" : "dropped";
+    case "lines": {
+      const ownState: TurnFieldReadState = mark.ownCut
+        ? bounded
+          ? "bounded"
+          : "cut"
+        : "complete";
+      if (bodyWhole) {
+        return ownState;
+      }
+      const kept = capped.keptSourceLines;
+      if (mark.startLine >= kept) {
+        return "dropped";
+      }
+      if (mark.endLine > kept - 1) {
+        return "cut";
+      }
+      if (mark.endLine === kept - 1 && capped.lastLinePartial) {
+        return "cut";
+      }
+      return ownState;
+    }
   }
 }
 
@@ -1496,21 +1736,71 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions = {}): s
       );
     case "turn": {
       const fields = options.fields ?? DEFAULT_TURN_RENDER_FIELDS;
-      const { text: body, ownComplete, relations } = formatTurnBody(
+      const { text: body, ownComplete, titleCut, marks } = formatTurnBody(
         node.value,
         fields,
         options,
       );
-      const capped = capRenderWithOutcome(body, budget, options.signal);
+      const indent = options.indent ?? "";
+      const fieldIndent = `${indent}${RENDER_INDENT_STEP}`;
+      // Spec D2: the footer's WORST CASE is subtracted before the ladder runs,
+      // so the report can never itself evict the field it would have named.
+      // The reserve is unconditional — a body sized against "the footer I will
+      // turn out to need" would be a two-pass fixed point, and its second pass
+      // could always produce a different footer than the first assumed.
+      const footerReserve = estimateTokens(worstCaseTruncationFooter(fieldIndent, fields));
+      const capped = capRenderWithOutcome(
+        body,
+        Math.max(0, budget - footerReserve),
+        options.signal,
+      );
+      const bodyWhole = capped.text === body;
+
+      const cutFields: string[] = [];
+      const droppedFields: string[] = [];
+      if (titleCut) {
+        cutFields.push("title");
+      }
+      let relationsDelivered = false;
+      for (const field of REPORTABLE_TURN_FIELDS) {
+        const mark = marks.get(field);
+        if (!mark) {
+          continue;
+        }
+        const state = classifyFieldState(
+          mark,
+          capped,
+          bodyWhole,
+          options.boundedFields?.has(field) ?? false,
+        );
+        if (field === "relations") {
+          // Spec D0: `dropped` is "not seen" and grants nothing; every other
+          // state saw at least one atom (or an evaluated empty set) and does.
+          relationsDelivered = state !== "dropped";
+        }
+        if (state === "cut") {
+          cutFields.push(field);
+        } else if (state === "dropped") {
+          droppedFields.push(field);
+        }
+      }
+
       recordTurnFieldCompleteness(
         node.value.id,
         fields,
-        capped.text === body,
+        bodyWhole,
         options.signal,
         ownComplete,
-        relationsWereDelivered(relations, capped, body),
+        relationsDelivered,
+        titleCut,
       );
-      return capped.text;
+
+      const footer = renderTruncationFooter(fieldIndent, cutFields, droppedFields);
+      if (!footer) {
+        return capped.text;
+      }
+      markTruncated(options.signal);
+      return `${capped.text}\n${footer}`;
     }
     case "observation":
       return capRenderToTokenBudget(

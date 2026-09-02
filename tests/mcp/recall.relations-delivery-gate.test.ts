@@ -159,7 +159,12 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
     const citing = seedCiterWithEdges(5);
     const reader = "session:3";
 
-    const output = read(reader, { turn: 20 });
+    // Settlement-read-once ticket 01: the turn budget now pays for the
+    // worst-case `truncated:` footer before the body ladder runs (spec D2),
+    // so the number that lands the ladder ON the relations header — the state
+    // this test pins — moved up by that reserve. The state itself is
+    // unchanged: header rendered, not one atom, no row, write refused.
+    const output = read(reader, { turn: 33 });
 
     // The header line survives; not one atom does. A label is not a set.
     expect(output).toContain("- relations:");

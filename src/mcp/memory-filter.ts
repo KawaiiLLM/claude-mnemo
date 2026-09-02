@@ -75,6 +75,27 @@ export const FIELD_BUDGET_ELIGIBLE_FIELD_NAMES = RECALL_TURN_FIELD_NAMES.filter(
 
 export type FieldBudgetEligibleField = (typeof FIELD_BUDGET_ELIGIBLE_FIELD_NAMES)[number];
 
+/**
+ * Settlement-read-once ticket 01 (spec D1): the fields a caller may declare
+ * INTENTIONALLY short — `recall`'s `boundedFields`.
+ *
+ * `FIELD_BUDGET_ELIGIBLE_FIELD_NAMES` minus `relations`, and the subtraction
+ * is the point rather than an omission. `relations` is DELIVERY-gated (spec
+ * D0): a set the budget cut still grants an edge write, because the writer saw
+ * the set. So there is no nagging for "bounded" to suppress on it, and
+ * admitting it would teach that a short relations read is a deliberate
+ * half-read — which is exactly the reading D0 spent a ticket removing. It is
+ * absent from the legal enumeration AND refused by name at the runtime layer
+ * (`parseBoundedFields`), so a caller who tries gets the reason, not a
+ * grammar echo.
+ */
+export const BOUNDED_FIELD_NAMES = FIELD_BUDGET_ELIGIBLE_FIELD_NAMES.filter(
+  (field): field is Exclude<FieldBudgetEligibleField, "relations"> =>
+    field !== "relations",
+);
+
+export type BoundedField = (typeof BOUNDED_FIELD_NAMES)[number];
+
 export interface MemoryFilterInput {
   /** Exact match against one stored `type` value (a turn's type array, or a segment's). */
   type?: string;
@@ -128,6 +149,22 @@ export interface ParsedMemoryFilter {
   fields?: RecallTurnField[];
   /** Same `FieldBudgetEligibleField` narrowing as `MemoryFilterInput.fieldBudgets` above. */
   fieldBudgets?: Partial<Record<FieldBudgetEligibleField, number>>;
+  /**
+   * Settlement-read-once ticket 01 (spec D1): which budgeted fields the caller
+   * declared INTENTIONALLY short. Deliberately NOT a member of
+   * `MemoryFilterInput` above — it is a `recall` input, `timeline` refuses it
+   * by name, and the shared wire filter must not grow a key one of its two
+   * tools rejects.
+   *
+   * It rides on the PARSED form because that object is already the internal
+   * carrier of the render directives every route receives (`fields`,
+   * `fieldBudgets` — neither is a scoping criterion either, see
+   * `hasFilterCriteria`), and `recall`'s own routing hands exactly one such
+   * object to every renderer. `parseMemoryFilter` never sets it; only
+   * `recall.ts` does, from its own top-level input, through
+   * `parseBoundedFields`.
+   */
+  boundedFields?: RecallTurnField[];
 }
 
 function isRecallTurnField(value: string): value is RecallTurnField {
@@ -336,6 +373,69 @@ export function parseMemoryFilter(
   }
 
   return { parsed };
+}
+
+/** The grammar an invalid `boundedFields` entry echoes back. */
+export function describeBoundedFieldGrammar(): string {
+  return `expected one of: ${BOUNDED_FIELD_NAMES.join(", ")}`;
+}
+
+/**
+ * Settlement-read-once ticket 01 (spec D1): validate `recall`'s
+ * `boundedFields` against the call it arrived on.
+ *
+ * The contract is a SUBSET rule — `boundedFields ⊆ selected ∩
+ * keys(fieldBudgets)` — and each half of it is refused separately, naming the
+ * offending field, because the two failures need different repairs. A field
+ * that was never selected renders nothing at all, so calling it
+ * "intentionally short" describes no read; a field with no numeric cap has no
+ * length to have been shortened TO, so "bounded" would be an assertion about
+ * a cut that cannot happen. Neither is a harmless no-op: both would make the
+ * D2 report say `complete` where a reader should have seen `cut`.
+ */
+export function parseBoundedFields(
+  boundedFields: readonly string[] | undefined,
+  selected: ReadonlySet<RecallTurnField>,
+  fieldBudgets: Partial<Record<FieldBudgetEligibleField, number>> | undefined,
+): { parsed?: RecallTurnField[]; error?: string } {
+  if (boundedFields === undefined) {
+    return {};
+  }
+  if (boundedFields.length === 0) {
+    return {
+      error: `boundedFields must not be empty — omit it, or ${describeBoundedFieldGrammar()}`,
+    };
+  }
+  for (const field of boundedFields) {
+    if (field === "relations") {
+      return {
+        error:
+          'boundedFields must not name "relations" — the field is delivery-gated: a set the budget ' +
+          "cut still grants the edge write, because you saw the set. There is nothing to declare " +
+          "intentional. Drop it; `filter.fieldBudgets.relations` still caps its size.",
+      };
+    }
+    if (!isRecallTurnField(field)) {
+      return {
+        error: `invalid boundedFields entry "${field}" — ${describeBoundedFieldGrammar()}`,
+      };
+    }
+    if (!selected.has(field)) {
+      return {
+        error:
+          `boundedFields entry "${field}" is not in filter.fields — a field this call never ` +
+          "selected renders nothing, so it cannot be read intentionally short. Select it, or drop it here.",
+      };
+    }
+    if (fieldBudgets?.[field as FieldBudgetEligibleField] === undefined) {
+      return {
+        error:
+          `boundedFields entry "${field}" has no filter.fieldBudgets["${field}"] cap — "bounded" ` +
+          "means \"cut to its cap on purpose\", so name the cap alongside the intent.",
+      };
+    }
+  }
+  return { parsed: [...boundedFields] as RecallTurnField[] };
 }
 
 /**

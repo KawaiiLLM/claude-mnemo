@@ -604,12 +604,18 @@ describe("per-item token budget (`turnBudget` — the `turn` param at the MCP se
     const shortSignal = createTruncationSignal();
     const short = renderNode(
       { type: "turn", value: { ...turn, promptPreview: "short text" } },
-      { fields: ALL_FIELDS, sessionId: 142, signal: shortSignal, turnBudget: 30 },
+      // Settlement-read-once ticket 01: 30 was the pre-reservation number.
+      // The turn budget now pays for the worst-case `truncated:` footer
+      // BEFORE the body ladder runs (spec D2 — a report may never itself
+      // cause the cut it reports), and ALL_FIELDS names every reportable
+      // field, so the reserve is at its widest here. 50 restores the same
+      // body allowance this test has always been about.
+      { fields: ALL_FIELDS, sessionId: 142, signal: shortSignal, turnBudget: 50 },
     );
     const longSignal = createTruncationSignal();
     const long = renderNode(
       { type: "turn", value: turn },
-      { fields: ALL_FIELDS, sessionId: 142, signal: longSignal, turnBudget: 30 },
+      { fields: ALL_FIELDS, sessionId: 142, signal: longSignal, turnBudget: 50 },
     );
 
     expect(short).not.toContain("…");

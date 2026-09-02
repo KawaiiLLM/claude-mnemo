@@ -32,6 +32,7 @@ import {
   type TruncationSignal,
   type TurnRenderFields,
 } from "./format";
+import type { RecallTurnField } from "./memory-filter";
 import { taskImpressionDisplay, type ImpressionDisplay } from "./impression-display";
 import { buildTurnDirectRelationLines } from "./relations-view";
 
@@ -818,11 +819,36 @@ export function renderSegmentCardRecord(
 // `renderNode`.
 // ---------------------------------------------------------------------------
 
+/**
+ * Settlement-read-once ticket 01 (spec D1): the per-member half of the read
+ * contract. `renderSegmentMembersByOrdinal` is the only thing that knows where
+ * one member's block ends, so it is what marks the ledger — the same rule
+ * `recall.ts`'s `renderTurnScope` follows, and the reason the segment-member
+ * routes could not grant per member before: their caller composed the page in
+ * one call and had no member boundary to point at.
+ *
+ * Offsets are relative to the string this renderer RETURNS; the caller shifts
+ * them once it knows where that string lands in the response.
+ */
+export interface SegmentMemberDeliveryLedger {
+  mark(endOffset: number, grants: readonly { entityType: "turn"; entityId: number }[]): void;
+}
+
 export interface RenderSegmentMembersOptions {
   fields?: TurnRenderFields;
   turnBudget?: number;
   eraCutoffEpoch?: number | null;
   signal?: TruncationSignal;
+  /**
+   * Ticket 01 (spec D1): per-field token caps, forwarded into every member's
+   * own `renderNode` call. Their absence here is defect 1 of the spec —
+   * `prompt:50` parsed on this route and then did nothing.
+   */
+  fieldBudgets?: Partial<Record<RecallTurnField, number>>;
+  /** Ticket 01 (spec D1): which of those caps the caller declared intentional. */
+  boundedFields?: TurnRenderFields;
+  /** Ticket 01 (spec D1): per-member grants — see `SegmentMemberDeliveryLedger`. */
+  ledger?: SegmentMemberDeliveryLedger;
   /**
    * Session id of the member immediately BEFORE this page's first one, when a
    * previous page exists. Equal to the first rendered member's session means
@@ -882,6 +908,10 @@ export function renderSegmentMembersByOrdinal(
   }
 
   const lines: string[] = [`[E${segment.id}] ${segment.title}`];
+  // Character position of the END of `lines` so far, in the joined result —
+  // the same cursor arithmetic `renderTurnScope` runs, for the same reason
+  // (ticket 01: one member, one mark).
+  let cursor = lines[0]!.length;
   const seenSessionIds = new Set<number>();
   let runSessionId: number | null = options.precedingSessionId ?? null;
   let pageOpensMidSession =
@@ -895,13 +925,13 @@ export function renderSegmentMembersByOrdinal(
       continue;
     }
     if (member.sessionId !== runSessionId) {
-      lines.push(
-        renderSessionTransitionLine(
-          member.sessionId,
-          seenSessionIds.has(member.sessionId) ? null : getSession(db, member.sessionId)?.title ?? null,
-          RENDER_INDENT_STEP,
-        ),
+      const transition = renderSessionTransitionLine(
+        member.sessionId,
+        seenSessionIds.has(member.sessionId) ? null : getSession(db, member.sessionId)?.title ?? null,
+        RENDER_INDENT_STEP,
       );
+      lines.push(transition);
+      cursor += 1 + transition.length;
       seenSessionIds.add(member.sessionId);
       runSessionId = member.sessionId;
     }
@@ -935,19 +965,25 @@ export function renderSegmentMembersByOrdinal(
         ? buildTurnDirectRelationLines(db, turn)
         : undefined,
     };
-    lines.push(
-      renderNode(
-        { type: "turn", value: view },
-        {
-          indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
-          fields: options.fields,
-          sessionId: member.sessionId,
-          includeSessionPrefix: pageOpensMidSession,
-          turnBudget: options.turnBudget,
-          signal: options.signal,
-        },
-      ),
+    const block = renderNode(
+      { type: "turn", value: view },
+      {
+        indent: `${RENDER_INDENT_STEP}${RENDER_INDENT_STEP}`,
+        fields: options.fields,
+        sessionId: member.sessionId,
+        includeSessionPrefix: pageOpensMidSession,
+        turnBudget: options.turnBudget,
+        signal: options.signal,
+        fieldBudgets: options.fieldBudgets,
+        boundedFields: options.boundedFields,
+      },
     );
+    lines.push(block);
+    cursor += 1 + block.length;
+    // Ticket 01 (spec D1): one member, one mark, at the offset where ITS block
+    // ends — beside the push, for the same reason the receipt below is
+    // recorded here rather than re-derived from the caller's pagination.
+    options.ledger?.mark(cursor, [{ entityType: "turn", entityId: member.turnId }]);
     // Ticket 07: recorded HERE, beside the push that emits the block, so a
     // future member the loop learns to skip drops out of the receipt by
     // construction rather than by somebody remembering to update a second

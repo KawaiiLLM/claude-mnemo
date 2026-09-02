@@ -22,6 +22,12 @@ import {
   renderImpressionTeaching,
 } from "../../src/worker/note-settlement-impression-teaching";
 import { UNIFIED_NOTE_TOOL_DESCRIPTION } from "../../src/worker/note-settlement-sdk-query";
+import {
+  SETTLEMENT_READ_FIELD_BUDGETS,
+  SETTLEMENT_READ_PAGE_BUDGET,
+  SETTLEMENT_READ_TURN_BUDGET,
+  SETTLEMENT_READ_TURNS_PER_PAGE,
+} from "../../src/worker/note-settlement-read-budgets";
 import { renderNoteSettlementUnifiedPrompt } from "../../src/worker/note-settlement-unified-prompt";
 import { SETTLEMENT_ERA_CUTOFF_EPOCH } from "../support/settlement-config";
 
@@ -228,16 +234,25 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological"),
+      prompt.indexOf("1. READ the writable set ONCE"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
-    expect(step1).toContain("raise `pageSize` above");
-    expect(step1).toContain("its default of 10");
+    // SETTLEMENT-READ-ONCE TICKET 01 amended what this duty asks for, not
+    // that it asks: the field list became the union BOTH stages read, the
+    // budgets became measured numbers rendered from
+    // `note-settlement-read-budgets.ts`, and `pageSize` is now raised so that
+    // COST decides the page boundary rather than a turn count.
+    expect(step1).toContain("`pageSize` raised well above its default of 10");
     expect(step1).toContain(
-      '`filter={fields:["title","metadata","content","prompt"],',
+      '`filter={fields:["title","metadata","content","prompt","insight","relations"],',
     );
-    expect(step1).toContain("fieldBudgets:{prompt:50}}` with `turn` raised to roughly 280");
-    expect(step1).toContain("AT MOST 50 tokens");
+    expect(step1).toContain(
+      "fieldBudgets:{metadata:30,content:360,prompt:50,insight:100,relations:800}}`",
+    );
+    expect(step1).toContain('`boundedFields:["prompt"]`');
+    expect(step1).toContain("`turn:1625`");
+    expect(step1).toContain("`pageBudget:23000`");
+    expect(step1).toContain("50 tokens of the user's own opening");
   });
 
   test("step 1 teaches the yield-repair idiom: one targeted re-read of the yielded address, metadata suffices for type/tags", () => {
@@ -248,13 +263,13 @@ describe("ticket 09 item 4 — the read procedure teaches pageSize/turn and the 
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological"),
+      prompt.indexOf("1. READ the writable set ONCE"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
     expect(step1).toContain("YIELD-REPAIR: a write refused");
     expect(step1).toContain("the one address that needs it — re-read");
     expect(step1).toContain("THAT address alone, never the whole batch again");
-    expect(step1).toContain("the default `metadata` field already carries both");
+    expect(step1).toContain("the `metadata` field carries both");
   });
 });
 
@@ -275,7 +290,7 @@ describe("first-settlement-feedback ticket 01 — the read step names the ADDRES
     const prompt = renderPromptFor(context);
 
     const step1 = prompt.slice(
-      prompt.indexOf("1. READ the writable set in chronological"),
+      prompt.indexOf("1. READ the writable set ONCE"),
       prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
     );
     // Job 170's first tool call obeyed every part of this step that existed
@@ -484,5 +499,88 @@ describe("settlement-read-once ticket 04 — stage 1 works topic-first", () => {
     expect(text).not.toContain("batches of ten");
     expect(text).not.toContain("Batches bound working memory");
     expect(text).not.toContain("a full batch, or the whole writable set");
+  });
+});
+
+/**
+ * SETTLEMENT-READ-ONCE TICKET 01 (spec D1 + D2) — THE READ STEP IS ONE READ.
+ *
+ * Every sentence pinned here is a rule a tool now enforces and the text now
+ * states. The two that matter most are the ones the run cannot infer:
+ *
+ *   - re-read ONLY what the footer named, that turn, that field. Before the
+ *     footer existed there was nothing to name, so "re-read the batch" was the
+ *     only safe repair and the run paid for it every time it suspected a cut;
+ *   - `relations` is the asymmetry. Its gate asks for DELIVERY, not for
+ *     completeness (spec D0), so a CUT set already licenses the edge write and
+ *     a DROPPED one does not. A run that treated them alike would either buy a
+ *     round trip it did not owe, or write an edge off a set it never saw.
+ */
+describe("settlement-read-once ticket 01 — step 1 reads once and names its cuts", () => {
+  function stepOne(): string {
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const prompt = renderPromptFor(context);
+    return prompt.slice(
+      prompt.indexOf("1. READ the writable set ONCE"),
+      prompt.indexOf("2. For each turn, do the TURN-SCOPE work"),
+    );
+  }
+
+  test("it asks for the union both stages need, in the fewest pages, at the measured budgets", () => {
+    const step1 = stepOne();
+
+    expect(step1).toContain("READ the writable set ONCE, in as few pages as the envelope allows");
+    expect(step1).toContain("One field list serves BOTH stages");
+    expect(step1).toContain(
+      '`filter={fields:["title","metadata","content","prompt","insight","relations"],',
+    );
+    // The numbers are rendered from `note-settlement-read-budgets.ts`, so this
+    // pin also catches a budget moved in the module without a re-measurement.
+    expect(step1).toContain(
+      `fieldBudgets:{metadata:${SETTLEMENT_READ_FIELD_BUDGETS.metadata},` +
+        `content:${SETTLEMENT_READ_FIELD_BUDGETS.content},` +
+        `prompt:${SETTLEMENT_READ_FIELD_BUDGETS.prompt},` +
+        `insight:${SETTLEMENT_READ_FIELD_BUDGETS.insight},` +
+        `relations:${SETTLEMENT_READ_FIELD_BUDGETS.relations}}}\``,
+    );
+    expect(step1).toContain(`\`turn:${SETTLEMENT_READ_TURN_BUDGET}\``);
+    expect(step1).toContain(`\`pageBudget:${SETTLEMENT_READ_PAGE_BUDGET}\``);
+    expect(step1).toContain(`${SETTLEMENT_READ_TURNS_PER_PAGE} turns fit`);
+  });
+
+  test("it names `prompt` as the one BOUNDED field, and says the other caps are required whole", () => {
+    const step1 = stepOne();
+
+    expect(step1).toContain('`boundedFields:["prompt"]`');
+    expect(step1).toContain("`prompt` is the one BOUNDED field");
+    expect(step1).toContain("Reaching that cap is");
+    expect(step1).toContain("the contract, so the response never flags it");
+    expect(step1).toContain("Every OTHER budgeted field");
+    expect(step1).toContain("is required whole");
+  });
+
+  test("it states the re-read rule: that turn, that field, and nothing the footer did not name", () => {
+    const step1 = stepOne();
+
+    expect(step1).toContain("RE-READ ONLY WHAT THE RESPONSE NAMED");
+    expect(step1).toContain("`truncated: <field> cut; <field> dropped`");
+    expect(step1).toContain("Re-read that ONE turn with `fields:[<that field>]`");
+    expect(step1).toContain("never the batch again");
+    expect(step1).toContain("A field absent from the footer was");
+    expect(step1).toContain("delivered whole");
+    expect(step1).toContain("a BOUNDED field never appears there at all");
+  });
+
+  test("it draws D0's line: a CUT relations needs no re-read, a DROPPED one must be read once", () => {
+    const step1 = stepOne();
+
+    expect(step1).toContain("RELATIONS ARE THE ONE ASYMMETRY");
+    expect(step1).toContain("a `relations` reported CUT needs no");
+    expect(step1).toContain("re-read before you write an edge on that turn");
+    expect(step1).toContain("A `relations` reported DROPPED was never");
+    expect(step1).toContain("shown, so read that turn's `relations` once before writing any edge");
   });
 });

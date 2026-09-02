@@ -236,11 +236,19 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
    * THE SPLICE ARITHMETIC, which nothing above can see: a grant's offset names
    * where in the RESPONSE its text ends, and the preface moves every one of
    * them forward. Delivered one character short of the whole response, the
-   * member grants must NOT be credited — with the offsets left un-shifted they
-   * would appear to end a preface's length earlier and be credited for bytes
-   * the reader never received.
+   * grant whose block ends AT that last character must NOT be credited — with
+   * the offsets left un-shifted it would appear to end a preface's length
+   * earlier and be credited for bytes the reader never received.
+   *
+   * SETTLEMENT-READ-ONCE TICKET 01 sharpened what "not credited" means here.
+   * This route used to mark every member of the page at the page's own end, so
+   * one missing character killed them all; it now marks each member where ITS
+   * block ends, so the same cut costs exactly the LAST member and keeps the
+   * one the reader actually received whole. That is the per-member grant the
+   * ticket exists for, and it makes this pin stricter, not looser: it now
+   * names WHICH member survived.
    */
-  test("the preface shifts the member grants' offsets, so a cut response credits nothing", () => {
+  test("the preface shifts the member grants' offsets, so a cut response drops the member it cut", () => {
     const reader = "claim:impression-04:2";
     function grantCount(): number {
       return db
@@ -248,6 +256,15 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
           `SELECT COUNT(*) AS n FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn'`,
         )
         .get(reader)!.n;
+    }
+    function grantedTurnIds(): number[] {
+      return db
+        .query<{ entity_id: number }, [string]>(
+          `SELECT entity_id FROM write_gate_reads WHERE writer = ? AND entity_type = 'turn'
+            ORDER BY entity_id`,
+        )
+        .all(reader)
+        .map((row) => row.entity_id);
     }
 
     seedLaneImpression(LANE_IMPRESSION);
@@ -257,7 +274,8 @@ describe("lane route: the impression as a page-1 preface outside the member pagi
       now: () => CUTOFF,
     });
     delivery.commitDelivered(delivery.text.length - 1);
-    expect(grantCount()).toBe(0);
+    expect(grantCount()).toBe(1);
+    expect(grantedTurnIds()).toEqual([turnIds.inLane!]);
 
     // The same response delivered WHOLE still credits both members — the
     // assertion above is about the offsets, not about grants having gone away.

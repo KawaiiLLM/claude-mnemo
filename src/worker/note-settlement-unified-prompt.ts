@@ -5,6 +5,14 @@ import type {
   SettlementWritableSet,
 } from "./note-settlement-context";
 import { renderImpressionTeaching } from "./note-settlement-impression-teaching";
+import {
+  SETTLEMENT_BOUNDED_FIELDS,
+  SETTLEMENT_READ_FIELD_BUDGETS,
+  SETTLEMENT_READ_FIELDS,
+  SETTLEMENT_READ_PAGE_BUDGET,
+  SETTLEMENT_READ_TURN_BUDGET,
+  SETTLEMENT_READ_TURNS_PER_PAGE,
+} from "./note-settlement-read-budgets";
 
 /**
  * THE UNIFIED PROMPT (settlement-execution-repair spec Rev 5, §Implementation
@@ -122,6 +130,18 @@ function renderWritableSet(set: SettlementWritableSet): string {
   return lines.join("\n");
 }
 
+/**
+ * Settlement-read-once ticket 01 (spec D1): the measured budget table as the
+ * literal object the read step tells the writer to send. Rendered from the
+ * constants rather than typed into the prose, so a re-measurement moves the
+ * teaching with it instead of leaving two numbers that disagree.
+ */
+function renderFieldBudgets(): string {
+  return `{${Object.entries(SETTLEMENT_READ_FIELD_BUDGETS)
+    .map(([field, budget]) => `${field}:${budget}`)
+    .join(",")}}`;
+}
+
 /** The task roster with each task's declared lane registry — identical rendering to the retired stage-1 prompt's own. */
 function renderTaskRoster(context: NoteSettlementContext): string {
   if (context.segmentRoster.length === 0) {
@@ -140,25 +160,27 @@ function renderTaskRoster(context: NoteSettlementContext): string {
 }
 
 /**
- * AMENDMENT (per-field-recall-budgets ticket 11, USER RULING S15069/T2106,
- * coordinated against teaching-repairs ticket 09 once its Status read
- * "resolved"): step 1's read-procedure example below now names
- * `fieldBudgets: { prompt: 50 }` instead of ticket 09's field-ORDER
- * approximation (metadata/content/prompt render in that fixed sequence
- * regardless of `filter.fields`' own order, so a generous `turn` left
- * `prompt` clipped to "roughly" 50 tokens for a TYPICAL note only).
- * `fieldBudgets` makes that an exact, order-independent contract instead of
- * an empirical approximation: `prompt`'s own text is cut to AT MOST 50
- * tokens whenever it renders at all, verified against the real
- * `formatTurnBody`/`capRenderToTokenBudget` pair (not re-derived from the
- * old field-order reasoning). `turn`'s job narrows to keeping
- * title/metadata/content whole — same ≈280 value ticket 09 already verified
- * empirically, still valid since it no longer has to also cover `prompt`'s
- * worst case. The one caveat ticket 09 stated survives UNCHANGED, re-verified
- * here: an unusually long `content` can still exhaust `turn` before the
- * ladder ever reaches the `prompt` line, dropping it entirely — `fieldBudgets`
- * caps `prompt`'s own cut, it does not reserve it a floor inside the
- * whole-block ladder.
+ * AMENDMENT (settlement-read-once ticket 01, spec D1 + D2) — step 1 is now
+ * ONE read, and it supersedes ticket 11's version of the same step.
+ *
+ * What ticket 11 shipped was right about the mechanism and wrong about the
+ * scope: it budgeted `prompt` exactly, but it taught a field list serving the
+ * TOPIC pass alone (title/metadata/content/prompt) and a `turn` of ≈280, so
+ * the edge pass had to read the same window a second time for `insight` and
+ * `relations`. Its stated caveat — an unusually long `content` can exhaust
+ * `turn` before the `prompt` line is reached, dropping it silently — was the
+ * other half of the cost: the reader could not tell a dropped field from an
+ * absent one, so it either re-read blind or wrote from a gap.
+ *
+ * Both are answered here, by the tool rather than by the prose. The field list
+ * is the UNION both stages use, the budgets are MEASURED
+ * (`note-settlement-read-budgets.ts` carries the numbers and the measurement),
+ * `boundedFields` says which cap is intentional, and a turn whose render lost
+ * anything ends with `truncated: <field> cut; <field> dropped` — so the
+ * re-read rule is exact: that turn, that field, nothing else. `relations`
+ * carries the one asymmetry the gate creates and the text now states: a CUT
+ * set already licenses the edge write (you saw the set), a DROPPED one does
+ * not.
  *
  * FIRST-SETTLEMENT-FEEDBACK TICKET 01 (user ruling S15069/T2367) adds TWO
  * paragraphs, each one a rule a tool already enforces that this text never
@@ -328,18 +350,21 @@ export function renderNoteSettlementUnifiedPrompt(
     "",
     "PHASE 1 — TOPIC PASS.",
     "",
-    "1. READ the writable set in chronological order, through `recall`. For",
-    "   the sweep itself, raise `pageSize` above its default of 10 (recall's",
-    "   own parameter — it already exists, ask for it) so one call returns",
-    "   the whole writable set in one page instead of many round trips. Ask for",
-    "   `filter={fields:[\"title\",\"metadata\",\"content\",\"prompt\"],",
-    "   fieldBudgets:{prompt:50}}` with `turn` raised to roughly 280:",
-    "   `fieldBudgets` cuts `prompt` to AT MOST 50 tokens — the user's own",
-    "   opening words as topic ground truth, never authority text — leaving",
-    "   `turn` free to keep a typical note's title/metadata/content whole. An",
-    "   unusually long `content` can still exhaust `turn` before `prompt`'s own",
-    "   line is even reached, dropping it entirely; that is a fact about the",
-    "   note, not a reason to chase it with a bigger budget.",
+    "1. READ the writable set ONCE, in as few pages as the envelope allows.",
+    "   One field list serves BOTH stages, so nothing either stage needs costs",
+    `   its own round trip. Ask for \`filter={fields:[${SETTLEMENT_READ_FIELDS.map(
+      (field) => `"${field}"`,
+    ).join(",")}],`,
+    `   fieldBudgets:${renderFieldBudgets()}}\` with`,
+    `   \`boundedFields:${JSON.stringify(SETTLEMENT_BOUNDED_FIELDS)}\`,`,
+    `   \`turn:${SETTLEMENT_READ_TURN_BUDGET}\`, \`pageBudget:${SETTLEMENT_READ_PAGE_BUDGET}\` and`,
+    `   \`pageSize\` raised well above its default of 10 — the page then packs by`,
+    "   what it actually costs to render, not by a turn count, and about",
+    `   ${SETTLEMENT_READ_TURNS_PER_PAGE} turns fit even when every field is at its cap.`,
+    "   `prompt` is the one BOUNDED field: 50 tokens of the user's own opening",
+    "   words as topic ground truth, never authority text. Reaching that cap is",
+    "   the contract, so the response never flags it. Every OTHER budgeted field",
+    "   is required whole.",
     "   ADDRESS THE BATCH, NEVER SEARCH FOR IT: read it as the task's own",
     "   event-order range, `id=\"E<n>/S<a>/T<b>..S<c>/T<d>\"` — cheap, and",
     "   members only. A window turn that is NOT a member of that task is",
@@ -348,11 +373,23 @@ export function renderNoteSettlementUnifiedPrompt(
     "   `filter.session` with no `id` is a WHOLE-SESSION SEARCH, never a way",
     "   to read a window: it materialises every turn the session ever had",
     "   before it can return page 1, which on a long session is minutes of",
-    "   your lease. YIELD-REPAIR: a write refused",
+    "   your lease.",
+    "   RE-READ ONLY WHAT THE RESPONSE NAMED. A turn whose render lost",
+    "   something ends with `truncated: <field> cut; <field> dropped` — those",
+    "   are the ONLY gaps. Re-read that ONE turn with `fields:[<that field>]`",
+    "   and a bigger budget for it alone; never the batch again, and never a",
+    "   field the footer did not name. A field absent from the footer was",
+    "   delivered whole, and a BOUNDED field never appears there at all.",
+    "   RELATIONS ARE THE ONE ASYMMETRY: a `relations` reported CUT needs no",
+    "   re-read before you write an edge on that turn — you saw the set, and",
+    "   the write gate asks only that. A `relations` reported DROPPED was never",
+    "   shown, so read that turn's `relations` once before writing any edge on",
+    "   it.",
+    "   YIELD-REPAIR: a write refused",
     "   as never-read or stale names the one address that needs it — re-read",
     "   THAT address alone, never the whole batch again; for a `type`/`tags`",
-    "   repair the default `metadata` field already carries both, so the",
-    "   plain re-read is enough.",
+    "   repair the `metadata` field carries both, so the plain re-read is",
+    "   enough.",
     "2. For each turn, do the TURN-SCOPE work as you read it (duties 1-2 below).",
     "   THE AUDIT IS A DUTY OF THE READ: type, title, content and `topic:`",
     "   words are judged on the material the read has already put in front of",
