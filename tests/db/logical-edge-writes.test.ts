@@ -11,6 +11,7 @@ import {
 import { createDatabase } from "../../src/db/database";
 import {
   getOutgoingEdges,
+  selectLogicalEdgeRow,
   writeMemoryEdges,
   RELATION_CLASS_SPECIFICITY,
 } from "../../src/db/memory-edges";
@@ -635,6 +636,25 @@ describe("logical edge writes (main-agent-edges D4/D5)", () => {
     );
     expect(refused.rejected).toHaveLength(1);
     expect(refused.rejected[0]!.reason).toBe("outgoing-degree-cap");
+  });
+
+  test("among equal-class rows of one legacy pair the LOWEST row id is the edge (integration probe S15069/T2437)", () => {
+    // Pinned after an adjudication probe flipped the tie-break to the highest
+    // id and nothing went red: the worker's report leans on this tie-break
+    // matching D9's fold, so it has to be a test, not a comment.
+    const citing = seedTurn(1);
+    const cited = seedTurn(2);
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'consume', 'judged', '', '', 'use', '', ${NOW}),
+              ('turn', ?, 'turn', ?, 'extends', 'judged', '', '', 'use', '', ${NOW})`,
+    ).run(citing, cited, citing, cited);
+    const rows = outgoing(citing);
+    expect(rows).toHaveLength(2);
+    const lowest = Math.min(...rows.map((row) => row.id));
+    expect(selectLogicalEdgeRow(rows)?.id).toBe(lowest);
   });
 
   test("PROMOTING a stored edge at the cap succeeds — a promotion adds no degree", () => {

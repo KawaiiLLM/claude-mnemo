@@ -4,7 +4,7 @@
 
 **Blocked by:** None (works on the current schema; must stop writing the `relation` word — write class/coverage only — and stop producing bare rows: R10-2's producers/restorers deleted here).
 
-**Status:** LANDED
+**Status:** LANDED **VERIFIED S15069/T2437 at 071b4de3+e7354ab2 (merged 16dc1087; one comment conflict with ticket 08 kept both)**: tsc 0, 4793/0/267 (−12 net, +1 file, accounted), guards clean. My real probes: the declare CAS ignored → RED (1); the equal-class tie-break flipped to the highest row id → SURVIVED — the report's "same tie-break as D9's fold" was a comment, not a pin; pinned in this commit with a two-row fixture (RED under the mutant). Peer implementation review requested. Worker findings carried: the prose-mention lint never existed (settlement prompt teaches a warning nothing implements → ticket 06); qualified `[S/T]` prose no longer feeds the citation graph → tickets 05/06 decide whether `note` still teaches that form; `dropBarePairRow` and the `retracted-bare-restored` CHECK value survive until ticket 01.
 
 - [x] Every rule above pinned; retraction of a promoted edge by its NEW class succeeds and by the old fails by name; caps count pairs.
 - [x] Wordless-row producers and restorers (`recomputeTurnCitedPairs`, `reconcileCitedPairs`, `restoreBareRowsForEmptiedPairs`, `relation: null` writes, the "Cites N pair(s)" receipt line) deleted; the prose-mention lint DOES NOT EXIST as code — see the report.

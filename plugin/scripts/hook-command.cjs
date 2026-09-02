@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtk8j3tn" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkadpqf" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -814,7 +814,6 @@ var EDGE_COLUMNS = `
   relation_coverage AS relationCoverage,
   created_at_epoch AS createdAtEpoch
 `;
-var EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
 function mapEdgeRow(row) {
   return {
     id: row.id,
@@ -841,8 +840,30 @@ function isValidCitingNode(node) {
 function isValidCitedNode(node) {
   return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
 }
+var RELATION_CLASS_SPECIFICITY = {
+  use: 0,
+  verify: 1,
+  correct: 2
+};
+function selectLogicalEdgeRow(rows) {
+  let best = null;
+  let bestRank = -1;
+  for (const row of rows) {
+    if (row.relation === null) {
+      continue;
+    }
+    const materialized = edgeRelationClass(row);
+    const rank = materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    if (best === null || rank > bestRank || rank === bestRank && row.id < best.id) {
+      best = row;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
 function writeMemoryEdges(db, edges, nowEpoch) {
   const written = [];
+  const promoted = [];
   const rejected = [];
   const insertRelationRow = db.query(
     `
@@ -851,79 +872,27 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         relation, provenance, tail_tag, head_tag,
         relation_class, relation_coverage, created_at_epoch
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
-      -- target's last two components \u2014 identity is (pair, relation, tail,
-      -- head), so a DIFFERENT side combination on the same (pair, relation)
-      -- is a fresh INSERT (a second, independent row), never a conflict
-      -- against a row that names other lanes. The merged tag-set component
-      -- ticket 01 put here left with the column. (No backticks in this
-      -- template literal: a stray one closes the JS string, not the comment.)
-      -- The clause has to name the WHOLE key \u2014 SQLite matches an ON CONFLICT
-      -- target against a unique constraint by its exact column set, so a
-      -- clause that named fewer would not prepare at all (the 2026-08-21
-      -- incident, idx_memory_edges_legacy_pair in db/schema.ts).
-      ON CONFLICT (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, tail_tag, head_tag
-      )
-        -- D2: a repeat of the same claim is a NO-OP, not a correction. The
-        -- assignment is deliberately the stored value itself: SQLite only
-        -- runs RETURNING on a row the statement touched, and this write's
-        -- contract is that every accepted input yields the row that now
-        -- satisfies it, restatements included.
-        --
-        -- relation-vocabulary-v13 ticket 03 closes the gap ticket 02 left
-        -- here. The class columns ARE assigned now, but ONLY onto a row that
-        -- carries no class yet, and only the value that row already READS AS:
-        -- the last two parameters are the write's own class when it carries
-        -- one, and otherwise LEGACY_RELATION_CLASS of this very word (the
-        -- conflict target pins the relation column, so the stored word and incoming
-        -- word are the same word). So this is the migration's materialization
-        -- reaching one more row, not a correction: edgeRelationClass answered
-        -- the same before and after. A row that is ALREADY classified is left
-        -- exactly as stored -- D2 still holds, a restatement never overwrites a
-        -- claim, and correcting a class is still retract-then-write.
-        DO UPDATE SET
-          relation = memory_edges.relation,
-          relation_class = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_class
-          END,
-          relation_coverage = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_coverage
-          END
       RETURNING ${EDGE_COLUMNS}
     `
+  );
+  const promoteRow = db.query(
+    `UPDATE memory_edges
+        SET relation = ?, relation_class = ?, relation_coverage = ?
+      WHERE id = ?
+      RETURNING ${EDGE_COLUMNS}`
   );
   const insertSideTagIndexRow = db.query(
     `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`
-  );
-  const insertBarePairRow = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      )
-      SELECT ?, ?, ?, ?, NULL, ?, ?
-      WHERE NOT EXISTS (
-        SELECT 1 FROM memory_edges
-        WHERE citing_kind = ? AND citing_id = ?
-          AND cited_kind = ? AND cited_id = ?
-      )
-      RETURNING ${EDGE_COLUMNS}
-    `
   );
   const dropBarePairRow = db.query(
     `DELETE FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
        AND relation IS NULL`
   );
-  const readPairRow = db.query(
+  const readPairRows = db.query(
     `SELECT ${EDGE_COLUMNS} FROM memory_edges
      WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY ${EDGE_IDENTITY_ORDER}
-     LIMIT 1`
+     ORDER BY id ASC`
   );
   for (const edge of edges) {
     if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
@@ -934,11 +903,15 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       rejected.push({ input: edge, reason: "self-loop" });
       continue;
     }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
+    if (edge.relation === null) {
+      rejected.push({ input: edge, reason: "bare-row-retired" });
+      continue;
+    }
+    if (!isCitationRelation(edge.relation)) {
       rejected.push({ input: edge, reason: "invalid-relation" });
       continue;
     }
-    if (edge.relation !== null && (edge.citing.kind !== "turn" || edge.cited.kind !== "turn")) {
+    if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
       rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
       continue;
     }
@@ -947,15 +920,24 @@ function writeMemoryEdges(db, edges, nowEpoch) {
       continue;
     }
     const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
-    if (edge.relation !== null) {
-      const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
-      const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
-      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
-      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
-      const conflictLegacyClass = LEGACY_RELATION_CLASS[edge.relation];
-      const fillClass = isRelationClass(relationClass) ? relationClass : conflictLegacyClass?.relationClass ?? NO_RELATION_CLASS;
-      const fillCoverage = isRelationClass(relationClass) ? relationCoverage : conflictLegacyClass?.relationCoverage ?? NO_RELATION_COVERAGE;
-      const row2 = insertRelationRow.get(
+    const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
+    const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+    const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+    const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
+    const legacyOfWrite = LEGACY_RELATION_CLASS[edge.relation];
+    const meansClass = isRelationClass(relationClass) ? relationClass : legacyOfWrite?.relationClass ?? NO_RELATION_CLASS;
+    const meansCoverage = isRelationClass(relationClass) ? relationCoverage : legacyOfWrite?.relationCoverage ?? NO_RELATION_COVERAGE;
+    const stored = selectLogicalEdgeRow(
+      readPairRows.all(edge.citing.kind, edge.citing.id, edge.cited.kind, edge.cited.id).map(mapEdgeRow)
+    );
+    if (stored === null) {
+      dropBarePairRow.run(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id
+      );
+      const row = insertRelationRow.get(
         edge.citing.kind,
         edge.citing.id,
         edge.cited.kind,
@@ -966,50 +948,46 @@ function writeMemoryEdges(db, edges, nowEpoch) {
         headTag,
         relationClass,
         relationCoverage,
-        createdAtEpoch,
-        fillClass,
-        fillCoverage
+        createdAtEpoch
       );
-      dropBarePairRow.run(
-        edge.citing.kind,
-        edge.citing.id,
-        edge.cited.kind,
-        edge.cited.id
-      );
-      if (row2) {
-        written.push(mapEdgeRow(row2));
+      if (row) {
+        written.push(mapEdgeRow(row));
         for (const side of EDGE_SIDES) {
           const tag = side === "tail" ? tailTag : headTag;
           if (tag !== UNSETTLED_SIDE_TAG) {
-            insertSideTagIndexRow.run(row2.id, side, tag);
+            insertSideTagIndexRow.run(row.id, side, tag);
           }
         }
       }
       continue;
     }
-    const inserted = insertBarePairRow.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.provenance,
-      createdAtEpoch,
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id
-    );
-    const row = inserted ?? readPairRow.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
+    const storedClass = edgeRelationClass(stored);
+    const wantsClass = isRelationClass(meansClass) ? meansClass : null;
+    const storedRank = storedClass === null ? -1 : RELATION_CLASS_SPECIFICITY[storedClass.relationClass];
+    const wantsRank = wantsClass === null ? -1 : RELATION_CLASS_SPECIFICITY[wantsClass];
+    const coverageChanges = storedClass !== null && wantsClass !== null && storedClass.relationClass === wantsClass && storedClass.relationCoverage !== meansCoverage;
+    if (wantsRank > storedRank || coverageChanges) {
+      const row = promoteRow.get(edge.relation, meansClass, meansCoverage, stored.id);
+      if (row) {
+        const mapped = mapEdgeRow(row);
+        written.push(mapped);
+        promoted.push(mapped);
+      }
+      continue;
     }
+    if (stored.relationClass === NO_RELATION_CLASS && storedClass !== null) {
+      const filled = promoteRow.get(
+        stored.relation,
+        storedClass.relationClass,
+        storedClass.relationCoverage,
+        stored.id
+      );
+      written.push(filled ? mapEdgeRow(filled) : stored);
+      continue;
+    }
+    written.push(stored);
   }
-  return { written, rejected };
+  return { written, promoted, rejected };
 }
 function mapTurnRelationEdgeRow(row) {
   return {
@@ -1193,6 +1171,155 @@ function parseQualifiedReferences(content) {
   return references;
 }
 
+// src/db/turn-tag-gate.ts
+function loadSegmentTagIndex(db) {
+  const rows = db.query(
+    `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments
+        WHERE json_array_length(tags) >= 1`
+  ).all();
+  const index = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+  return index;
+}
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
+}
+
+// src/db/write-gate.ts
+function sessionWriterId(sessionDbId) {
+  return `session:${sessionDbId}`;
+}
+var ANONYMOUS_WRITER = "unknown";
+function nextWriteGateSequence(db) {
+  return db.query(
+    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
+       ON CONFLICT(id) DO UPDATE SET value = value + 1
+       RETURNING value`
+  ).get().value;
+}
+function snapshotWriteGateSequence(db) {
+  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
+  return row?.value ?? 0;
+}
+function getWriterEpoch(db, writer) {
+  const row = db.query(
+    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
+  ).get(writer);
+  return row?.epoch ?? 0;
+}
+function bumpWriterEpoch(db, writer) {
+  return db.query(
+    `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
+       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
+       RETURNING epoch`
+  ).get(writer).epoch;
+}
+function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
+       read_at_epoch = excluded.read_at_epoch,
+       read_sequence = excluded.read_sequence,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
+  }
+}
+var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
+function sweepStaleReadGrants(db, nowEpoch, limit, maxAgeSeconds = STALE_READ_GRANT_AGE_SECONDS) {
+  const cutoffEpoch = nowEpoch - maxAgeSeconds;
+  const clearedGrantsByAge = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedGrantsByEpoch = db.query(
+    `DELETE FROM write_gate_reads WHERE rowid IN (
+         SELECT r.rowid FROM write_gate_epochs we
+         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  const clearedCompletenessByAge = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
+       )`
+  ).run(cutoffEpoch, limit).changes;
+  const clearedCompletenessByEpoch = db.query(
+    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
+         SELECT c.rowid FROM write_gate_epochs we
+         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
+         LIMIT ?
+       )`
+  ).run(limit).changes;
+  return clearedGrantsByAge + clearedGrantsByEpoch + clearedCompletenessByAge + clearedCompletenessByEpoch;
+}
+function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
+  if (entries.length === 0) {
+    return;
+  }
+  const epoch = getWriterEpoch(db, writer);
+  const stmt = db.query(
+    `INSERT INTO write_gate_field_completeness
+       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
+       complete = excluded.complete,
+       recorded_sequence = excluded.recorded_sequence,
+       recorded_at_epoch = excluded.recorded_at_epoch,
+       epoch = excluded.epoch`
+  );
+  for (const entry of entries) {
+    stmt.run(
+      writer,
+      entry.entityType,
+      entry.entityId,
+      entry.field,
+      entry.complete ? 1 : 0,
+      sequence,
+      nowEpoch,
+      epoch
+    );
+  }
+}
+function stampField(db, entityType, entityId, field, writer, nowEpoch) {
+  const writeSequence = nextWriteGateSequence(db);
+  db.query(
+    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+       writer = excluded.writer,
+       write_sequence = excluded.write_sequence,
+       written_at_epoch = excluded.written_at_epoch`
+  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
+  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
+}
+var RELATIONS_GATE_FIELD = "relations";
+var COMPACT_REPAIR_WRITER = "compact:repair";
+function stampTurnRelationsRevision(db, turnId, writer, nowEpoch) {
+  return stampField(
+    db,
+    "turn",
+    turnId,
+    RELATIONS_GATE_FIELD,
+    writer ?? ANONYMOUS_WRITER,
+    nowEpoch
+  );
+}
+
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "override",
@@ -1239,7 +1366,19 @@ var RELATION_REJECTION_TEXT = {
   // turn's incoming degree is a different repair from one refused for the
   // citing turn's own outgoing degree, and neither is fixed by re-sending.
   "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap \u2014 retract one before adding another; nothing in this call was written`,
-  "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap \u2014 nothing in this call was written`
+  "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap \u2014 nothing in this call was written`,
+  // main-agent-edges D5. One pair, one row, one claim: `correct(full)` says no
+  // substantial part of the cited result may still serve as a premise and
+  // `correct(partial)` says a definite part still may, so a call asserting
+  // both about the same pair has not stated a stronger and a weaker claim —
+  // it has stated two incompatible ones, and there is no most-specific to
+  // collapse onto.
+  "coverage-conflict": "is named `correct` twice in this call under BOTH coverage bits \u2014 `full` and `partial` are the same specificity and contradict each other, so nothing in this call was written; send the one you mean",
+  // main-agent-edges D4/D5, T2432 P1. `formatRelationRejections` fills the
+  // CURRENT class in instead of this fallback whenever the rejection carries
+  // one, which is the only reason this refusal is worth more than "no such
+  // edge": the edge is there, and it is not what you read.
+  "stale-class": "is not the class this pair carries any more \u2014 read the edge again before acting on it"
 };
 
 // src/db/impressions.ts
@@ -2064,134 +2203,6 @@ var TagNamespaceCollisionError = class extends Error {
     this.holder = holder;
   }
 };
-
-// src/db/write-gate.ts
-function sessionWriterId(sessionDbId) {
-  return `session:${sessionDbId}`;
-}
-var ANONYMOUS_WRITER = "unknown";
-function nextWriteGateSequence(db) {
-  return db.query(
-    `INSERT INTO write_gate_sequence (id, value) VALUES (1, 1)
-       ON CONFLICT(id) DO UPDATE SET value = value + 1
-       RETURNING value`
-  ).get().value;
-}
-function snapshotWriteGateSequence(db) {
-  const row = db.query(`SELECT value FROM write_gate_sequence WHERE id = 1`).get();
-  return row?.value ?? 0;
-}
-function getWriterEpoch(db, writer) {
-  const row = db.query(
-    `SELECT epoch FROM write_gate_epochs WHERE writer = ?`
-  ).get(writer);
-  return row?.epoch ?? 0;
-}
-function bumpWriterEpoch(db, writer) {
-  return db.query(
-    `INSERT INTO write_gate_epochs (writer, epoch) VALUES (?, 1)
-       ON CONFLICT(writer) DO UPDATE SET epoch = epoch + 1
-       RETURNING epoch`
-  ).get(writer).epoch;
-}
-function recordReadGrants(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_reads (writer, entity_type, entity_id, read_at_epoch, read_sequence, epoch)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id) DO UPDATE SET
-       read_at_epoch = excluded.read_at_epoch,
-       read_sequence = excluded.read_sequence,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(writer, entry.entityType, entry.entityId, nowEpoch, sequence, epoch);
-  }
-}
-var STALE_READ_GRANT_AGE_SECONDS = 30 * 24 * 60 * 60;
-function sweepStaleReadGrants(db, nowEpoch, limit, maxAgeSeconds = STALE_READ_GRANT_AGE_SECONDS) {
-  const cutoffEpoch = nowEpoch - maxAgeSeconds;
-  const clearedGrantsByAge = db.query(
-    `DELETE FROM write_gate_reads WHERE rowid IN (
-         SELECT rowid FROM write_gate_reads WHERE read_at_epoch <= ? LIMIT ?
-       )`
-  ).run(cutoffEpoch, limit).changes;
-  const clearedGrantsByEpoch = db.query(
-    `DELETE FROM write_gate_reads WHERE rowid IN (
-         SELECT r.rowid FROM write_gate_epochs we
-         JOIN write_gate_reads r ON r.writer = we.writer AND r.epoch != we.epoch
-         LIMIT ?
-       )`
-  ).run(limit).changes;
-  const clearedCompletenessByAge = db.query(
-    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
-         SELECT rowid FROM write_gate_field_completeness WHERE recorded_at_epoch <= ? LIMIT ?
-       )`
-  ).run(cutoffEpoch, limit).changes;
-  const clearedCompletenessByEpoch = db.query(
-    `DELETE FROM write_gate_field_completeness WHERE rowid IN (
-         SELECT c.rowid FROM write_gate_epochs we
-         JOIN write_gate_field_completeness c ON c.writer = we.writer AND c.epoch != we.epoch
-         LIMIT ?
-       )`
-  ).run(limit).changes;
-  return clearedGrantsByAge + clearedGrantsByEpoch + clearedCompletenessByAge + clearedCompletenessByEpoch;
-}
-function recordFieldCompleteness(db, writer, entries, nowEpoch, sequence) {
-  if (entries.length === 0) {
-    return;
-  }
-  const epoch = getWriterEpoch(db, writer);
-  const stmt = db.query(
-    `INSERT INTO write_gate_field_completeness
-       (writer, entity_type, entity_id, field, complete, recorded_sequence, recorded_at_epoch, epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(writer, entity_type, entity_id, field) DO UPDATE SET
-       complete = excluded.complete,
-       recorded_sequence = excluded.recorded_sequence,
-       recorded_at_epoch = excluded.recorded_at_epoch,
-       epoch = excluded.epoch`
-  );
-  for (const entry of entries) {
-    stmt.run(
-      writer,
-      entry.entityType,
-      entry.entityId,
-      entry.field,
-      entry.complete ? 1 : 0,
-      sequence,
-      nowEpoch,
-      epoch
-    );
-  }
-}
-function stampField(db, entityType, entityId, field, writer, nowEpoch) {
-  const writeSequence = nextWriteGateSequence(db);
-  db.query(
-    `INSERT INTO write_gate_stamps (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
-       writer = excluded.writer,
-       write_sequence = excluded.write_sequence,
-       written_at_epoch = excluded.written_at_epoch`
-  ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
-  return { writer, writeSequence, writtenAtEpoch: nowEpoch };
-}
-var RELATIONS_GATE_FIELD = "relations";
-var COMPACT_REPAIR_WRITER = "compact:repair";
-function stampTurnRelationsRevision(db, turnId, writer, nowEpoch) {
-  return stampField(
-    db,
-    "turn",
-    turnId,
-    RELATIONS_GATE_FIELD,
-    writer ?? ANONYMOUS_WRITER,
-    nowEpoch
-  );
-}
 
 // src/db/segments.ts
 var SEGMENT_CONTAINER_ERA_CUTOFF_EPOCH = 1786981737;
@@ -3712,27 +3723,6 @@ function runSegmentOneTagMigration(db, nowEpoch = Math.floor(Date.now() / 1e3)) 
     const receipt = { named, pendingNaming, retired };
     writeMigrationReceipt(db, SEGMENT_ONE_TAG_RECEIPT, nowEpoch, receipt);
   });
-}
-
-// src/db/turn-tag-gate.ts
-function loadSegmentTagIndex(db) {
-  const rows = db.query(
-    `SELECT id, json_extract(tags, '$[0]') AS tag
-         FROM segments
-        WHERE json_array_length(tags) >= 1`
-  ).all();
-  const index = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
-      index.set(row.tag, row.id);
-    }
-  }
-  return index;
-}
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
 }
 
 // src/db/schema.ts
@@ -6494,6 +6484,9 @@ function migrateTurnCitationsToEdges(db) {
         createdAtEpoch: row.createdAtEpoch
       }))
     );
+    if (winner.relation === null) {
+      continue;
+    }
     inputs.push({
       citing: { kind: "turn", id: sample.citingTurnId },
       cited: { kind: "turn", id: sample.citedTurnId },

@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtk8j3tn" : "dev";
+var BUILD_ID = true ? "0.29.0-mtkadpqf" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -294,720 +294,6 @@ function runWriteTransaction(db, fn, attempts = 3) {
       syncSleep(genericWriteBackoffMs(attempt));
     }
   }
-}
-
-// src/shared/type-vocabulary.ts
-var MEMORY_TYPES = [
-  "discuss",
-  "research",
-  "design",
-  "implement",
-  "refactor",
-  "fix",
-  "measure",
-  "review",
-  "ops",
-  "delegate",
-  "correction"
-];
-function isMemoryType(value) {
-  return typeof value === "string" && MEMORY_TYPES.includes(value);
-}
-var TYPE_GLYPH = {
-  discuss: "\u{1F4AC}",
-  research: "\u{1F50D}",
-  design: "\u2696\uFE0F",
-  implement: "\u{1F527}",
-  refactor: "\u{1F504}",
-  fix: "\u{1F534}",
-  measure: "\u{1F4CA}",
-  review: "\u2705",
-  ops: "\u2699\uFE0F",
-  delegate: "\u{1F91D}",
-  correction: "\u21A9\uFE0F"
-};
-var COMPACT_TYPE_GLYPH = "\u23F8";
-var LEGACY_TYPE_GLYPH = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F",
-  compact: COMPACT_TYPE_GLYPH
-};
-function typeWordGlyph(word) {
-  if (isMemoryType(word)) {
-    return TYPE_GLYPH[word];
-  }
-  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
-}
-function typeListGlyph(types) {
-  if (!types || types.length === 0) {
-    return "\u2022";
-  }
-  return types.map(typeWordGlyph).join("");
-}
-function typeListsEqual(left, right) {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => value === right[index]);
-}
-
-// src/shared/turn-phase.ts
-var TYPE_PHASE = {
-  research: "evidence",
-  measure: "evidence",
-  design: "decision",
-  discuss: "decision",
-  correction: "decision",
-  implement: "delivery",
-  refactor: "delivery",
-  fix: "delivery",
-  delegate: "delivery",
-  review: "delivery",
-  ops: "delivery"
-};
-function phasesForTypes(types) {
-  const phases = /* @__PURE__ */ new Set();
-  for (const raw of types) {
-    const phase = TYPE_PHASE[raw];
-    if (phase !== void 0) {
-      phases.add(phase);
-    }
-  }
-  return phases;
-}
-var EDGE_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies"
-];
-var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
-var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
-
-// src/shared/relation-class.ts
-var RELATION_CLASSES = ["correct", "verify", "use"];
-var RELATION_COVERAGES = ["full", "partial"];
-var NO_RELATION_COVERAGE = "";
-var NO_RELATION_CLASS = "";
-function isRelationClass(value) {
-  return typeof value === "string" && RELATION_CLASSES.includes(value);
-}
-function isRelationCoverage(value) {
-  return typeof value === "string" && RELATION_COVERAGES.includes(value);
-}
-var LEGACY_RELATION_CLASS = {
-  override: { relationClass: "correct", relationCoverage: "full" },
-  narrows: { relationClass: "correct", relationCoverage: "partial" },
-  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
-  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
-  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
-};
-var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
-  correct: EDGE_RELATIONS.filter(
-    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
-  ),
-  verify: EDGE_RELATIONS.filter(
-    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
-  ),
-  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
-});
-var INTERIM_LEGACY_RELATION = Object.freeze([
-  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
-  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
-  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
-  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
-]);
-function edgeRelationClass(row) {
-  if (isRelationClass(row.relationClass)) {
-    return {
-      relationClass: row.relationClass,
-      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
-    };
-  }
-  if (row.relation === null) {
-    return null;
-  }
-  return LEGACY_RELATION_CLASS[row.relation] ?? null;
-}
-function formatRelationClass(relationClass, relationCoverage) {
-  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
-}
-function displayEdgeRelation(row) {
-  if (isRelationClass(row.relationClass)) {
-    return formatRelationClass(
-      row.relationClass,
-      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
-    );
-  }
-  return row.relation ?? "";
-}
-var RETIRED_RELATION_FIELDS = Object.freeze([
-  ["override", 'correct with `"coverage": "full"`'],
-  ["narrows", 'correct with `"coverage": "partial"`'],
-  ["extends", "use"],
-  ["consume", "use"],
-  ["grounds", "use"],
-  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
-  ["verifies", "verify"],
-  ["retractOverride", "retractCorrect"],
-  ["retractNarrows", "retractCorrect"],
-  ["retractExtends", "retractUse"],
-  ["retractConsume", "retractUse"],
-  ["retractGrounds", "retractUse"],
-  ["retractIndexes", "retractUse"],
-  ["retractVerifies", "retractVerify"]
-]);
-
-// src/db/references.ts
-var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
-function parsePositiveId(digits) {
-  if (digits === void 0) {
-    return null;
-  }
-  const value = Number.parseInt(digits, 10);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-var BARE_REFERENCE_PATTERN = /\bS(\d+)\/T(\d+)\b|\bE(\d+)\b/g;
-function splitBracketSegments(content) {
-  const segments = [];
-  let index = 0;
-  let textStart = 0;
-  while (index < content.length) {
-    if (content[index] !== "[") {
-      index += 1;
-      continue;
-    }
-    const start = index;
-    let depth = 0;
-    let nested = false;
-    let cursor = index;
-    for (; cursor < content.length; cursor += 1) {
-      const char = content[cursor];
-      if (char === "[") {
-        depth += 1;
-        if (depth > 1) {
-          nested = true;
-        }
-      } else if (char === "]") {
-        depth -= 1;
-        if (depth === 0) {
-          break;
-        }
-      }
-    }
-    if (depth !== 0) {
-      if (textStart < start) {
-        segments.push({ kind: "text", text: content.slice(textStart, start) });
-      }
-      textStart = content.length;
-      break;
-    }
-    if (textStart < start) {
-      segments.push({ kind: "text", text: content.slice(textStart, start) });
-    }
-    if (!nested) {
-      segments.push({ kind: "bracket", group: content.slice(start, cursor + 1) });
-    }
-    index = cursor + 1;
-    textStart = index;
-  }
-  if (textStart < content.length) {
-    segments.push({ kind: "text", text: content.slice(textStart) });
-  }
-  return segments;
-}
-function collectBareReferences(text, references, seen) {
-  BARE_REFERENCE_PATTERN.lastIndex = 0;
-  let match;
-  while ((match = BARE_REFERENCE_PATTERN.exec(text)) !== null) {
-    const segmentId = parsePositiveId(match[3]);
-    if (segmentId !== null) {
-      const key2 = `E${segmentId}`;
-      if (!seen.has(key2)) {
-        seen.add(key2);
-        references.push({ kind: "segment", raw: match[0], segmentId });
-      }
-      continue;
-    }
-    const sessionId = parsePositiveId(match[1]);
-    const promptNumber = parsePositiveId(match[2]);
-    if (sessionId === null || promptNumber === null) {
-      continue;
-    }
-    const key = `S${sessionId}/T${promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      references.push({ kind: "turn", raw: match[0], sessionId, promptNumber });
-    }
-  }
-}
-function parseQualifiedReferences(content) {
-  if (!content) {
-    return [];
-  }
-  const references = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const segment of splitBracketSegments(content)) {
-    if (segment.kind === "text") {
-      collectBareReferences(segment.text, references, seen);
-      continue;
-    }
-    const match = REFERENCE_PATTERN.exec(segment.group);
-    if (match === null) {
-      continue;
-    }
-    const raw = match[0];
-    const segmentId = parsePositiveId(match[3]);
-    if (segmentId !== null) {
-      const key2 = `E${segmentId}`;
-      if (!seen.has(key2)) {
-        seen.add(key2);
-        references.push({ kind: "segment", raw, segmentId });
-      }
-      continue;
-    }
-    const sessionId = parsePositiveId(match[1]);
-    const promptNumber = parsePositiveId(match[2]);
-    if (sessionId === null || promptNumber === null) {
-      continue;
-    }
-    const key = `S${sessionId}/T${promptNumber}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      references.push({ kind: "turn", raw, sessionId, promptNumber });
-    }
-  }
-  return references;
-}
-
-// src/db/turn-liveness.ts
-function liveTurnSql(alias = "") {
-  const prefix = alias ? `${alias}.` : "";
-  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
-}
-
-// src/db/citations.ts
-var CITATION_RELATIONS = [
-  "override",
-  "narrows",
-  "extends",
-  "indexes",
-  "consume",
-  "grounds",
-  "verifies"
-];
-function isCitationRelation(value) {
-  return typeof value === "string" && CITATION_RELATIONS.includes(value);
-}
-var RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
-var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
-  ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
-);
-var MAX_TURN_RELATION_DEGREE = 20;
-var RELATION_REJECTION_TEXT = {
-  malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
-  unresolved: "does not resolve to a turn or segment",
-  // lane-model-v12 D2 (ticket 04): an edge's two ends must be DIFFERENT
-  // turns, for every relation. The write surface's own pre-check ordinarily
-  // catches a self target first (with the shared validator's wording); this is
-  // the storage layer's backstop for a caller reaching `attachTurnRelations`
-  // directly.
-  // [S15069/T1728], container-unification D10: a segment is a CONTAINER, not a
-  // relation node. It may still be CITED — prose naming `[E<n>]` records a bare
-  // `text-ref` row — but no relation word may point at one. The storage CHECK
-  // enforces the same rule one layer down; this message is what a caller sees
-  // instead of a constraint failure.
-  "segment-not-a-relation-node": "names a segment \u2014 a segment is a container, not a relation node, so no relation may point at it (prose naming it still records a bare citation)",
-  "self-edge": "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
-  "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry",
-  // relation-vocabulary-v13 ticket 02: the FULL/PARTIAL bit is a stored field,
-  // so a `correct` that never said which kind of correction it was is refused
-  // here rather than stored half-answered. The message names the missing bit
-  // and both legal values, because a writer told only "coverage required" has
-  // to go read a schema to find out what to send.
-  "coverage-required": 'is a `correct` edge with no coverage bit \u2014 add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
-  "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives",
-  // Settlement-read-once ticket 00 (USER RULING T2404). The message names the
-  // node the cap is being counted on, because a call refused for a CITED
-  // turn's incoming degree is a different repair from one refused for the
-  // citing turn's own outgoing degree, and neither is fixed by re-sending.
-  "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap \u2014 retract one before adding another; nothing in this call was written`,
-  "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap \u2014 nothing in this call was written`
-};
-
-// src/db/memory-edges.ts
-var EDGE_NODE_KINDS = ["turn", "segment"];
-var CITING_NODE_KINDS = ["turn", "segment", "session"];
-var EDGE_PROVENANCES = [
-  "retrieval",
-  "text-ref",
-  "rollback",
-  "judged",
-  "asserted"
-];
-function canonicalizeTagSet(tags) {
-  if (!Array.isArray(tags)) {
-    return [];
-  }
-  const set = /* @__PURE__ */ new Set();
-  for (const tag of tags) {
-    if (typeof tag === "string" && tag.length > 0) {
-      set.add(tag);
-    }
-  }
-  return [...set].sort();
-}
-var EDGE_SIDES = ["tail", "head"];
-var UNSETTLED_SIDE_TAG = "";
-function deriveSideTags(tags) {
-  const only = tags.length === 1 ? tags[0] : UNSETTLED_SIDE_TAG;
-  return { tailTag: only, headTag: only };
-}
-var PROVENANCE_RANK = {
-  retrieval: 0,
-  rollback: 1,
-  "text-ref": 2,
-  judged: 3,
-  asserted: 4
-};
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
-}
-function isEdgeNodeKind(value) {
-  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
-}
-function isCitingNodeKind(value) {
-  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
-}
-function isEdgeProvenance(value) {
-  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
-}
-var EDGE_COLUMNS = `
-  id,
-  citing_kind AS citingKind,
-  citing_id AS citingId,
-  cited_kind AS citedKind,
-  cited_id AS citedId,
-  relation,
-  provenance,
-  tail_tag AS tailTag,
-  head_tag AS headTag,
-  relation_class AS relationClass,
-  relation_coverage AS relationCoverage,
-  created_at_epoch AS createdAtEpoch
-`;
-var EDGE_IDENTITY_ORDER = "relation ASC, tail_tag ASC, head_tag ASC";
-function mapEdgeRow(row) {
-  return {
-    id: row.id,
-    citing: { kind: row.citingKind, id: row.citingId },
-    cited: { kind: row.citedKind, id: row.citedId },
-    relation: row.relation,
-    // NOT NULL by schema, but a row read back from a database that predates
-    // ticket 05's migration would answer `null` — the sentinel keeps every
-    // reader on one convention rather than making each test for null.
-    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
-    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
-    // Same "one convention, not a null test per reader" rule the two sides
-    // above follow: a row read back before ticket 02's ADD COLUMN migration
-    // has run answers null, and `''` is what every reader is written against.
-    relationClass: row.relationClass ?? NO_RELATION_CLASS,
-    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
-    provenance: row.provenance,
-    createdAtEpoch: row.createdAtEpoch
-  };
-}
-function isValidCitingNode(node) {
-  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function isValidCitedNode(node) {
-  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
-}
-function writeMemoryEdges(db, edges, nowEpoch) {
-  const written = [];
-  const rejected = [];
-  const insertRelationRow = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, tail_tag, head_tag,
-        relation_class, relation_coverage, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      -- lane-model-v12 ticket 09: the two SIDE columns are the conflict
-      -- target's last two components \u2014 identity is (pair, relation, tail,
-      -- head), so a DIFFERENT side combination on the same (pair, relation)
-      -- is a fresh INSERT (a second, independent row), never a conflict
-      -- against a row that names other lanes. The merged tag-set component
-      -- ticket 01 put here left with the column. (No backticks in this
-      -- template literal: a stray one closes the JS string, not the comment.)
-      -- The clause has to name the WHOLE key \u2014 SQLite matches an ON CONFLICT
-      -- target against a unique constraint by its exact column set, so a
-      -- clause that named fewer would not prepare at all (the 2026-08-21
-      -- incident, idx_memory_edges_legacy_pair in db/schema.ts).
-      ON CONFLICT (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, tail_tag, head_tag
-      )
-        -- D2: a repeat of the same claim is a NO-OP, not a correction. The
-        -- assignment is deliberately the stored value itself: SQLite only
-        -- runs RETURNING on a row the statement touched, and this write's
-        -- contract is that every accepted input yields the row that now
-        -- satisfies it, restatements included.
-        --
-        -- relation-vocabulary-v13 ticket 03 closes the gap ticket 02 left
-        -- here. The class columns ARE assigned now, but ONLY onto a row that
-        -- carries no class yet, and only the value that row already READS AS:
-        -- the last two parameters are the write's own class when it carries
-        -- one, and otherwise LEGACY_RELATION_CLASS of this very word (the
-        -- conflict target pins the relation column, so the stored word and incoming
-        -- word are the same word). So this is the migration's materialization
-        -- reaching one more row, not a correction: edgeRelationClass answered
-        -- the same before and after. A row that is ALREADY classified is left
-        -- exactly as stored -- D2 still holds, a restatement never overwrites a
-        -- claim, and correcting a class is still retract-then-write.
-        DO UPDATE SET
-          relation = memory_edges.relation,
-          relation_class = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_class
-          END,
-          relation_coverage = CASE
-            WHEN memory_edges.relation_class = '' THEN ?
-            ELSE memory_edges.relation_coverage
-          END
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  const insertSideTagIndexRow = db.query(
-    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`
-  );
-  const insertBarePairRow = db.query(
-    `
-      INSERT INTO memory_edges (
-        citing_kind, citing_id, cited_kind, cited_id,
-        relation, provenance, created_at_epoch
-      )
-      SELECT ?, ?, ?, ?, NULL, ?, ?
-      WHERE NOT EXISTS (
-        SELECT 1 FROM memory_edges
-        WHERE citing_kind = ? AND citing_id = ?
-          AND cited_kind = ? AND cited_id = ?
-      )
-      RETURNING ${EDGE_COLUMNS}
-    `
-  );
-  const dropBarePairRow = db.query(
-    `DELETE FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-       AND relation IS NULL`
-  );
-  const readPairRow = db.query(
-    `SELECT ${EDGE_COLUMNS} FROM memory_edges
-     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
-     ORDER BY ${EDGE_IDENTITY_ORDER}
-     LIMIT 1`
-  );
-  for (const edge of edges) {
-    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
-      rejected.push({ input: edge, reason: "invalid-node" });
-      continue;
-    }
-    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
-      rejected.push({ input: edge, reason: "self-loop" });
-      continue;
-    }
-    if (edge.relation !== null && !isCitationRelation(edge.relation)) {
-      rejected.push({ input: edge, reason: "invalid-relation" });
-      continue;
-    }
-    if (edge.relation !== null && (edge.citing.kind !== "turn" || edge.cited.kind !== "turn")) {
-      rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
-      continue;
-    }
-    if (!isEdgeProvenance(edge.provenance)) {
-      rejected.push({ input: edge, reason: "invalid-provenance" });
-      continue;
-    }
-    const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
-    if (edge.relation !== null) {
-      const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
-      const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
-      const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
-      const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
-      const conflictLegacyClass = LEGACY_RELATION_CLASS[edge.relation];
-      const fillClass = isRelationClass(relationClass) ? relationClass : conflictLegacyClass?.relationClass ?? NO_RELATION_CLASS;
-      const fillCoverage = isRelationClass(relationClass) ? relationCoverage : conflictLegacyClass?.relationCoverage ?? NO_RELATION_COVERAGE;
-      const row2 = insertRelationRow.get(
-        edge.citing.kind,
-        edge.citing.id,
-        edge.cited.kind,
-        edge.cited.id,
-        edge.relation,
-        edge.provenance,
-        tailTag,
-        headTag,
-        relationClass,
-        relationCoverage,
-        createdAtEpoch,
-        fillClass,
-        fillCoverage
-      );
-      dropBarePairRow.run(
-        edge.citing.kind,
-        edge.citing.id,
-        edge.cited.kind,
-        edge.cited.id
-      );
-      if (row2) {
-        written.push(mapEdgeRow(row2));
-        for (const side of EDGE_SIDES) {
-          const tag = side === "tail" ? tailTag : headTag;
-          if (tag !== UNSETTLED_SIDE_TAG) {
-            insertSideTagIndexRow.run(row2.id, side, tag);
-          }
-        }
-      }
-      continue;
-    }
-    const inserted = insertBarePairRow.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id,
-      edge.provenance,
-      createdAtEpoch,
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id
-    );
-    const row = inserted ?? readPairRow.get(
-      edge.citing.kind,
-      edge.citing.id,
-      edge.cited.kind,
-      edge.cited.id
-    );
-    if (row) {
-      written.push(mapEdgeRow(row));
-    }
-  }
-  return { written, rejected };
-}
-function mapTurnRelationEdgeRow(row) {
-  return {
-    relation: row.relation,
-    relationClass: row.relationClass ?? NO_RELATION_CLASS,
-    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
-    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
-    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
-    otherTurnId: row.otherTurnId,
-    otherSessionId: row.otherSessionId,
-    otherPromptNumber: row.otherPromptNumber
-  };
-}
-function getTurnRelationEdges(db, turnId) {
-  const outbound = db.query(
-    `SELECT e.relation AS relation,
-              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
-              e.tail_tag AS tailTag, e.head_tag AS headTag,
-              cited.id AS otherTurnId, cited.session_id AS otherSessionId,
-              cited.prompt_number AS otherPromptNumber
-         FROM memory_edges e
-         JOIN turns citing ON citing.id = e.citing_id
-         JOIN turns cited ON cited.id = e.cited_id
-        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-          AND e.relation IS NOT NULL
-          AND e.citing_id = ?
-          AND ${liveTurnSql("citing")}
-          AND ${liveTurnSql("cited")}
-        ORDER BY e.relation ASC, e.tail_tag ASC, e.head_tag ASC`
-  ).all(turnId).map(mapTurnRelationEdgeRow);
-  const inbound = db.query(
-    `SELECT e.relation AS relation,
-              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
-              e.tail_tag AS tailTag, e.head_tag AS headTag,
-              citing.id AS otherTurnId, citing.session_id AS otherSessionId,
-              citing.prompt_number AS otherPromptNumber
-         FROM memory_edges e
-         JOIN turns citing ON citing.id = e.citing_id
-         JOIN turns cited ON cited.id = e.cited_id
-        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
-          AND e.relation IS NOT NULL
-          AND e.cited_id = ?
-          AND ${liveTurnSql("citing")}
-          AND ${liveTurnSql("cited")}
-        ORDER BY e.relation ASC, e.tail_tag ASC, e.head_tag ASC`
-  ).all(turnId).map(mapTurnRelationEdgeRow);
-  return { outbound, inbound };
-}
-function getRelationEdgesAmongTurns(db, turnIds) {
-  const ids = [...new Set(turnIds)];
-  if (ids.length === 0) {
-    return [];
-  }
-  const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db.query(
-    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
-              me.tail_tag AS tailTag, me.head_tag AS headTag,
-              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
-  ).all(...ids, ...ids, ...EDGE_RELATIONS).map((row) => ({
-    citingId: row.citingId,
-    citedId: row.citedId,
-    relation: row.relation,
-    tailTag: row.tailTag,
-    headTag: row.headTag,
-    relationClass: row.relationClass ?? NO_RELATION_CLASS,
-    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
-  }));
-}
-function getRolledBackCiterIds(db, citingTurnIds) {
-  const ids = [...new Set(citingTurnIds)];
-  if (ids.length === 0) {
-    return [];
-  }
-  const idPlaceholders = ids.map(() => "?").join(",");
-  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
-  return db.query(
-    `SELECT DISTINCT me.citing_id AS citingId
-       FROM memory_edges me
-       JOIN turns tc ON tc.id = me.citing_id
-       JOIN turns td ON td.id = me.cited_id
-       WHERE me.citing_id IN (${idPlaceholders})
-         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
-         AND me.relation IN (${relationPlaceholders})
-         AND ${liveTurnSql("tc")}
-         AND td.was_rolled_back = 1
-       ORDER BY me.citing_id ASC`
-  ).all(...ids, ...EDGE_RELATIONS).map((row) => row.citingId);
-}
-function rebuildMemoryEdgeSideTagsIndexCore(db) {
-  db.exec("DELETE FROM memory_edge_side_tags");
-  db.exec(`
-    INSERT INTO memory_edge_side_tags (edge_row_id, side, tag)
-    SELECT id, 'tail', tail_tag FROM memory_edges WHERE tail_tag <> ''
-    UNION ALL
-    SELECT id, 'head', head_tag FROM memory_edges WHERE head_tag <> ''
-  `);
-}
-function countMemoryEdges(db) {
-  return db.query("SELECT COUNT(*) AS count FROM memory_edges").get()?.count ?? 0;
 }
 
 // src/db/search.ts
@@ -1848,6 +1134,128 @@ function getObservation(db, observationId) {
   );
 }
 
+// src/db/references.ts
+var REFERENCE_PATTERN = /^\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]$/;
+function parsePositiveId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var BARE_REFERENCE_PATTERN = /\bS(\d+)\/T(\d+)\b|\bE(\d+)\b/g;
+function splitBracketSegments(content) {
+  const segments = [];
+  let index = 0;
+  let textStart = 0;
+  while (index < content.length) {
+    if (content[index] !== "[") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let depth = 0;
+    let nested = false;
+    let cursor = index;
+    for (; cursor < content.length; cursor += 1) {
+      const char = content[cursor];
+      if (char === "[") {
+        depth += 1;
+        if (depth > 1) {
+          nested = true;
+        }
+      } else if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      }
+    }
+    if (depth !== 0) {
+      if (textStart < start) {
+        segments.push({ kind: "text", text: content.slice(textStart, start) });
+      }
+      textStart = content.length;
+      break;
+    }
+    if (textStart < start) {
+      segments.push({ kind: "text", text: content.slice(textStart, start) });
+    }
+    if (!nested) {
+      segments.push({ kind: "bracket", group: content.slice(start, cursor + 1) });
+    }
+    index = cursor + 1;
+    textStart = index;
+  }
+  if (textStart < content.length) {
+    segments.push({ kind: "text", text: content.slice(textStart) });
+  }
+  return segments;
+}
+function collectBareReferences(text, references, seen) {
+  BARE_REFERENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = BARE_REFERENCE_PATTERN.exec(text)) !== null) {
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw: match[0], segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw: match[0], sessionId, promptNumber });
+    }
+  }
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const segment of splitBracketSegments(content)) {
+    if (segment.kind === "text") {
+      collectBareReferences(segment.text, references, seen);
+      continue;
+    }
+    const match = REFERENCE_PATTERN.exec(segment.group);
+    if (match === null) {
+      continue;
+    }
+    const raw = match[0];
+    const segmentId = parsePositiveId(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId(match[1]);
+    const promptNumber = parsePositiveId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+
 // src/db/impressions.ts
 function mapImpressionRow(row) {
   return row ? {
@@ -1955,6 +1363,12 @@ var TagNamespaceCollisionError = class extends Error {
     this.holder = holder;
   }
 };
+
+// src/db/turn-liveness.ts
+function liveTurnSql(alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  return `${prefix}was_rolled_back = 0 AND ${prefix}status != 'skipped'`;
+}
 
 // src/shared/config.ts
 var import_node_fs2 = require("node:fs");
@@ -2458,6 +1872,65 @@ function stampField(db, entityType, entityId, field, writer, nowEpoch) {
        written_at_epoch = excluded.written_at_epoch`
   ).run(entityType, entityId, field, writer, writeSequence, nowEpoch);
   return { writer, writeSequence, writtenAtEpoch: nowEpoch };
+}
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "discuss",
+  "research",
+  "design",
+  "implement",
+  "refactor",
+  "fix",
+  "measure",
+  "review",
+  "ops",
+  "delegate",
+  "correction"
+];
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_GLYPH = {
+  discuss: "\u{1F4AC}",
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  refactor: "\u{1F504}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  ops: "\u2699\uFE0F",
+  delegate: "\u{1F91D}",
+  correction: "\u21A9\uFE0F"
+};
+var COMPACT_TYPE_GLYPH = "\u23F8";
+var LEGACY_TYPE_GLYPH = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F",
+  compact: COMPACT_TYPE_GLYPH
+};
+function typeWordGlyph(word) {
+  if (isMemoryType(word)) {
+    return TYPE_GLYPH[word];
+  }
+  return LEGACY_TYPE_GLYPH[word] ?? "\u2022";
+}
+function typeListGlyph(types) {
+  if (!types || types.length === 0) {
+    return "\u2022";
+  }
+  return types.map(typeWordGlyph).join("");
+}
+function typeListsEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
 }
 
 // src/db/segments.ts
@@ -3354,6 +2827,547 @@ function getPendingQueueCount(db, sessionFilter) {
 function countQueueItemsForSession(db, sessionDbId) {
   return getPendingQueueCount(db, sessionDbId);
 }
+
+// src/shared/turn-phase.ts
+var TYPE_PHASE = {
+  research: "evidence",
+  measure: "evidence",
+  design: "decision",
+  discuss: "decision",
+  correction: "decision",
+  implement: "delivery",
+  refactor: "delivery",
+  fix: "delivery",
+  delegate: "delivery",
+  review: "delivery",
+  ops: "delivery"
+};
+function phasesForTypes(types) {
+  const phases = /* @__PURE__ */ new Set();
+  for (const raw of types) {
+    const phase = TYPE_PHASE[raw];
+    if (phase !== void 0) {
+      phases.add(phase);
+    }
+  }
+  return phases;
+}
+var EDGE_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies"
+];
+var TAGGABLE_RELATIONS = new Set(EDGE_RELATIONS);
+var STANCE_RELATIONS = /* @__PURE__ */ new Set(["narrows", "extends"]);
+
+// src/shared/relation-class.ts
+var RELATION_CLASSES = ["correct", "verify", "use"];
+var RELATION_COVERAGES = ["full", "partial"];
+var NO_RELATION_COVERAGE = "";
+var NO_RELATION_CLASS = "";
+function isRelationClass(value) {
+  return typeof value === "string" && RELATION_CLASSES.includes(value);
+}
+function isRelationCoverage(value) {
+  return typeof value === "string" && RELATION_COVERAGES.includes(value);
+}
+var LEGACY_RELATION_CLASS = {
+  override: { relationClass: "correct", relationCoverage: "full" },
+  narrows: { relationClass: "correct", relationCoverage: "partial" },
+  verifies: { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE },
+  extends: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  consume: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  grounds: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE },
+  indexes: { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE }
+};
+var LEGACY_RELATIONS_BY_CLASS = Object.freeze({
+  correct: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "correct"
+  ),
+  verify: EDGE_RELATIONS.filter(
+    (word) => LEGACY_RELATION_CLASS[word].relationClass === "verify"
+  ),
+  use: EDGE_RELATIONS.filter((word) => LEGACY_RELATION_CLASS[word].relationClass === "use")
+});
+var INTERIM_LEGACY_RELATION = Object.freeze([
+  { relationClass: "correct", relationCoverage: "full", legacy: "override" },
+  { relationClass: "correct", relationCoverage: "partial", legacy: "narrows" },
+  { relationClass: "verify", relationCoverage: NO_RELATION_COVERAGE, legacy: "verifies" },
+  { relationClass: "use", relationCoverage: NO_RELATION_COVERAGE, legacy: "extends" }
+]);
+function edgeRelationClass(row) {
+  if (isRelationClass(row.relationClass)) {
+    return {
+      relationClass: row.relationClass,
+      relationCoverage: isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    };
+  }
+  if (row.relation === null) {
+    return null;
+  }
+  return LEGACY_RELATION_CLASS[row.relation] ?? null;
+}
+function formatRelationClass(relationClass, relationCoverage) {
+  return relationCoverage === NO_RELATION_COVERAGE ? relationClass : `${relationClass}(${relationCoverage})`;
+}
+function displayEdgeRelation(row) {
+  if (isRelationClass(row.relationClass)) {
+    return formatRelationClass(
+      row.relationClass,
+      isRelationCoverage(row.relationCoverage) ? row.relationCoverage : NO_RELATION_COVERAGE
+    );
+  }
+  return row.relation ?? "";
+}
+var RETIRED_RELATION_FIELDS = Object.freeze([
+  ["override", 'correct with `"coverage": "full"`'],
+  ["narrows", 'correct with `"coverage": "partial"`'],
+  ["extends", "use"],
+  ["consume", "use"],
+  ["grounds", "use"],
+  ["indexes", "use \u2014 convergence is no longer declared; cite what you used"],
+  ["verifies", "verify"],
+  ["retractOverride", "retractCorrect"],
+  ["retractNarrows", "retractCorrect"],
+  ["retractExtends", "retractUse"],
+  ["retractConsume", "retractUse"],
+  ["retractGrounds", "retractUse"],
+  ["retractIndexes", "retractUse"],
+  ["retractVerifies", "retractVerify"]
+]);
+
+// src/db/memory-edges.ts
+var EDGE_NODE_KINDS = ["turn", "segment"];
+var CITING_NODE_KINDS = ["turn", "segment", "session"];
+var EDGE_PROVENANCES = [
+  "retrieval",
+  "text-ref",
+  "rollback",
+  "judged",
+  "asserted"
+];
+function canonicalizeTagSet(tags) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+  const set = /* @__PURE__ */ new Set();
+  for (const tag of tags) {
+    if (typeof tag === "string" && tag.length > 0) {
+      set.add(tag);
+    }
+  }
+  return [...set].sort();
+}
+var EDGE_SIDES = ["tail", "head"];
+var UNSETTLED_SIDE_TAG = "";
+function deriveSideTags(tags) {
+  const only = tags.length === 1 ? tags[0] : UNSETTLED_SIDE_TAG;
+  return { tailTag: only, headTag: only };
+}
+var PROVENANCE_RANK = {
+  retrieval: 0,
+  rollback: 1,
+  "text-ref": 2,
+  judged: 3,
+  asserted: 4
+};
+function rankEdgeProvenance(provenance) {
+  return PROVENANCE_RANK[provenance];
+}
+function isEdgeNodeKind(value) {
+  return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
+}
+function isCitingNodeKind(value) {
+  return typeof value === "string" && CITING_NODE_KINDS.includes(value);
+}
+function isEdgeProvenance(value) {
+  return typeof value === "string" && EDGE_PROVENANCES.includes(value);
+}
+var EDGE_COLUMNS = `
+  id,
+  citing_kind AS citingKind,
+  citing_id AS citingId,
+  cited_kind AS citedKind,
+  cited_id AS citedId,
+  relation,
+  provenance,
+  tail_tag AS tailTag,
+  head_tag AS headTag,
+  relation_class AS relationClass,
+  relation_coverage AS relationCoverage,
+  created_at_epoch AS createdAtEpoch
+`;
+function mapEdgeRow(row) {
+  return {
+    id: row.id,
+    citing: { kind: row.citingKind, id: row.citingId },
+    cited: { kind: row.citedKind, id: row.citedId },
+    relation: row.relation,
+    // NOT NULL by schema, but a row read back from a database that predates
+    // ticket 05's migration would answer `null` — the sentinel keeps every
+    // reader on one convention rather than making each test for null.
+    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
+    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    // Same "one convention, not a null test per reader" rule the two sides
+    // above follow: a row read back before ticket 02's ADD COLUMN migration
+    // has run answers null, and `''` is what every reader is written against.
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
+    provenance: row.provenance,
+    createdAtEpoch: row.createdAtEpoch
+  };
+}
+function isValidCitingNode(node) {
+  return node !== void 0 && isCitingNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+function isValidCitedNode(node) {
+  return node !== void 0 && isEdgeNodeKind(node.kind) && Number.isSafeInteger(node.id) && node.id > 0;
+}
+var RELATION_CLASS_SPECIFICITY = {
+  use: 0,
+  verify: 1,
+  correct: 2
+};
+function selectLogicalEdgeRow(rows) {
+  let best = null;
+  let bestRank = -1;
+  for (const row of rows) {
+    if (row.relation === null) {
+      continue;
+    }
+    const materialized = edgeRelationClass(row);
+    const rank = materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    if (best === null || rank > bestRank || rank === bestRank && row.id < best.id) {
+      best = row;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+function writeMemoryEdges(db, edges, nowEpoch) {
+  const written = [];
+  const promoted = [];
+  const rejected = [];
+  const insertRelationRow = db.query(
+    `
+      INSERT INTO memory_edges (
+        citing_kind, citing_id, cited_kind, cited_id,
+        relation, provenance, tail_tag, head_tag,
+        relation_class, relation_coverage, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      RETURNING ${EDGE_COLUMNS}
+    `
+  );
+  const promoteRow = db.query(
+    `UPDATE memory_edges
+        SET relation = ?, relation_class = ?, relation_coverage = ?
+      WHERE id = ?
+      RETURNING ${EDGE_COLUMNS}`
+  );
+  const insertSideTagIndexRow = db.query(
+    `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`
+  );
+  const dropBarePairRow = db.query(
+    `DELETE FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+       AND relation IS NULL`
+  );
+  const readPairRows = db.query(
+    `SELECT ${EDGE_COLUMNS} FROM memory_edges
+     WHERE citing_kind = ? AND citing_id = ? AND cited_kind = ? AND cited_id = ?
+     ORDER BY id ASC`
+  );
+  for (const edge of edges) {
+    if (!isValidCitingNode(edge?.citing) || !isValidCitedNode(edge?.cited)) {
+      rejected.push({ input: edge, reason: "invalid-node" });
+      continue;
+    }
+    if (edge.citing.kind === edge.cited.kind && edge.citing.id === edge.cited.id) {
+      rejected.push({ input: edge, reason: "self-loop" });
+      continue;
+    }
+    if (edge.relation === null) {
+      rejected.push({ input: edge, reason: "bare-row-retired" });
+      continue;
+    }
+    if (!isCitationRelation(edge.relation)) {
+      rejected.push({ input: edge, reason: "invalid-relation" });
+      continue;
+    }
+    if (edge.citing.kind !== "turn" || edge.cited.kind !== "turn") {
+      rejected.push({ input: edge, reason: "relation-requires-turn-pair" });
+      continue;
+    }
+    if (!isEdgeProvenance(edge.provenance)) {
+      rejected.push({ input: edge, reason: "invalid-provenance" });
+      continue;
+    }
+    const createdAtEpoch = edge.createdAtEpoch ?? nowEpoch;
+    const tailTag = edge.tailTag ?? UNSETTLED_SIDE_TAG;
+    const headTag = edge.headTag ?? UNSETTLED_SIDE_TAG;
+    const relationClass = edge.relationClass ?? NO_RELATION_CLASS;
+    const relationCoverage = edge.relationCoverage ?? NO_RELATION_COVERAGE;
+    const legacyOfWrite = LEGACY_RELATION_CLASS[edge.relation];
+    const meansClass = isRelationClass(relationClass) ? relationClass : legacyOfWrite?.relationClass ?? NO_RELATION_CLASS;
+    const meansCoverage = isRelationClass(relationClass) ? relationCoverage : legacyOfWrite?.relationCoverage ?? NO_RELATION_COVERAGE;
+    const stored = selectLogicalEdgeRow(
+      readPairRows.all(edge.citing.kind, edge.citing.id, edge.cited.kind, edge.cited.id).map(mapEdgeRow)
+    );
+    if (stored === null) {
+      dropBarePairRow.run(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id
+      );
+      const row = insertRelationRow.get(
+        edge.citing.kind,
+        edge.citing.id,
+        edge.cited.kind,
+        edge.cited.id,
+        edge.relation,
+        edge.provenance,
+        tailTag,
+        headTag,
+        relationClass,
+        relationCoverage,
+        createdAtEpoch
+      );
+      if (row) {
+        written.push(mapEdgeRow(row));
+        for (const side of EDGE_SIDES) {
+          const tag = side === "tail" ? tailTag : headTag;
+          if (tag !== UNSETTLED_SIDE_TAG) {
+            insertSideTagIndexRow.run(row.id, side, tag);
+          }
+        }
+      }
+      continue;
+    }
+    const storedClass = edgeRelationClass(stored);
+    const wantsClass = isRelationClass(meansClass) ? meansClass : null;
+    const storedRank = storedClass === null ? -1 : RELATION_CLASS_SPECIFICITY[storedClass.relationClass];
+    const wantsRank = wantsClass === null ? -1 : RELATION_CLASS_SPECIFICITY[wantsClass];
+    const coverageChanges = storedClass !== null && wantsClass !== null && storedClass.relationClass === wantsClass && storedClass.relationCoverage !== meansCoverage;
+    if (wantsRank > storedRank || coverageChanges) {
+      const row = promoteRow.get(edge.relation, meansClass, meansCoverage, stored.id);
+      if (row) {
+        const mapped = mapEdgeRow(row);
+        written.push(mapped);
+        promoted.push(mapped);
+      }
+      continue;
+    }
+    if (stored.relationClass === NO_RELATION_CLASS && storedClass !== null) {
+      const filled = promoteRow.get(
+        stored.relation,
+        storedClass.relationClass,
+        storedClass.relationCoverage,
+        stored.id
+      );
+      written.push(filled ? mapEdgeRow(filled) : stored);
+      continue;
+    }
+    written.push(stored);
+  }
+  return { written, promoted, rejected };
+}
+function mapTurnRelationEdgeRow(row) {
+  return {
+    relation: row.relation,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE,
+    tailTag: row.tailTag ?? UNSETTLED_SIDE_TAG,
+    headTag: row.headTag ?? UNSETTLED_SIDE_TAG,
+    otherTurnId: row.otherTurnId,
+    otherSessionId: row.otherSessionId,
+    otherPromptNumber: row.otherPromptNumber
+  };
+}
+function getTurnRelationEdges(db, turnId) {
+  const outbound = db.query(
+    `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
+              cited.id AS otherTurnId, cited.session_id AS otherSessionId,
+              cited.prompt_number AS otherPromptNumber
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.citing_id = ?
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+        ORDER BY e.relation ASC, e.tail_tag ASC, e.head_tag ASC`
+  ).all(turnId).map(mapTurnRelationEdgeRow);
+  const inbound = db.query(
+    `SELECT e.relation AS relation,
+              e.relation_class AS relationClass, e.relation_coverage AS relationCoverage,
+              e.tail_tag AS tailTag, e.head_tag AS headTag,
+              citing.id AS otherTurnId, citing.session_id AS otherSessionId,
+              citing.prompt_number AS otherPromptNumber
+         FROM memory_edges e
+         JOIN turns citing ON citing.id = e.citing_id
+         JOIN turns cited ON cited.id = e.cited_id
+        WHERE e.citing_kind = 'turn' AND e.cited_kind = 'turn'
+          AND e.relation IS NOT NULL
+          AND e.cited_id = ?
+          AND ${liveTurnSql("citing")}
+          AND ${liveTurnSql("cited")}
+        ORDER BY e.relation ASC, e.tail_tag ASC, e.head_tag ASC`
+  ).all(turnId).map(mapTurnRelationEdgeRow);
+  return { outbound, inbound };
+}
+function getRelationEdgesAmongTurns(db, turnIds) {
+  const ids = [...new Set(turnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT me.citing_id AS citingId, me.cited_id AS citedId, me.relation AS relation,
+              me.tail_tag AS tailTag, me.head_tag AS headTag,
+              me.relation_class AS relationClass, me.relation_coverage AS relationCoverage
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE (me.citing_id IN (${idPlaceholders}) OR me.cited_id IN (${idPlaceholders}))
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")} AND ${liveTurnSql("td")}`
+  ).all(...ids, ...ids, ...EDGE_RELATIONS).map((row) => ({
+    citingId: row.citingId,
+    citedId: row.citedId,
+    relation: row.relation,
+    tailTag: row.tailTag,
+    headTag: row.headTag,
+    relationClass: row.relationClass ?? NO_RELATION_CLASS,
+    relationCoverage: row.relationCoverage ?? NO_RELATION_COVERAGE
+  }));
+}
+function getRolledBackCiterIds(db, citingTurnIds) {
+  const ids = [...new Set(citingTurnIds)];
+  if (ids.length === 0) {
+    return [];
+  }
+  const idPlaceholders = ids.map(() => "?").join(",");
+  const relationPlaceholders = EDGE_RELATIONS.map(() => "?").join(",");
+  return db.query(
+    `SELECT DISTINCT me.citing_id AS citingId
+       FROM memory_edges me
+       JOIN turns tc ON tc.id = me.citing_id
+       JOIN turns td ON td.id = me.cited_id
+       WHERE me.citing_id IN (${idPlaceholders})
+         AND me.citing_kind = 'turn' AND me.cited_kind = 'turn'
+         AND me.relation IN (${relationPlaceholders})
+         AND ${liveTurnSql("tc")}
+         AND td.was_rolled_back = 1
+       ORDER BY me.citing_id ASC`
+  ).all(...ids, ...EDGE_RELATIONS).map((row) => row.citingId);
+}
+function rebuildMemoryEdgeSideTagsIndexCore(db) {
+  db.exec("DELETE FROM memory_edge_side_tags");
+  db.exec(`
+    INSERT INTO memory_edge_side_tags (edge_row_id, side, tag)
+    SELECT id, 'tail', tail_tag FROM memory_edges WHERE tail_tag <> ''
+    UNION ALL
+    SELECT id, 'head', head_tag FROM memory_edges WHERE head_tag <> ''
+  `);
+}
+function countMemoryEdges(db) {
+  return db.query("SELECT COUNT(*) AS count FROM memory_edges").get()?.count ?? 0;
+}
+
+// src/shared/topic-tag.ts
+var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
+
+// src/db/turn-tag-gate.ts
+function loadSegmentTagIndex(db) {
+  const rows = db.query(
+    `SELECT id, json_extract(tags, '$[0]') AS tag
+         FROM segments
+        WHERE json_array_length(tags) >= 1`
+  ).all();
+  const index = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
+      index.set(row.tag, row.id);
+    }
+  }
+  return index;
+}
+function loadDeclaredLaneTags(db, segmentId) {
+  return new Set(
+    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
+  );
+}
+
+// src/db/citations.ts
+var CITATION_RELATIONS = [
+  "override",
+  "narrows",
+  "extends",
+  "indexes",
+  "consume",
+  "grounds",
+  "verifies"
+];
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+var RELATION_FIELD_ENTRIES = RELATION_CLASSES.map((relationClass) => [relationClass, relationClass]);
+var RETRACTION_FIELD_ENTRIES = RELATION_FIELD_ENTRIES.map(
+  ([key, relationClass]) => [`retract${key.charAt(0).toUpperCase()}${key.slice(1)}`, relationClass]
+);
+var MAX_TURN_RELATION_DEGREE = 20;
+var RELATION_REJECTION_TEXT = {
+  malformed: 'is not a valid address ("S<session>/T<prompt>" or "E<segment>")',
+  unresolved: "does not resolve to a turn or segment",
+  // lane-model-v12 D2 (ticket 04): an edge's two ends must be DIFFERENT
+  // turns, for every relation. The write surface's own pre-check ordinarily
+  // catches a self target first (with the shared validator's wording); this is
+  // the storage layer's backstop for a caller reaching `attachTurnRelations`
+  // directly.
+  // [S15069/T1728], container-unification D10: a segment is a CONTAINER, not a
+  // relation node. It may still be CITED — prose naming `[E<n>]` records a bare
+  // `text-ref` row — but no relation word may point at one. The storage CHECK
+  // enforces the same rule one layer down; this message is what a caller sees
+  // instead of a constraint failure.
+  "segment-not-a-relation-node": "names a segment \u2014 a segment is a container, not a relation node, so no relation may point at it (prose naming it still records a bare citation)",
+  "self-edge": "is this turn's own address; an edge's two ends must be DIFFERENT turns, for every relation",
+  "no-such-edge": "is not a relation this turn currently carries \u2014 nothing was retracted; read the turn to see what it does carry",
+  // relation-vocabulary-v13 ticket 02: the FULL/PARTIAL bit is a stored field,
+  // so a `correct` that never said which kind of correction it was is refused
+  // here rather than stored half-answered. The message names the missing bit
+  // and both legal values, because a writer told only "coverage required" has
+  // to go read a schema to find out what to send.
+  "coverage-required": 'is a `correct` edge with no coverage bit \u2014 add `"coverage": "full"` (no substantial part of the cited principal result may still serve as a premise) or `"coverage": "partial"` (a definite non-empty part still stands)',
+  "coverage-not-allowed": "carries a coverage bit, and only `correct` has one \u2014 `verify` and `use` make no claim about how much of the cited result survives",
+  // Settlement-read-once ticket 00 (USER RULING T2404). The message names the
+  // node the cap is being counted on, because a call refused for a CITED
+  // turn's incoming degree is a different repair from one refused for the
+  // citing turn's own outgoing degree, and neither is fixed by re-sending.
+  "outgoing-degree-cap": `would take this turn past ${MAX_TURN_RELATION_DEGREE} outgoing relations, the cap \u2014 retract one before adding another; nothing in this call was written`,
+  "incoming-degree-cap": `would take that turn past ${MAX_TURN_RELATION_DEGREE} incoming relations, the cap \u2014 nothing in this call was written`,
+  // main-agent-edges D5. One pair, one row, one claim: `correct(full)` says no
+  // substantial part of the cited result may still serve as a premise and
+  // `correct(partial)` says a definite part still may, so a call asserting
+  // both about the same pair has not stated a stronger and a weaker claim —
+  // it has stated two incompatible ones, and there is no most-specific to
+  // collapse onto.
+  "coverage-conflict": "is named `correct` twice in this call under BOTH coverage bits \u2014 `full` and `partial` are the same specificity and contradict each other, so nothing in this call was written; send the one you mean",
+  // main-agent-edges D4/D5, T2432 P1. `formatRelationRejections` fills the
+  // CURRENT class in instead of this fallback whenever the rejection carries
+  // one, which is the only reason this refusal is worth more than "no such
+  // edge": the edge is there, and it is not what you read.
+  "stale-class": "is not the class this pair carries any more \u2014 read the edge again before acting on it"
+};
 
 // src/db/lanes.ts
 var LANE_COLUMNS = `
@@ -4396,30 +4410,6 @@ function runSegmentOneTagMigration(db, nowEpoch = Math.floor(Date.now() / 1e3)) 
     const receipt = { named, pendingNaming, retired };
     writeMigrationReceipt(db, SEGMENT_ONE_TAG_RECEIPT, nowEpoch, receipt);
   });
-}
-
-// src/shared/topic-tag.ts
-var ORTHOGONALITY_LAW = "type is the phase axis and a topic word is the subject axis \u2014 a subject that carries its own phase stops being true the moment the work moves on";
-
-// src/db/turn-tag-gate.ts
-function loadSegmentTagIndex(db) {
-  const rows = db.query(
-    `SELECT id, json_extract(tags, '$[0]') AS tag
-         FROM segments
-        WHERE json_array_length(tags) >= 1`
-  ).all();
-  const index = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (typeof row.tag === "string" && row.tag !== "" && !index.has(row.tag)) {
-      index.set(row.tag, row.id);
-    }
-  }
-  return index;
-}
-function loadDeclaredLaneTags(db, segmentId) {
-  return new Set(
-    db.query("SELECT tag FROM lanes WHERE segment_id = ? ORDER BY tag").all(segmentId).map((row) => row.tag)
-  );
 }
 
 // src/db/schema.ts
@@ -7181,6 +7171,9 @@ function migrateTurnCitationsToEdges(db) {
         createdAtEpoch: row.createdAtEpoch
       }))
     );
+    if (winner.relation === null) {
+      continue;
+    }
     inputs.push({
       citing: { kind: "turn", id: sample.citingTurnId },
       cited: { kind: "turn", id: sample.citedTurnId },
