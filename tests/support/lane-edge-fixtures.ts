@@ -1,5 +1,11 @@
+import { resolveEdgeSide, type EndpointLaneFacts } from "../../src/db/edge-side-resolution";
 import { deriveSideTags } from "../../src/db/memory-edges";
-import type { LaneEdgeInput, LaneTurnInput } from "../../src/shared/lane-interpretation";
+import type { LaneCheckerEdgeInput } from "../../src/shared/lane-checker";
+import {
+  DEFAULT_SEGMENT,
+  type LaneEdgeInput,
+  type LaneTurnInput,
+} from "../../src/shared/lane-interpretation";
 
 /**
  * Give every turn the lane tags ITS OWN SIDE of the given edges names — the
@@ -19,8 +25,16 @@ import type { LaneEdgeInput, LaneTurnInput } from "../../src/shared/lane-interpr
  * that and whose counter-example tests are what actually pin the change).
  * Per SIDE, deliberately — a cross-lane edge gives its citing turn the TAIL's
  * lane and its cited turn the HEAD's, never both to both.
+ *
+ * A turn whose RAW `tags` are loaded (`LaneCheckerTurnInput.tags`) claims only
+ * the edge tags that column carries: membership is `tags` intersected with the
+ * declared lanes (`db/edge-side-resolution.ts`'s `EndpointLaneFacts`), so a
+ * turn cannot be a member of a lane its own column lacks. That is what lets an
+ * E4 fixture — a side tag the endpoint does NOT carry — resolve `invalid`
+ * through the real resolver rather than `declared` through a projection that
+ * invented the membership.
  */
-export function withEdgeClaimedLaneTags<T extends LaneTurnInput>(
+export function withEdgeClaimedLaneTags<T extends LaneTurnInput & { tags?: readonly string[] }>(
   turns: readonly T[],
   edges: readonly LaneEdgeInput[],
 ): T[] {
@@ -39,13 +53,69 @@ export function withEdgeClaimedLaneTags<T extends LaneTurnInput>(
     claim(edge.citedId, edge.headTag);
   }
   return turns.map((turn) => {
-    const fromEdges = claimed.get(turn.id);
-    if (fromEdges === undefined && turn.laneTags === undefined) {
+    const fromEdges = [...(claimed.get(turn.id) ?? [])].filter(
+      (tag) => turn.tags === undefined || turn.tags.includes(tag),
+    );
+    if (fromEdges.length === 0 && turn.laneTags === undefined) {
       return turn;
     }
     return {
       ...turn,
-      laneTags: [...new Set([...(turn.laneTags ?? []), ...(fromEdges ?? [])])],
+      laneTags: [...new Set([...(turn.laneTags ?? []), ...fromEdges])],
+    };
+  });
+}
+
+/**
+ * Resolve a pure fixture's edges the way `db/lane-checker-load.ts` resolves a
+ * projection's: each side through `resolveEdgeSide` (THE pure function,
+ * main-agent-edges D2) against the endpoint facts the fixture's own turns
+ * state — `laneTags` as the lane set, `segment` as the owning task. The
+ * fixture's `tailTag`/`headTag` are its STORED declarations; what comes back
+ * carries the resolved lane per side, the five-outcome verdict, and the stored
+ * tag alongside — `LaneCheckerEdgeInput`, the only shape the checker takes.
+ *
+ * The one place a fixture's outcome comes from. It is deliberately NOT a
+ * parameter of `laneEdge`: an outcome a test could simply state would let it
+ * assert a verdict the endpoint facts contradict, which is the kind of
+ * coverage-that-cannot-fail this helper exists to end (ticket 02b, F2). Feed
+ * the SAME turns `checkLanes` will see (after `withEdgeClaimedLaneTags` when
+ * that projection is in use), or the resolution and the membership disagree.
+ *
+ * A fixture turn the edge names but the fixture omits resolves as homeless —
+ * exactly the loader's own posture for an endpoint it loaded no facts for.
+ * Segment ids are interned per call: the resolver wants a number and a
+ * fixture writes a label, and only equality within one projection matters.
+ */
+export function resolveLaneEdges(
+  turns: readonly LaneTurnInput[],
+  edges: readonly LaneEdgeInput[],
+): LaneCheckerEdgeInput[] {
+  const segmentIds = new Map<string, number>();
+  const segmentIdOf = (segment: string | undefined): number => {
+    const label = segment ?? DEFAULT_SEGMENT;
+    let id = segmentIds.get(label);
+    if (id === undefined) {
+      id = segmentIds.size + 1;
+      segmentIds.set(label, id);
+    }
+    return id;
+  };
+  const facts = new Map<number, EndpointLaneFacts>();
+  for (const turn of turns) {
+    facts.set(turn.id, { segmentId: segmentIdOf(turn.segment), lanes: [...(turn.laneTags ?? [])] });
+  }
+  return edges.map((edge) => {
+    const tail = resolveEdgeSide(edge, "tail", facts);
+    const head = resolveEdgeSide(edge, "head", facts);
+    return {
+      ...edge,
+      tailTag: tail.lane?.tag ?? "",
+      headTag: head.lane?.tag ?? "",
+      tailOutcome: tail.outcome,
+      headOutcome: head.outcome,
+      storedTailTag: edge.tailTag,
+      storedHeadTag: edge.headTag,
     };
   });
 }

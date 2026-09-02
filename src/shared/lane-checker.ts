@@ -33,14 +33,16 @@
  *   - `laneMembershipClaims` — which lane an edge belongs to (never which lane
  *     a NODE belongs to; the name predates ticket 10). Consumed INDIRECTLY,
  *     via `deriveLaneInterpretation`'s `lanes`/`taggedEdges`.
- *   - `laneEdgeTags` — the tags an edge NAMES, as a canonical set. The display
- *     form (`LaneTimeOrderViolation.tags`, `LaneSubsetInvariantError.tags`) and
- *     the "is this edge attributed at all" test (D9's cluster warning).
+ *   - `laneEdgeTags` — the tags an edge RESOLVES to, as a canonical set. The
+ *     display form (`LaneTimeOrderViolation.tags`, `LaneDraftEdgeError.tags`)
+ *     and the "is this edge attributed at all" test (D9's cluster warning).
  *
- * One place takes NEITHER, on purpose: `subsetObligations` (E4), which needs to
- * know WHICH side owes a tag, and `laneKeyOfSide` (report 3's coupling count),
- * which needs each side's own `(segment, tag)` pair rather than a merged set —
- * a cross-lane edge is exactly the shape a merged set cannot express.
+ * Two places take NEITHER, on purpose: `subsetObligations` (E4), which reads
+ * the per-side RESOLUTION (`invalid`) and names the STORED tag — the resolved
+ * set is empty for exactly the side the finding is about — and `laneKeyOfSide`
+ * (report 3's coupling count), which needs each side's own `(segment, tag)`
+ * pair rather than a merged set — a cross-lane edge is exactly the shape a
+ * merged set cannot express.
  *
  * ## The reports, after ticket 11's retarget
  *
@@ -300,6 +302,7 @@ import {
   type LaneKey,
   type LaneMember,
   type LaneOrderKey,
+  type LaneSideOutcome,
   type LaneTurnInput,
   type TurnPhase,
 } from "./lane-interpretation";
@@ -674,6 +677,28 @@ export interface LaneCheckerTurnInput extends LaneTurnInput {
    * defers) as a SUBSET defect, whose repair is a different act entirely.
    */
   tags?: readonly string[];
+}
+
+/**
+ * One edge as THIS module reads it: `LaneEdgeInput` (the interpretation core's
+ * and the election's shape, where the two side tags are the whole story) plus
+ * the per-side RESOLUTION a DB loader produced (main-agent-edges spec D2) —
+ * required, not optional. E4 keys on `invalid`, E6 on `ambiguous`, and neither
+ * has a second reading to fall back on: the blank-tag path a pure fixture used
+ * to take was deleted (ticket 02b) because it let the whole E3/E4/E6 unit
+ * suite pass against a predicate production never ran. A fixture reaches
+ * this module by resolving its edges through the same pure resolver the
+ * loader uses (`tests/support/lane-edge-fixtures.ts`'s `resolveLaneEdges`).
+ *
+ * `tailTag`/`headTag` are the RESOLVED lane tags (`''` for a side that
+ * attributes to none); `storedTailTag`/`storedHeadTag` are the row's own
+ * declarations verbatim, which an `invalid` finding has to NAME.
+ */
+export interface LaneCheckerEdgeInput extends LaneEdgeInput {
+  tailOutcome: LaneSideOutcome;
+  headOutcome: LaneSideOutcome;
+  storedTailTag: string;
+  storedHeadTag: string;
 }
 
 /**
@@ -1173,9 +1198,9 @@ function cappedFactList<T>(all: readonly T[]): { count: number; entries: readonl
  * builder would otherwise have to separately honour.
  */
 function partitionEdgesByVocabulary(
-  edges: readonly LaneEdgeInput[],
-): { inVocabulary: LaneEdgeInput[]; outOfVocabulary: LaneOutOfVocabularyEdge[] } {
-  const inVocabulary: LaneEdgeInput[] = [];
+  edges: readonly LaneCheckerEdgeInput[],
+): { inVocabulary: LaneCheckerEdgeInput[]; outOfVocabulary: LaneOutOfVocabularyEdge[] } {
+  const inVocabulary: LaneCheckerEdgeInput[] = [];
   const outOfVocabulary: LaneOutOfVocabularyEdge[] = [];
   for (const edge of edges) {
     if (carriesRelationClass(edge)) {
@@ -1233,32 +1258,36 @@ function mergeOutOfVocabularyEdges(
  * — `tests/shared/lane-checker.test.ts`'s "E4 is per-SIDE" block is what goes
  * red.
  */
-function subsetObligations(edge: LaneEdgeInput): LaneSubsetInvariantMiss[] {
+function subsetObligations(edge: LaneCheckerEdgeInput): LaneSubsetInvariantMiss[] {
   const obligations: LaneSubsetInvariantMiss[] = [];
-  // A LOADER-RESOLVED edge states its own verdict per side (main-agent-edges
-  // D2): `invalid` IS E4 — a declaration that is not among its endpoint's
-  // current tags — and the tag to NAME is the stored one, which the resolved
+  // The edge states its own verdict per side (main-agent-edges D2): `invalid`
+  // IS E4 — a declaration that is not among its endpoint's current lanes —
+  // and the tag to NAME is the stored one, which the resolved
   // `tailTag`/`headTag` no longer carry. Every other outcome is either a live
   // declaration (which by construction is in the endpoint's tags) or no
-  // declaration at all, and neither owes anything here.
-  if (edge.tailOutcome !== undefined || edge.headOutcome !== undefined) {
-    if (edge.tailOutcome === "invalid") {
-      obligations.push({ tag: edge.storedTailTag ?? edge.tailTag, endpoint: "citing" });
-    }
-    if (edge.headOutcome === "invalid") {
-      obligations.push({ tag: edge.storedHeadTag ?? edge.headTag, endpoint: "cited" });
-    }
-    return obligations;
+  // declaration at all, and neither owes anything here. There is no other
+  // path: an edge reaches this module RESOLVED or not at all (ticket 02b
+  // deleted the blank-tag fallback a pure fixture used to take).
+  if (edge.tailOutcome === "invalid") {
+    obligations.push({ tag: edge.storedTailTag, endpoint: "citing" });
   }
-  // A pure fixture supplies no outcome: its sides ARE its stored declarations,
-  // and the check is the endpoint-tag comparison it always was.
-  if (edge.tailTag !== UNSETTLED_LANE_TAG && edge.tailTag !== undefined) {
-    obligations.push({ tag: edge.tailTag, endpoint: "citing" });
-  }
-  if (edge.headTag !== UNSETTLED_LANE_TAG && edge.headTag !== undefined) {
-    obligations.push({ tag: edge.headTag, endpoint: "cited" });
+  if (edge.headOutcome === "invalid") {
+    obligations.push({ tag: edge.storedHeadTag, endpoint: "cited" });
   }
   return obligations;
+}
+
+/**
+ * The tags an edge STORES, as a canonical set — E4's display form. E4 judges
+ * the stored declaration, so the finding names what the row wrote, not what
+ * it resolved to: an `invalid` side resolves to no lane at all, and
+ * `laneEdgeTags` (the RESOLVED set) would print `{}` for exactly the edge
+ * the finding is about.
+ */
+function storedEdgeTags(edge: LaneCheckerEdgeInput): readonly string[] {
+  return canonicalTagSet(
+    [edge.storedTailTag, edge.storedHeadTag].filter((tag) => tag !== UNSETTLED_LANE_TAG),
+  );
 }
 
 /**
@@ -1276,7 +1305,7 @@ function subsetObligations(edge: LaneEdgeInput): LaneSubsetInvariantMiss[] {
  */
 function computeSubsetInvariantErrors(
   turnById: ReadonlyMap<number, LaneCheckerTurnInput>,
-  edges: readonly LaneEdgeInput[],
+  edges: readonly LaneCheckerEdgeInput[],
 ): LaneSubsetInvariantError[] {
   const errors: LaneSubsetInvariantError[] = [];
   for (const edge of edges) {
@@ -1298,7 +1327,7 @@ function computeSubsetInvariantErrors(
       citingId: edge.citingId,
       citedId: edge.citedId,
       relation: edge.relation,
-      tags: laneEdgeTags(edge),
+      tags: storedEdgeTags(edge),
       missing,
     });
   }
@@ -1307,57 +1336,33 @@ function computeSubsetInvariantErrors(
 
 /**
  * E6 (module header, "E6 and D9's unattributed-cluster warning"): every
- * IN-VOCABULARY edge with EITHER side unsettled — the DRAFT form, legal at the
- * write gate since ticket 20 and settlement's own backlog here.
+ * IN-VOCABULARY edge with a side that resolved `ambiguous` — a blank side
+ * whose endpoint sits in TWO OR MORE lanes (main-agent-edges spec D6), the
+ * DRAFT form settlement owes a declaration on.
  *
- * The predicate is the two side values and nothing else. No registry read, no
- * endpoint lookup, no 4+ boundary and no exemption for a self edge (a stored
- * self edge is pre-ticket-04 stock whose repair is retraction, and reporting it
- * as a draft still points at the retraction). One row, one error, anchored at
- * the citing turn.
+ * The predicate is the two resolved outcomes and nothing else. No registry
+ * read, no endpoint lookup here (the loader resolved both before this module
+ * saw the row), no 4+ boundary and no exemption for a self edge. A blank side
+ * on a UNIQUE endpoint derives its lane and is not a finding; a blank side on
+ * a LANE-LESS endpoint is legal and is never a finding. Reporting either would
+ * hand settlement a backlog of edges no writer can act on: there is nothing to
+ * declare when there is nothing to choose between. One row, one error,
+ * anchored at the citing turn.
  *
- * THE MUTATION for this function is returning `[]`:
- * `tests/shared/lane-checker.test.ts`'s "E6 — a DRAFT edge" block goes red, and
- * so does `tests/worker/note-settlement-sdk-query.test.ts`'s draft-edge commit
- * refusal.
+ * THE MUTATION for this function is admitting `derived` or `none` beside
+ * `ambiguous`: `tests/shared/lane-checker.test.ts`'s "E6 — a DRAFT edge" block
+ * has one NOT-a-finding case per outcome that goes red. Returning `[]` reds
+ * the same block's finding cases and
+ * `tests/worker/note-settlement-sdk-query.test.ts`'s draft-edge commit refusal.
  */
-function computeDraftEdgeErrors(edges: readonly LaneEdgeInput[]): LaneDraftEdgeError[] {
+function computeDraftEdgeErrors(edges: readonly LaneCheckerEdgeInput[]): LaneDraftEdgeError[] {
   const errors: LaneDraftEdgeError[] = [];
   for (const edge of edges) {
     const unsettledSides: EdgeSideName[] = [];
-    if (edge.tailOutcome !== undefined || edge.headOutcome !== undefined) {
-      // THE PREDICATE NARROWED (main-agent-edges spec D6): E6 is "a blank side
-      // whose endpoint has ≥ 2 lanes" — the `ambiguous` outcome, and only
-      // that. A blank side on a UNIQUE endpoint now derives its lane and is
-      // not a finding at all; a blank side on a LANE-LESS endpoint is legal
-      // and is never a finding. Reporting either would hand settlement a
-      // backlog of edges no writer can act on: there is nothing to declare
-      // when there is nothing to choose between.
-      if (edge.tailOutcome === "ambiguous") {
-        unsettledSides.push("tail");
-      }
-      if (edge.headOutcome === "ambiguous") {
-        unsettledSides.push("head");
-      }
-      if (unsettledSides.length === 0) continue;
-      errors.push({
-        class: "E6",
-        anchorId: edge.citingId,
-        citingId: edge.citingId,
-        citedId: edge.citedId,
-        relation: edge.relation,
-        tags: laneEdgeTags(edge),
-        unsettledSides,
-      });
-      continue;
-    }
-    // `undefined` is coerced the same way `laneKeyOfSide` coerces it — an
-    // un-migrated fixture literal can still hand this an absent side, and an
-    // absent side is not a lane.
-    if (typeof edge.tailTag !== "string" || edge.tailTag === UNSETTLED_LANE_TAG) {
+    if (edge.tailOutcome === "ambiguous") {
       unsettledSides.push("tail");
     }
-    if (typeof edge.headTag !== "string" || edge.headTag === UNSETTLED_LANE_TAG) {
+    if (edge.headOutcome === "ambiguous") {
       unsettledSides.push("head");
     }
     if (unsettledSides.length === 0) continue;
@@ -1509,8 +1514,8 @@ function errorDetail(error: LaneCheckerError): string {
  */
 export function checkLanes(
   turns: readonly LaneCheckerTurnInput[],
-  edges: readonly LaneEdgeInput[],
-  knownOutOfVocabularyEdges: readonly LaneEdgeInput[] = [],
+  edges: readonly LaneCheckerEdgeInput[],
+  knownOutOfVocabularyEdges: readonly LaneCheckerEdgeInput[] = [],
   segmentFacts: readonly LaneSegmentFacts[] = [],
   /**
    * Ticket 04: each lane's WHOLE declared membership, measured by the caller

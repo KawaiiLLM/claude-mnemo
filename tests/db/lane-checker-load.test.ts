@@ -1961,6 +1961,114 @@ describe("D9 segment facts — the registry and the membership table, never the 
     const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
     expect(result.unattributedClusters.entries).toEqual([{ turnIds: ids, turnCount: 4 }]);
   });
+
+  // -------------------------------------------------------------------------
+  // main-agent-edges ticket 02b (peer finding F4) — `emptyLaneTags` reads
+  // RESOLVED attribution, and these two fixtures are the ones where that
+  // differs from reading the stored tag verbatim. Every ticket-14 fixture
+  // above declares a tag that is also the endpoint's ONLY lane, so
+  // `declared` and `derived` coincide there and a reader patched back to
+  // `tail_tag`/`head_tag` stayed green. THE MUTATION for both tests below:
+  // in `loadSegmentFacts`, replace `resolver.resolve(row, side).lane` with
+  // the stored side tag.
+  // -------------------------------------------------------------------------
+
+  /**
+   * A row written past the write path with ONE side declared and the other
+   * left blank, side-index rows for the declared side only — the shape a
+   * unique-endpoint side legally takes under main-agent-edges (a blank side
+   * on a one-lane endpoint derives it and needs no declaration).
+   */
+  function halfDeclaredEdge(
+    citingId: number,
+    citedId: number,
+    relation: string,
+    tailTag: string,
+    headTag: string,
+  ): void {
+    const row = db
+      .query<{ id: number }, [number, number, string, string, string]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, tail_tag, head_tag, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, ${NOW})
+         RETURNING id`,
+      )
+      .get(citingId, citedId, relation, tailTag, headTag)!;
+    const insertSide = db.query<unknown, [number, string, string]>(
+      `INSERT INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+    );
+    if (tailTag !== "") insertSide.run(row.id, "tail", tailTag);
+    if (headTag !== "") insertSide.run(row.id, "head", headTag);
+  }
+
+  test("ticket 02b: a lane reached only by DERIVATION is not empty — declared != derived on a two-lane endpoint", () => {
+    // Segment declares {alpha, beta, gamma}. X is in alpha AND beta; Y is in
+    // beta alone. The one edge Y -> X declares its HEAD to alpha (X's second
+    // lane, which a two-lane endpoint has to name) and leaves its TAIL blank,
+    // which on Y derives beta. Resolved: alpha (declared) and beta (derived)
+    // are both attributed; only gamma is empty. A reader of the stored tags
+    // sees alpha alone and would report beta empty as well.
+    const sessionId = seedSession("02b-derived");
+    const segment = createSegment(db, { title: "02b-derived", nowEpoch: NOW });
+    const x = insertTurn(sessionId, 1, { tags: ["alpha", "beta"] });
+    const y = insertTurn(sessionId, 2, { tags: ["beta"] });
+    addSegmentMembers(db, segment.id, [x, y], NOW);
+    for (const tag of ["alpha", "beta", "gamma"]) {
+      insertLane(db, segment.id, tag, NOW);
+    }
+    halfDeclaredEdge(y, x, "extends", "", "alpha");
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    expect(projection.segmentFacts).toEqual([
+      { segment: String(segment.id), declaredLaneCount: 3, memberTurnCount: 2, emptyLaneTags: ["gamma"] },
+    ]);
+    // Not vacuous: the projection really resolved the blank tail to beta by
+    // derivation, and the head to alpha by declaration.
+    const edge = projection.edges.find((e) => e.citingId === y && e.citedId === x)!;
+    expect([edge.tailOutcome, edge.tailTag, edge.headOutcome, edge.headTag]).toEqual([
+      "derived",
+      "beta",
+      "declared",
+      "alpha",
+    ]);
+  });
+
+  test("ticket 02b: a lane named only by a STALE declaration is empty — `invalid` attributes to nothing", () => {
+    // Segment declares {alpha, beta}. Both endpoints are in alpha alone. The
+    // edge declares its head to beta, which X does not carry — the E4 shape
+    // (main-agent-edges D2: `invalid`, never falling back to `derived`).
+    // Resolved, beta has no attributing side and is empty; a reader of the
+    // stored tag would count the stale word as beta's one edge.
+    const sessionId = seedSession("02b-stale");
+    const segment = createSegment(db, { title: "02b-stale", nowEpoch: NOW });
+    const x = insertTurn(sessionId, 1, { tags: ["alpha"] });
+    const y = insertTurn(sessionId, 2, { tags: ["alpha"] });
+    addSegmentMembers(db, segment.id, [x, y], NOW);
+    for (const tag of ["alpha", "beta"]) {
+      insertLane(db, segment.id, tag, NOW);
+    }
+    halfDeclaredEdge(y, x, "extends", "alpha", "beta");
+
+    const projection = loadLaneCheckScope(db, { kind: "segment", segmentId: segment.id });
+    expect(projection.segmentFacts).toEqual([
+      { segment: String(segment.id), declaredLaneCount: 2, memberTurnCount: 2, emptyLaneTags: ["beta"] },
+    ]);
+    const edge = projection.edges.find((e) => e.citingId === y && e.citedId === x)!;
+    expect([edge.headOutcome, edge.headTag, edge.storedHeadTag]).toEqual(["invalid", "", "beta"]);
+    // And the checker reports the stale word as E4, naming what was stored.
+    const result = checkLanes(projection.turns, projection.edges, projection.outOfVocabularyEdges);
+    expect(result.errors).toEqual([
+      {
+        class: "E4",
+        anchorId: y,
+        citingId: y,
+        citedId: x,
+        relation: "extends",
+        tags: ["alpha", "beta"],
+        missing: [{ tag: "beta", endpoint: "cited" }],
+      },
+    ]);
+  });
 });
 
 // ------------------- v12 ticket 06: the passes read the SIDE columns

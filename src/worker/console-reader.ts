@@ -8,8 +8,8 @@ import {
   type SegmentStatus,
 } from "../db/segments";
 import { getSession, type SessionRecord } from "../db/sessions";
-import { checkLanes, type LaneCheckerResult } from "../shared/lane-checker";
-import type { LaneEdgeInput, LaneTurnInput } from "../shared/lane-interpretation";
+import { checkLanes, type LaneCheckerEdgeInput, type LaneCheckerResult } from "../shared/lane-checker";
+import type { LaneTurnInput } from "../shared/lane-interpretation";
 import { recallMemory, recallQueryOutcome, type RecallInput } from "../mcp/recall";
 import { timelineQuery, timelineQueryOutcome, type TimelineInput } from "../mcp/timeline";
 import type { QueryOutcome } from "../mcp/query-outcome";
@@ -107,7 +107,7 @@ export interface ConsoleTurnDisplayFields {
 export interface ConsoleLaneCheckRun {
   result: LaneCheckerResult;
   turns: readonly LaneTurnInput[];
-  edges: readonly LaneEdgeInput[];
+  edges: readonly LaneCheckerEdgeInput[];
   /** ISO timestamp captured at the START of the one read transaction this run executes in (spec "One projection": "meta.asOf = one timestamp taken inside that read"). */
   asOf: string;
 }
