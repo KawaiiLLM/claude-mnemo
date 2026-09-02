@@ -10,7 +10,7 @@ import {
   formatRelationRejections,
   formatRetractionReceipt,
   normalizeRelationTargetEntry,
-  recomputeTurnCitedPairs,
+  declareEdgeSides,
   retractTurnRelations,
   RELATION_FIELD_ENTRIES,
   RETRACTION_FIELD_ENTRIES,
@@ -532,17 +532,10 @@ export interface ReviewOutcome {
 export interface RelationOutcome {
   /** Rows this call ADDED (ticket 04: `attachTurnRelations`' own additive count). */
   written: number;
-  /** Accepted targets whose (pair, relation) row was already stored — a restatement, not new work. */
+  /** Accepted targets whose pair already carried a class at least as specific — a restatement, not new work. */
   restated: number;
-  /** Rows a `retract…` mirror deleted in this same call (D3). */
+  /** Logical edges a `retract…` mirror deleted in this same call (D3). */
   retracted: number;
-  /**
-   * Ticket 10's own outcome, surfaced by ticket 11: BARE rows put back because
-   * the retraction emptied a pair the citing prose still names. A different
-   * fact from `retracted` — the classification is gone, the citation stands —
-   * and the receipt has to be able to say so without a follow-up query.
-   */
-  restored: number;
 }
 
 /**
@@ -636,6 +629,22 @@ export interface SettlementTurnWriteOutcome {
    * address, and the gate skips it anyway).
    */
   laneKeyTouches: Array<{ segmentId: number; tag: string }>;
+  /**
+   * main-agent-edges D4: how many edges this call DECLARED a side on — the
+   * ones it actually changed, not the ones it restated. A separate number from
+   * `relations` on purpose: a declaration moves an ATTRIBUTION and leaves the
+   * node fact exactly as it was, so folding it into "written" would report an
+   * edge write that never happened.
+   */
+  declared: number;
+  /**
+   * main-agent-edges D4/D5: set when this call's relation entries named a lane
+   * side that storage did NOT apply, because the pair already had a row and an
+   * edge write never re-places a stored side. `null` otherwise. It exists so a
+   * writer that learned the two-sided attach form is told the placement went
+   * nowhere instead of reading "already present" as success.
+   */
+  relationPlacementNotice: string | null;
 }
 
 export type SettlementTurnWriteEvaluation =
@@ -807,6 +816,8 @@ function evaluateSettlementSessionWrite(
       // A session narrative names no turn's lane — see the field's own doc.
       laneTouches: [],
       laneKeyTouches: [],
+      declared: 0,
+      relationPlacementNotice: null,
     },
   };
 }
@@ -860,25 +871,25 @@ function rawAddressLabel(rawInput: SettlementTurnWriteInput): string | null {
  * `homeless_members` directly would resurrect exactly the stale-record bug
  * round 4 retracted.
  *
- * BARE RESTORED: when deleting the last relation of a pair the citing prose
- * still names, `retractTurnRelations` puts the bare citation row back — the
- * audit row says so, because "the classification is gone" and "the citation is
- * gone" are different facts about the graph a later reader must be able to
- * tell apart.
+ * `retracted-bare-restored` IS NO LONGER PRODUCED (main-agent-edges D1). It
+ * recorded that deleting a pair's last relation had put the BARE citation row
+ * back because the citing prose still named the target — "the classification
+ * is gone" versus "the citation is gone", two different facts. The wordless
+ * population is retired, so only the first of the two can happen and every new
+ * audit row is `retracted`. The VALUE stays in the storage vocabulary
+ * (`db/homeless-record.ts`'s CHECK) and its reader stays with it: rows written
+ * before this release still carry it, and a reader that stopped recognising
+ * them would misreport history.
  */
 function recordHomelessMotivatedRetractions(
   db: Database,
   context: SettlementTurnFacadeContext,
   deleted: readonly MemoryEdge[],
-  restored: readonly MemoryEdge[],
   nowEpoch: number,
 ): void {
   if (deleted.length === 0) {
     return;
   }
-  const restoredPairs = new Set(
-    restored.map((edge) => `${edge.cited.kind}:${edge.cited.id}`),
-  );
   // One resolve per distinct turn id, not per edge: a retraction call may empty
   // a dozen rows off one citing turn, and the reduction is a two-query walk.
   const dispositions = new Map<number, number | null>();
@@ -910,9 +921,7 @@ function recordHomelessMotivatedRetractions(
       relationWord: edge.relation ?? "",
       tailTag: edge.tailTag,
       headTag: edge.headTag,
-      outcome: restoredPairs.has(`${edge.cited.kind}:${edge.cited.id}`)
-        ? "retracted-bare-restored"
-        : "retracted",
+      outcome: "retracted",
       createdAtEpoch: nowEpoch,
     });
   }
@@ -1176,6 +1185,8 @@ function evaluateSettlementBatchTagWrite(
       session: null,
       laneTouches,
       laneKeyTouches: [],
+      declared: 0,
+      relationPlacementNotice: null,
     },
   };
 }
@@ -1277,19 +1288,22 @@ export function evaluateSettlementTurnWrite(
     rawInput.tags !== undefined;
   const relationFields = collectRelationFields(RELATION_FIELD_ENTRIES, rawInput);
   const retractionFields = collectRelationFields(RETRACTION_FIELD_ENTRIES, rawInput);
+  // MAIN-AGENT-EDGES D4: the declaration entries, settlement-only.
+  const declarations = rawInput.declare ?? [];
 
   if (
     proseFields.length === 0 &&
     !touchesReview &&
     relationFields.length === 0 &&
-    retractionFields.length === 0
+    retractionFields.length === 0 &&
+    declarations.length === 0
   ) {
     return {
       ok: false,
       message:
         "at least one of title, content, insight, type, tags, a relation field" +
-        " (correct/verify/use)" +
-        " or one of their retract… mirrors is required.",
+        " (correct/verify/use), one of their retract… mirrors, or `declare`" +
+        " is required.",
     };
   }
 
@@ -1851,7 +1865,7 @@ export function evaluateSettlementTurnWrite(
   // ticket 11 — whose comment carries the reasoning): CHECKED, never STAMPED,
   // because an edge write corrects no type and a stamp would tell the next
   // settlement pass a type correction landed when none did.
-  if (relationFields.length > 0 || retractionFields.length > 0) {
+  if (relationFields.length > 0 || retractionFields.length > 0 || declarations.length > 0) {
     const verdict = checkFieldGate(db, writer, "turn", turn.id, EDGE_WRITE_GATE_FIELD, ref);
     if (!verdict.ok) {
       return { ok: false, message: verdict.message };
@@ -1877,9 +1891,20 @@ export function evaluateSettlementTurnWrite(
   // the whole evaluation, so its own all-or-nothing rejection (an address
   // carrying no such edge) still precedes every other write.
   let retracted = 0;
-  let restored = 0;
   if (retractionFields.length > 0) {
-    const result = retractTurnRelations(db, turn.id, retractionFields, nowEpoch);
+    // T2432 P1: each `retract…` parameter supplies its own class as the
+    // compare-and-swap PRECONDITION on the pair — an edge the main agent has
+    // since promoted out from under this run is refused by name, not silently
+    // deleted.
+    const result = retractTurnRelations(
+      db,
+      turn.id,
+      retractionFields.map((field) => ({
+        relationClass: field.relationClass,
+        targets: field.targets,
+      })),
+      nowEpoch,
+    );
     if (result.rejected.length > 0) {
       return { ok: false, message: formatRelationRejections(result.rejected, "retraction") };
     }
@@ -1902,17 +1927,12 @@ export function evaluateSettlementTurnWrite(
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }
-    // Ticket 10's restore, carried onto the receipt by ticket 11: emptying a
-    // pair whose prose still names the target puts the BARE row back, so the
-    // ↳ pull-through survives a retraction. Counted separately because "the
-    // citation stands" is not "the relation stands".
-    restored = result.restored.length;
     // STAGED SETTLEMENT (spec Rev 5, §Homeless record, "Retraction audit"):
     // a retraction MOTIVATED BY A HOMELESS RECORD writes its audit row here,
     // inside the same transaction as the deletion — the caller
     // (`note-settlement-direct-write.ts`) wraps this whole evaluation in one,
     // so the row commits with the deletion or vanishes with it.
-    recordHomelessMotivatedRetractions(db, context, result.deleted, result.restored, nowEpoch);
+    recordHomelessMotivatedRetractions(db, context, result.deleted, nowEpoch);
   }
 
   // TICKET 18 (touch-capture-before-mutation, the touch-loss P0):
@@ -2010,37 +2030,48 @@ export function evaluateSettlementTurnWrite(
     });
     closeNoteDebtAsNoted(db, turn.id, nowEpoch);
     if (promotesTurnRecord) {
-      const promoted = promoteTurnFromNote(db, turn.id, {
+      // The bare citation layer that used to follow the prose that produced it
+      // (`recomputeTurnCitedPairs`) is DELETED with the wordless population
+      // (main-agent-edges D1). Relation rows were never its business anyway:
+      // they are standalone claims that die by retraction, never by a rewrite.
+      promoteTurnFromNote(db, turn.id, {
         title: resolvedProse.finalTitle,
         content: resolvedProse.finalContent,
         insight: resolvedProse.finalInsight,
         updatedAtEpoch: nowEpoch,
       });
-      // The bare citation layer follows the prose that produced it
-      // (`reconcileCitedPairs`, narrowed to bare rows only — relation rows
-      // are standalone claims that die by retraction, never by a rewrite).
-      recomputeTurnCitedPairs(
-        db,
-        turn.id,
-        {
-          title: promoted?.title ?? resolvedProse.finalTitle,
-          content: promoted?.content ?? resolvedProse.finalContent,
-          insight: promoted?.insight ?? resolvedProse.finalInsight,
-        },
-        nowEpoch,
-        turn.sessionId,
-        context.logger,
-      );
     }
     for (const field of proseFields) {
       stampField(db, "turn", turn.id, field, writer, nowEpoch);
     }
   }
 
+  // MAIN-AGENT-EDGES D4: what side placement, if any, each pair was ASKED for
+  // in this call — read back after the write to see whether storage honoured
+  // it. Built here rather than inside the attach because only this layer still
+  // holds the caller's raw entries.
+  const pairAddress = (citingId: number, citedId: number): string =>
+    `${citingId}>${citedId}`;
+  const placementsAsked = new Map<string, { tailTag: string; headTag: string }>();
+  let relationPlacementNotice: string | null = null;
+
   if (relationFields.length > 0) {
     // The main agent's own primitive (ticket 02), called with settlement's
     // provenance — one attach path, one dedupe rule, one written/restated
     // split, and `judged` as the single declared difference.
+    for (const field of relationFields) {
+      for (const entry of field.targets) {
+        const { raw, tailTag, headTag } = normalizeRelationTargetEntry(entry);
+        if (tailTag === "" && headTag === "") {
+          continue;
+        }
+        const parsed = parseTurnAddress(raw);
+        const target = parsed ? getTurn(db, parsed.sessionId, parsed.promptNumber) : null;
+        if (target) {
+          placementsAsked.set(pairAddress(turn.id, target.id), { tailTag, headTag });
+        }
+      }
+    }
     const attached = attachTurnRelations(db, turn.id, relationFields, nowEpoch, "judged");
     if (attached.rejected.length > 0) {
       // Unreachable in practice: the pass above already rejected every
@@ -2058,7 +2089,6 @@ export function evaluateSettlementTurnWrite(
       written: attached.written.length,
       restated: attached.restated.length,
       retracted,
-      restored,
     };
     // Both ADDED and RESTATED count as touching the sides they place — a
     // restatement is still this call asserting the edge, not new work, and
@@ -2073,17 +2103,88 @@ export function evaluateSettlementTurnWrite(
         laneTouches.push({ turnId: edge.cited.id, tag: edge.headTag });
       }
     }
+    // MAIN-AGENT-EDGES D4/D5, the ONE silent outcome this split could produce,
+    // said out loud. An attach carrying side tags onto a pair that ALREADY has
+    // a row changes no side — placement is `declare`'s job now — and without
+    // this the run's receipt would read "already present", which is true and
+    // reads as success while the lane the writer meant to place went nowhere.
+    // The count is of EDGES, not entries: what the writer has to act on is
+    // which pairs still need a declaration.
+    const unplaced = [...attached.written, ...attached.restated].filter(
+      (edge) =>
+        edge.cited.kind === "turn" &&
+        placementsAsked.get(pairAddress(edge.citing.id, edge.cited.id)) !== undefined &&
+        (placementsAsked.get(pairAddress(edge.citing.id, edge.cited.id))!.tailTag !==
+          edge.tailTag ||
+          placementsAsked.get(pairAddress(edge.citing.id, edge.cited.id))!.headTag !==
+            edge.headTag),
+    ).length;
+    if (unplaced > 0) {
+      relationPlacementNotice =
+        `${unplaced} edge(s) in this call named a lane side that was NOT applied — an edge write ` +
+        `never re-places a stored side. Use \`declare\` to move one.`;
+    }
   } else if (retracted > 0) {
-    relations = { written: 0, restated: 0, retracted, restored };
+    relations = { written: 0, restated: 0, retracted };
   }
 
-  // Peer round P1-8: one bump for whatever this call actually changed about
-  // the set — a restatement changes nothing and moves nothing, so it does not
-  // send every other reader back for a re-read it does not need. Placed after
-  // Gate C above: a call that rolls back must not leave a revision behind
-  // claiming a change that did not survive (the caller wraps this evaluation
-  // in one transaction, so the stamp unwinds with everything else, but the
-  // ordering keeps that true independently of the caller's shape).
+  // MAIN-AGENT-EDGES D4: DECLARATIONS, after the attach.
+  //
+  // AFTER, on purpose: a run may fill an edge and declare its ambiguous side
+  // in the same call, and a declaration needs the row to exist. Each entry
+  // patches the pair's ONE row in place — same row id, class, coverage,
+  // provenance and creation time — and the whole call is refused on the first
+  // entry that cannot be honoured (a pair with no edge, a stale class, a tag
+  // that is not the endpoint's, an endpoint that needs no declaration),
+  // because the caller wraps this evaluation in one transaction and a
+  // half-applied attribution is worse than none.
+  //
+  // The lane TOUCHES it returns carry BOTH the old and the new qualified lane
+  // of every side that moved: `#alpha` -> `#beta` leaves `#alpha` owed exactly
+  // as much as it commits `#beta`, and the disposition gate reads this ledger.
+  //
+  // `declareEdgeSides` stamps the citing turn's relations revision itself,
+  // ONCE per changing call — which is why the block below does not add to
+  // `relations` (nothing about the edge's CLAIM changed) and why the shared
+  // stamp further down is not reached for a declare-only call.
+  let declared = 0;
+  for (const entry of declarations) {
+    const parsed = parseTurnAddress(entry.turn);
+    const target = parsed
+      ? getTurn(db, parsed.sessionId, parsed.promptNumber)
+      : null;
+    if (!target) {
+      return {
+        ok: false,
+        message:
+          `declare rejected: "${entry.turn}" is not a fully qualified ` +
+          `"S<session>/T<prompt>" address of an existing turn.`,
+      };
+    }
+    const outcome = declareEdgeSides(
+      db,
+      {
+        citingTurnId: turn.id,
+        citedTurnId: target.id,
+        relationClass: entry.class ?? null,
+        tailTag: entry.tailTag,
+        headTag: entry.headTag,
+      },
+      writer,
+      nowEpoch,
+    );
+    if (!outcome.ok) {
+      return { ok: false, message: `declare rejected: ${outcome.message}` };
+    }
+    if (outcome.changed) {
+      declared += 1;
+      for (const touch of outcome.touches) {
+        laneTouches.push(touch);
+      }
+    }
+  }
+
+
   if (relations && (relations.written > 0 || relations.retracted > 0)) {
     stampTurnRelationsRevision(db, turn.id, writer, nowEpoch);
   }
@@ -2118,6 +2219,8 @@ export function evaluateSettlementTurnWrite(
       session: null,
       laneTouches,
       laneKeyTouches,
+      declared,
+      relationPlacementNotice,
     },
   };
 }
@@ -2192,10 +2295,21 @@ export function renderSettlementTurnWriteReceipt(
       parts.push("Private-tagged content was removed before storing.");
     }
   }
+  if (outcome.relationPlacementNotice) {
+    parts.push(outcome.relationPlacementNotice);
+  }
+  if (outcome.declared > 0) {
+    // main-agent-edges D4: reported apart from the relation counts, because a
+    // declaration moves an ATTRIBUTION and changes no node fact — folding it
+    // into "attached" would report an edge write that never happened.
+    parts.push(
+      `Declared a side on ${outcome.declared} edge(s) — the edges themselves are unchanged.`,
+    );
+  }
   if (outcome.relations) {
     // Ticket 11: the SAME register `mcp/note.ts` renders (its
-    // `formatRetractionReceipt`, imported), including ticket 10's restored
-    // count — one wording for both write surfaces, not two.
+    // `formatRetractionReceipt`, imported) — one wording for both write
+    // surfaces, not two.
     const retractionLine = formatRetractionReceipt(outcome.relations);
     if (retractionLine) {
       parts.push(retractionLine);

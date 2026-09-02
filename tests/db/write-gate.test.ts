@@ -44,6 +44,30 @@ beforeEach(() => {
 
 afterEach(() => db.close());
 
+/**
+ * ONE outgoing relation atom on a citing turn, stated in SQL.
+ *
+ * main-agent-edges D3 (the read-once 00 addendum) gave `checkRelationsGate` a
+ * FRESH-TURN EXCEPTION: a citing turn holding zero outgoing rows with
+ * `relation IS NOT NULL` is admitted unconditionally, writer-agnostic, before
+ * the completeness lookup runs — a turn with nothing to re-read owes no
+ * re-read. Every relations-gate case that means to observe a REFUSAL therefore
+ * has to give the turn an edge first; that is the state in which the rule has
+ * any content at all.
+ *
+ * Raw SQL rather than `writeMemoryEdges` because this file's fixtures address
+ * turns by bare id without seeding the rows, and the gate reads nothing but
+ * `memory_edges`.
+ */
+function seedOutgoingRelationAtom(citingTurnId: number, citedTurnId = 9_001): void {
+  db.query<unknown, [number, number]>(
+    `INSERT INTO memory_edges
+       (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+        tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+     VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', 'use', '', 100)`,
+  ).run(citingTurnId, citedTurnId);
+}
+
 describe("writer identity", () => {
   test("session writer id and its display form round-trip", () => {
     expect(sessionWriterId(15069)).toBe("session:15069");
@@ -768,6 +792,7 @@ describe("writer context epoch (light-review-repairs 04)", () => {
 
   test("bumping invalidates the relations gate identically — a pre-bump complete relations read no longer authorizes an edge write", () => {
     const turnId = 7;
+    seedOutgoingRelationAtom(turnId);
     stampTurnRelationsRevision(db, turnId, "session:9", 100);
     recordReadGrant(db, "session:1", "turn", turnId, 200, snapshotWriteGateSequence(db));
     recordFieldCompleteness(
@@ -955,6 +980,10 @@ describe("grant-principal widening (ticket 05) — (job, generation) is the prin
   test("relations-gate carry: an edges-stage checkRelationsGate sees a COMPLETE relations read the SAME generation's topics identity recorded", () => {
     const topicsWriter = claimWriterId(7, 2, "topics");
     const edgesWriter = claimWriterId(7, 2, "edges");
+    // Without an edge the gate would admit under D3's fresh-turn exception and
+    // this case would pass whether or not the principal widened — the carry it
+    // exists to prove would never be exercised.
+    seedOutgoingRelationAtom(1);
     stampTurnRelationsRevision(db, 1, "session:9", 100);
     recordFieldCompleteness(
       db,
@@ -971,6 +1000,9 @@ describe("grant-principal widening (ticket 05) — (job, generation) is the prin
   test("non-inheritance (resolver seam): a DIFFERENT generation of the SAME job inherits nothing — the edges check still refuses", () => {
     const gen1Topics = claimWriterId(7, 1, "topics");
     const gen2Edges = claimWriterId(7, 2, "edges");
+    // Same reason as the carry case above: the refusal is only observable on a
+    // turn that actually carries an outgoing relation atom (D3).
+    seedOutgoingRelationAtom(1);
     stampTurnRelationsRevision(db, 1, "session:9", 100);
     recordFieldCompleteness(
       db,

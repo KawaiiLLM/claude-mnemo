@@ -91,6 +91,29 @@ describe("edge scoring signals", () => {
     );
   }
 
+  /**
+   * A LEGACY MULTI-ROW PAIR, written past the write path.
+   *
+   * main-agent-edges D5 made the pair the row's whole identity, so no writer
+   * can mint a second row for one pair any more. Production still holds 109
+   * such pairs until ticket 01's cutover folds them, and the signals below are
+   * read over exactly that stock — so the fixture that needs one seeds it in
+   * SQL rather than pretending `writeMemoryEdges` will still produce it.
+   */
+  function legacyEdge(
+    citingId: number,
+    citedId: number,
+    relation: CitationRelation,
+    createdAtEpoch: number,
+  ): void {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', '', '', '', '', ?)`,
+    ).run(citingId, citedId, relation, createdAtEpoch);
+  }
+
   const ZERO: TurnEdgeSignals = { overridden: false, refinesExcess: { decision: 0, delivery: 0 }, encodesCount: 0 };
 
   test("linked-list baseline graph: everyone reads all-zero signals", () => {
@@ -328,8 +351,10 @@ describe("edge scoring signals", () => {
     test("a turn cited by BOTH grounds and indexes from the SAME source counts exactly the two real edges, no double-count and no dedup", () => {
       const target = addTurn(1, { type: ["design"] });
       const source = addTurn(2, { type: ["implement"] });
-      edge(source, target, "grounds", 1000);
-      edge(source, target, "indexes", 1000);
+      // Legacy stock: two rows for one pair, which only a pre-cutover database
+      // holds (main-agent-edges D5 — see `legacyEdge`).
+      legacyEdge(source, target, "grounds", 1000);
+      legacyEdge(source, target, "indexes", 1000);
 
       const signal = getTurnEdgeSignalsForTurn(db, target);
       expect(signal.encodesCount).toBe(2);

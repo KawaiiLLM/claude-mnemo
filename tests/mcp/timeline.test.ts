@@ -58,7 +58,7 @@ import { LARGE_SPINE_SEGMENT_COUNT, seedLargeEraSpine } from "../support/large-c
 // export a second function of the same name, and the two cut differently.
 import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
 import { type CitationRelation } from "../../src/db/citations";
-import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
+import { deriveSideTags, isCitationRelation, writeMemoryEdges } from "../../src/db/memory-edges";
 
 // `type` accepts a single string as a convenience (ticket 02, spec B5 widened
 // storage to a list; most call sites below predate that and pass one word).
@@ -1620,20 +1620,47 @@ describe("S-view and E-view integration — golden nine (milestone-election spec
     for (const tag of new Set([...laneTagsByTurn.values()].flatMap((tags) => [...tags]))) {
       insertLane(db, laneSegmentId, tag, FIXTURE_BASE);
     }
+    // SEEDED PAST THE WRITE PATH, and that is the point. This fixture is a
+    // recorded production graph (S15069/T900-1001), and 11 of its 113 pairs
+    // carry more than one row — the exact stock main-agent-edges D5 (one pair,
+    // one row) stops anything from writing again and ticket 01's rebuild is
+    // what folds down. Pushing it back through `writeMemoryEdges` would not
+    // reproduce the corpus: the second word on a pair would promote or no-op,
+    // (913, 912)'s three rows would become one, and the election would read a
+    // DIFFERENT graph than the one `tests/shared/milestone-election.test.ts`
+    // runs the pure core against — which is precisely the comparison this
+    // describe block exists to make. So the rows go in as the database that
+    // produced them holds them, side-tag index rows included (that is the
+    // half of a relation write `writeMemoryEdges` performs beyond the row
+    // itself, and every lane reader depends on it).
+    const insertEdgeRow = db.query<{ id: number }, [number, number, string, string, string, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'judged', ?, ?, '', '', ?)
+       RETURNING id`,
+    );
+    const insertSideTagRow = db.query<unknown, [number, string, string]>(
+      `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+    );
     for (const edge of fixture.edges) {
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn" as const, id: turnDbId(db, session.id, edge.citingId) },
-            cited: { kind: "turn" as const, id: turnDbId(db, session.id, edge.citedId) },
-            relation: edge.relation as CitationRelation,
-            provenance: "judged" as const,
-            ...deriveSideTags(edge.tags),
-          },
-        ],
+      // The corpus predates the current vocabulary and carries one `refutes`
+      // row, a word the table's own CHECK no longer admits. `writeMemoryEdges`
+      // used to drop it as `invalid-relation`, so it was never in the graph
+      // this fixture's golden nine was measured on; skipping it keeps the
+      // seeded graph identical to what the write path produced.
+      if (!isCitationRelation(edge.relation)) continue;
+      const sides = deriveSideTags(edge.tags);
+      const row = insertEdgeRow.get(
+        turnDbId(db, session.id, edge.citingId),
+        turnDbId(db, session.id, edge.citedId),
+        edge.relation,
+        sides.tailTag,
+        sides.headTag,
         FIXTURE_BASE,
-      );
+      )!;
+      if (sides.tailTag !== "") insertSideTagRow.run(row.id, "tail", sides.tailTag);
+      if (sides.headTag !== "") insertSideTagRow.run(row.id, "head", sides.headTag);
     }
     return { sessionId: session.id };
   }
@@ -2920,17 +2947,53 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     };
   };
 
+  /**
+   * A PRE-CUTOVER physical row (main-agent-edges D5). See the note at each use
+   * below: the write path can no longer mint a second row on a pair, so a
+   * fixture whose SUBJECT is a multi-row pair has to look like the database
+   * that still holds them.
+   */
+  const legacyEdgeRow = (
+    db: ReturnType<typeof createDatabase>,
+    citingId: number,
+    citedId: number,
+    relation: string,
+    provenance: string,
+    epoch: number,
+  ): void => {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, ?, '', '', '', '', ?)`,
+    ).run(citingId, citedId, relation, provenance, epoch);
+  };
+
+  /** The same stock, wordless (main-agent-edges D1). */
+  const legacyBareRow = (
+    db: ReturnType<typeof createDatabase>,
+    citingId: number,
+    citedId: number,
+    epoch: number,
+  ): void => {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', ?)`,
+    ).run(citingId, citedId, epoch);
+  };
+
   it("renders a doubly-classified antecedent once, and still names both its relations", () => {
     const db = createDatabase(":memory:");
     const { sessionId, citerId, antecedentIds } = seedCiter(db, 1);
-    writeMemoryEdges(
-      db,
-      [
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "consume", provenance: "asserted" },
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: "override", provenance: "judged" },
-      ],
-      dayEpoch(30),
-    );
+    // Two PHYSICAL rows on one pair, seeded past the write path. Since
+    // main-agent-edges D5 (one pair, one row) `writeMemoryEdges` cannot produce
+    // this shape any more — the second word would promote the first row in
+    // place — but a pre-cutover database holds 109 such pairs, and the READER
+    // this test is about is untouched by D5: it still has to fold them onto one
+    // address until ticket 01's rebuild does the folding in the table.
+    legacyEdgeRow(db, citerId, antecedentIds[0]!, "consume", "asserted", dayEpoch(30));
+    legacyEdgeRow(db, citerId, antecedentIds[0]!, "override", "judged", dayEpoch(30));
 
     const output = renderTimeline(
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
@@ -2954,19 +3017,20 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
     const { sessionId, citerId, antecedentIds } = seedCiter(db, 5);
     writeMemoryEdges(
       db,
-      [
-        ...antecedentIds.map((citedId) => ({
-          citing: { kind: "turn" as const, id: citerId },
-          cited: { kind: "turn" as const, id: citedId },
-          relation: "consume" as const,
-          provenance: "asserted" as const,
-        })),
-        // A second relation on the FIRST pair. Pre-fix this consumed a slot
-        // and pushed the fold to `+2`, hiding a turn nothing else showed.
-        { citing: { kind: "turn" as const, id: citerId }, cited: { kind: "turn" as const, id: antecedentIds[0]! }, relation: "grounds" as const, provenance: "asserted" as const },
-      ],
+      antecedentIds.map((citedId) => ({
+        citing: { kind: "turn" as const, id: citerId },
+        cited: { kind: "turn" as const, id: citedId },
+        relation: "consume" as const,
+        provenance: "asserted" as const,
+      })),
       dayEpoch(30),
     );
+    // A second relation on the FIRST pair. Pre-fix this consumed a slot and
+    // pushed the fold to `+2`, hiding a turn nothing else showed. Seeded past
+    // the write path for the same reason as the test above: main-agent-edges
+    // D5 admits one row per pair, so legacy stock is now the only place a
+    // second word on one pair comes from, and the fold is what has to survive.
+    legacyEdgeRow(db, citerId, antecedentIds[0]!, "grounds", "asserted", dayEpoch(30));
 
     const output = renderTimeline(
       buildTimelineView(db, { id: `S${sessionId}/T821..821` }),
@@ -2990,10 +3054,14 @@ describe("↳ antecedents de-duplicate by (citing, cited) pair", () => {
   it("a bare (unclassified) antecedent keeps the plain T<n> form; a classified one gets its word", () => {
     const db = createDatabase(":memory:");
     const { sessionId, citerId, antecedentIds } = seedCiter(db, 2);
+    // The wordless row is seeded past the write path: main-agent-edges D1
+    // retired that WRITE (`writeMemoryEdges` refuses `relation: null` by name,
+    // reason `bare-row-retired`), and the stored population it leaves behind is
+    // exactly what this reader still has to render until ticket 01 deletes it.
+    legacyBareRow(db, citerId, antecedentIds[0]!, dayEpoch(30));
     writeMemoryEdges(
       db,
       [
-        { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[0]! }, relation: null, provenance: "text-ref" },
         { citing: { kind: "turn", id: citerId }, cited: { kind: "turn", id: antecedentIds[1]! }, relation: "extends", provenance: "asserted" },
       ],
       dayEpoch(30),

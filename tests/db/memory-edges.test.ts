@@ -4,9 +4,10 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import {
   canonicalizeTagSet,
+  CITING_NODE_KINDS,
   countMemoryEdges,
   deriveSideTags,
-  reconcileCitedPairs,
+  EDGE_NODE_KINDS,
   formatNodeRef,
   getEdgeInDegree,
   getEdgesBySideTag,
@@ -39,6 +40,42 @@ describe("universal memory edges", () => {
       .get(sessionId, promptNumber)!.id;
   }
 
+  /**
+   * A LEGACY row, written PAST the write path.
+   *
+   * main-agent-edges D5 made the pair the whole of a row's identity, so no
+   * writer can mint a second row for one pair any more, and D1 retired the
+   * wordless write outright. Production still holds both populations — 109
+   * multi-row pairs and the whole bare layer — until ticket 01's cutover folds
+   * and deletes them, and the reads and the retraction below are exercised
+   * over exactly that stock. So a fixture that needs one seeds it in SQL
+   * rather than pretending `writeMemoryEdges` will still produce it.
+   */
+  function legacyEdge(
+    citing: number,
+    cited: number,
+    relation: string | null,
+    createdAtEpoch: number,
+    sides: { tailTag?: string; headTag?: string } = {},
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string | null, string, string, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, '', '', ?)
+         RETURNING id`,
+      )
+      .get(
+        citing,
+        cited,
+        relation,
+        sides.tailTag ?? "",
+        sides.headTag ?? "",
+        createdAtEpoch,
+      )!.id;
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -59,66 +96,17 @@ describe("universal memory edges", () => {
     db.close();
   });
 
-  // Edge-mechanism-revision D1 (decoupling): prose drift owns only the BARE
-  // layer. This is the causal witness the routes lean on now — a stale pair
-  // that carries a relation KEEPS it (only retraction deletes a relation row),
-  // while a stale bare-only pair vanishes with the prose that named it. The
-  // earlier version of this test pinned the opposite ("relation-blind
-  // delete"), which under decoupling let an ordinary note correction silently
-  // destroy edges nobody retracted.
-  describe("reconcileCitedPairs touches only the bare layer", () => {
-    test("a relation-bearing stale pair survives; a bare-only stale pair goes", () => {
-      const citer = addTurn(1);
-      const keep = addTurn(2);
-      const drop = addTurn(3);
-      const bareDrop = addTurn(4);
-
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citer },
-            cited: { kind: "turn", id: keep },
-            relation: "consume",
-            provenance: "judged",
-          },
-          {
-            citing: { kind: "turn", id: citer },
-            cited: { kind: "turn", id: drop },
-            relation: "narrows",
-            provenance: "judged",
-          },
-          {
-            citing: { kind: "turn", id: citer },
-            cited: { kind: "turn", id: bareDrop },
-            relation: null,
-            provenance: "text-ref",
-          },
-        ],
-        500,
-      );
-      expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(3);
-
-      // The body now cites only `keep`.
-      reconcileCitedPairs(
-        db,
-        { kind: "turn", id: citer },
-        [{ kind: "turn", id: keep }],
-        600,
-        "text-ref",
-      );
-
-      const survivors = getOutgoingEdges(db, { kind: "turn", id: citer });
-      expect(survivors).toHaveLength(2);
-      const byTarget = new Map(survivors.map((e) => [e.cited.id, e.relation]));
-      // A bare re-statement of a pair that already carries a relation must not
-      // clear it (spec C14), and prose withdrawing a mention must not clear a
-      // relation either (D1) — the bare-only pair is the only casualty.
-      expect(byTarget.get(keep)).toBe("consume");
-      expect(byTarget.get(drop)).toBe("narrows");
-      expect(byTarget.has(bareDrop)).toBe(false);
-    });
-  });
+  // `reconcileCitedPairs` IS DELETED (main-agent-edges D1 / R10-2), and the
+  // `describe` block that pinned its one rule went with it: prose drift owned
+  // only the BARE layer, so a stale pair carrying a relation kept it while a
+  // stale bare-only pair vanished with the prose that named it.
+  //
+  // Half of that rule is now true by construction rather than by test: no
+  // code path reads a citing node's prose on the way to `memory_edges` at
+  // all, so an ordinary note correction cannot destroy an edge nobody
+  // retracted. The other half — the bare layer itself — is the population D1
+  // retires, and `writeMemoryEdges` refuses to mint another row of it
+  // (`bare-row-retired`, pinned in `tests/db/logical-edge-writes.test.ts`).
 
   test("node refs round-trip through the type-prefixed form", () => {
     expect(formatNodeRef({ kind: "segment", id: 47 })).toBe("segment:47");
@@ -127,44 +115,45 @@ describe("universal memory edges", () => {
     expect(parseNodeRef("turn:0")).toBeNull();
   });
 
-  test("writes a BARE turn→segment edge and reads it from both ends", () => {
+  /**
+   * MAIN-AGENT-EDGES D1. What stood here was "writes a BARE turn→segment edge
+   * and reads it from both ends" — the text-ref prose-citation index, written
+   * with `relation: null` and read back from either endpoint. That WRITE PATH
+   * is retired: a wordless input is refused BY NAME, because the pair-existence
+   * record it produced is a fact nothing acts on and the prose it stood for is
+   * still reachable through `parseInlineCitations`.
+   *
+   * The old case carried a second claim worth keeping, and it is the reason
+   * this test is a replacement rather than a deletion: the table's STRUCTURAL
+   * capacity to name a segment on the cited side, which pre-cutover rows still
+   * use. So the capacity is asserted where it is DECLARED (`EDGE_NODE_KINDS`),
+   * and the write path is asserted to refuse.
+   */
+  test("`segment` stays a declared edge-node kind, and the wordless write onto one is refused by name (D1)", () => {
     const turnId = addTurn(1);
     const segment = createSegment(db, { title: "Fix the retry loop", nowEpoch: 200 });
 
-    // container-unification D10: the relation graph is turn→turn, so a
-    // turn→segment edge can only be BARE (the text-ref prose-citation index)
-    // — see the dedicated rejection test below for the relation-carrying case.
+    expect(EDGE_NODE_KINDS).toContain("segment");
+
     const result = writeMemoryEdges(
       db,
       [
         {
           citing: { kind: "turn", id: turnId },
           cited: { kind: "segment", id: segment.id },
-          relation: null,
+          relation: null as never,
           provenance: "text-ref",
         },
       ],
       300,
     );
 
-    expect(result.written).toHaveLength(1);
-    expect(result.rejected).toHaveLength(0);
-    expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(1);
-    expect(getIncomingEdges(db, { kind: "segment", id: segment.id })).toEqual([
-      {
-        id: expect.any(Number),
-        citing: { kind: "turn", id: turnId },
-        cited: { kind: "segment", id: segment.id },
-        relation: null,
-        tailTag: "",
-        headTag: "",
-        // relation-vocabulary-v13 ticket 02: a bare row carries no class.
-        relationClass: "",
-        relationCoverage: "",
-        provenance: "text-ref",
-        createdAtEpoch: 300,
-      },
+    expect(result.written).toEqual([]);
+    expect(result.rejected.map((entry) => entry.reason)).toEqual([
+      "bare-row-retired",
     ]);
+    expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toEqual([]);
+    expect(getIncomingEdges(db, { kind: "segment", id: segment.id })).toEqual([]);
   });
 
   /**
@@ -200,37 +189,51 @@ describe("universal memory edges", () => {
     expect(getOutgoingEdges(db, { kind: "turn", id: turnId })).toHaveLength(0);
   });
 
-  test("a session may cite (citing_kind admits session, spec C10) but never be cited", () => {
+  /**
+   * The same replacement the segment case above gets, for spec C10's other
+   * half. `citing_kind` still ADMITS `session` — that capacity is what
+   * pre-cutover rows written from a session summary field occupy — but the
+   * only write that ever used it was the wordless one main-agent-edges D1
+   * retired, so the capacity is asserted where it is declared and the write
+   * path is asserted to refuse. The asymmetry survives untouched: a session is
+   * never a citation TARGET, and that rejection is not about wordlessness at
+   * all, so it keeps its own name.
+   */
+  test("`session` is a declared CITING kind and never a cited one — and the wordless write it took is refused by name (C10 + D1)", () => {
     const segment = createSegment(db, { title: "Session-cited chapter", nowEpoch: 200 });
+
+    expect(CITING_NODE_KINDS).toContain("session");
+    expect(EDGE_NODE_KINDS as readonly string[]).not.toContain("session");
 
     const result = writeMemoryEdges(
       db,
       [
         {
-          // BARE, not relation-carrying: container-unification D10 confines
-          // every relation-carrying row to turn→turn, so a session's citation
-          // is text-ref's bare existence record, same as a segment's.
           citing: { kind: "session", id: sessionId },
           cited: { kind: "segment", id: segment.id },
-          relation: null,
+          relation: null as never,
           provenance: "text-ref",
         },
         {
           // A session can never be the TARGET of a relation — nothing "flows
           // trust" toward a container the way it does toward a conclusion.
+          // Checked before the wordless refusal, so this input still reports
+          // the malformed address rather than the retired write path.
           citing: { kind: "segment", id: segment.id },
           cited: { kind: "session", id: sessionId } as never,
-          relation: null,
+          relation: "consume",
           provenance: "text-ref",
         },
       ],
       300,
     );
 
-    expect(result.written).toHaveLength(1);
-    expect(result.written[0]?.citing).toEqual({ kind: "session", id: sessionId });
-    expect(result.written[0]?.relation).toBeNull();
-    expect(result.rejected.map((entry) => entry.reason)).toEqual(["invalid-node"]);
+    expect(result.written).toEqual([]);
+    expect(result.rejected.map((entry) => entry.reason)).toEqual([
+      "bare-row-retired",
+      "invalid-node",
+    ]);
+    expect(countMemoryEdges(db)).toBe(0);
   });
 
   /**
@@ -293,26 +296,26 @@ describe("universal memory edges", () => {
     expect(repeat.written[0]?.relation).toBe("consume");
   });
 
-  test("a bare write is storable, is superseded by a relation on the same pair, and never comes back over one (D2)", () => {
+  /**
+   * MAIN-AGENT-EDGES D1, the half of the retired bare layer that still has a
+   * live behaviour to pin. Three cases stood here — "a bare write is storable",
+   * "a repeated bare write never yields a second bare row", and the
+   * supersession this keeps — and the first two are gone with the write path:
+   * nothing mints a wordless row, so "storable" and "not duplicated" are
+   * claims about a population no caller can create. The refusal that replaced
+   * them is asserted by name above and in `logical-edge-writes.test.ts`.
+   *
+   * What SURVIVES is the displacement: pre-cutover stock still holds wordless
+   * rows, and a relation write onto such a pair drops the one it finds, so
+   * bare and relation rows never coexist on the pair on the way out. The bare
+   * row is therefore seeded in SQL — `writeMemoryEdges` will not produce one.
+   */
+  test("a relation write DISPLACES the pair's PRE-CUTOVER wordless row, and no wordless write can re-open one (D1)", () => {
     const citing = addTurn(1);
     const cited = addTurn(2);
 
-    // An unattributed citation must be storable — it is the pair's existence
-    // record when nothing has classified it.
-    const bare = writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: cited },
-          relation: null,
-          provenance: "text-ref",
-        },
-      ],
-      300,
-    );
-    expect(bare.written).toHaveLength(1);
-    expect(bare.written[0]?.relation).toBeNull();
+    legacyEdge(citing, cited, null, 300);
+    expect(countMemoryEdges(db)).toBe(1);
 
     // A classification arrives for the same pair. The relation row now records
     // the pair's existence, so the bare row goes: keeping both would hand
@@ -348,120 +351,63 @@ describe("universal memory edges", () => {
     ]);
 
     // A later bare re-mention neither retracts the relation nor re-opens a
-    // bare row beside it: the pair is already on file.
+    // bare row beside it — it does not reach storage at all.
     const remention = writeMemoryEdges(
       db,
       [
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: null,
+          relation: null as never,
           provenance: "text-ref",
         },
       ],
       500,
     );
 
-    expect(remention.written[0]?.relation).toBe("narrows");
+    expect(remention.written).toEqual([]);
+    expect(remention.rejected.map((entry) => entry.reason)).toEqual([
+      "bare-row-retired",
+    ]);
     const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
     expect(stored).toHaveLength(1);
     expect(stored[0]?.relation).toBe("narrows");
   });
 
-  test("a repeated bare write never yields a second bare row (D2, partial unique index)", () => {
-    const citing = addTurn(1);
-    const cited = addTurn(2);
-    const bare = {
-      citing: { kind: "turn" as const, id: citing },
-      cited: { kind: "turn" as const, id: cited },
-      relation: null,
-      provenance: "text-ref" as const,
-    };
+  // DELETED (main-agent-edges D5): "two relations on one pair coexist, each
+  // readable, whether written in one call or two (D2)". Identity is the PAIR
+  // now — one pair, one row — so a second class on a pair no longer mints a
+  // second row to read back: it PROMOTES the stored one when it is strictly
+  // more specific and is a no-op when it is not. That precedence, and the fact
+  // that a promotion preserves the row's id, provenance and creation time, is
+  // pinned in `tests/db/logical-edge-writes.test.ts`. The in-degree claim this
+  // case ended on ("the pair is still ONE citer of the target") outlives it in
+  // "in-degree counts distinct citers, not claims" below.
 
-    writeMemoryEdges(db, [bare], 300);
-    writeMemoryEdges(db, [bare], 400);
-    // Twice inside ONE call too — a batch is not a second chance at the same
-    // duplicate.
-    writeMemoryEdges(db, [bare, bare], 500);
-
-    expect(countMemoryEdges(db)).toBe(1);
-    const stored = getOutgoingEdges(db, bare.citing);
-    expect(stored).toHaveLength(1);
-    expect(stored[0]?.relation).toBeNull();
-    // First sighting, not the last restatement.
-    expect(stored[0]?.createdAtEpoch).toBe(300);
-  });
-
-  test("two relations on one pair coexist, each readable, whether written in one call or two (D2)", () => {
-    const citing = addTurn(1);
-    const cited = addTurn(2);
-    const pair = {
-      citing: { kind: "turn" as const, id: citing },
-      cited: { kind: "turn" as const, id: cited },
-    };
-
-    // Requirement 3's own shape: a landing turn depends on its plan AND
-    // encodes the ruling it carries, about the same target.
-    const oneCall = writeMemoryEdges(
-      db,
-      [
-        { ...pair, relation: "consume", provenance: "asserted" },
-        { ...pair, relation: "grounds", provenance: "asserted" },
-      ],
-      300,
-    );
-    expect(oneCall.rejected).toEqual([]);
-    expect(oneCall.written.map((edge) => edge.relation)).toEqual([
-      "consume",
-      "grounds",
-    ]);
-
-    // A third relation from a LATER call (settlement's hindsight pass) joins
-    // them rather than replacing either.
-    writeMemoryEdges(
-      db,
-      [{ ...pair, relation: "verifies", provenance: "judged" }],
-      400,
-    );
-
-    const stored = getOutgoingEdges(db, pair.citing);
-    expect(stored.map((edge) => edge.relation)).toEqual([
-      "consume",
-      "grounds",
-      "verifies",
-    ]);
-    expect(countMemoryEdges(db)).toBe(3);
-    // Each keeps its own provenance and moment — they are three separate
-    // claims, not one row being relabelled three times.
-    expect(stored.map((edge) => [edge.provenance, edge.createdAtEpoch])).toEqual([
-      ["asserted", 300],
-      ["asserted", 300],
-      ["judged", 400],
-    ]);
-    // The pair is still ONE citer of the target.
-    expect(getEdgeInDegree(db, { kind: "turn", id: cited })).toBe(1);
-  });
-
+  /**
+   * RETRACTION IS PAIR-ADDRESSED (main-agent-edges D4/D5, ruling T2432 P1).
+   * The address used to be (pair, relation, tail, head) — the physical row key
+   * — which made a retraction's success depend on the caller knowing which of
+   * seven storage words a class had landed under and which lanes somebody else
+   * had since declared on it. Under one-pair-one-row the address that names
+   * the edge is the pair, and EVERY row of it goes, a pre-cutover wordless one
+   * included. The CLASS precondition a caller may still want is checked one
+   * layer up, in `db/citations.ts`'s `retractTurnRelations`
+   * (`tests/db/logical-edge-writes.test.ts`).
+   */
   describe("retraction (D3)", () => {
     function seedThreeWays(): { citing: number; cited: number; other: number } {
       const citing = addTurn(1);
       const cited = addTurn(2);
       const other = addTurn(3);
+      // A LEGACY MULTI-ROW PAIR: no writer can mint the second row any more
+      // (D5), and taking ALL of a pair's rows is exactly what this block has
+      // to prove over the stock ticket 01's cutover has yet to fold.
+      legacyEdge(citing, cited, "consume", 300);
+      legacyEdge(citing, cited, "grounds", 300);
       writeMemoryEdges(
         db,
         [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "consume",
-            provenance: "asserted",
-          },
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "grounds",
-            provenance: "asserted",
-          },
           {
             citing: { kind: "turn", id: citing },
             cited: { kind: "turn", id: other },
@@ -474,149 +420,91 @@ describe("universal memory edges", () => {
       return { citing, cited, other };
     }
 
-    test("removes exactly the addressed (pair, relation) and nothing beside it", () => {
+    test("removes EVERY row of the addressed pair and nothing beside it", () => {
       const { citing, cited, other } = seedThreeWays();
 
       const result = retractMemoryEdges(db, [
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "consume",
         },
       ]);
 
       expect(result.rejected).toEqual([]);
-      expect(result.deleted).toHaveLength(1);
-      expect(result.deleted[0]?.relation).toBe("consume");
+      // Both legacy rows of the one logical edge — leaving a fragment behind
+      // is the "the classification is gone but something still records the
+      // pair" state D1 retires.
+      expect(result.deleted).toHaveLength(2);
+      expect(result.deleted.map((edge) => edge.relation).sort()).toEqual([
+        "consume",
+        "grounds",
+      ]);
       expect(result.deleted[0]?.cited).toEqual({ kind: "turn", id: cited });
-      // The pair's OTHER relation survives, and so does the same relation on a
-      // different pair.
+      // The same relation on a DIFFERENT pair is untouched: the address is the
+      // pair, not the word.
       expect(
         getOutgoingEdges(db, { kind: "turn", id: citing }).map((edge) => [
           edge.cited.id,
           edge.relation,
         ]),
-      ).toEqual([
-        [cited, "grounds"],
-        [other, "consume"],
-      ]);
+      ).toEqual([[other, "consume"]]);
     });
 
-    test("relation: null addresses the bare row, and leaves a classified pair alone", () => {
-      const citing = addTurn(1);
-      const bareTarget = addTurn(2);
-      const classified = addTurn(3);
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: bareTarget },
-            relation: null,
-            provenance: "text-ref",
-          },
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: classified },
-            relation: "extends",
-            provenance: "asserted",
-          },
-        ],
-        300,
-      );
-
-      const bare = retractMemoryEdges(db, [
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: bareTarget },
-          relation: null,
-        },
-      ]);
-      expect(bare.deleted).toHaveLength(1);
-      expect(bare.deleted[0]?.relation).toBeNull();
-
-      // A null address is NOT a wildcard: the classified pair has no bare row,
-      // so retracting one there matches nothing and its relation stands.
-      const wildcardAttempt = retractMemoryEdges(db, [
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: classified },
-          relation: null,
-        },
-      ]);
-      expect(wildcardAttempt.deleted).toEqual([]);
-      expect(wildcardAttempt.rejected.map((entry) => entry.reason)).toEqual([
-        "no-such-edge",
-      ]);
-      expect(
-        getOutgoingEdges(db, { kind: "turn", id: citing }).map((edge) => edge.relation),
-      ).toEqual(["extends"]);
-    });
+    // DELETED (main-agent-edges D4/D5): "relation: null addresses the bare row,
+    // and leaves a classified pair alone". The address no longer names a
+    // relation at all, so there is no null-versus-word distinction left to
+    // draw — and the population that distinction existed for (the wordless
+    // layer) is retired by D1. What it proved besides, that an address
+    // resolving to nothing is reported as `no-such-edge` rather than silently
+    // succeeding, is kept in the next case.
 
     test("reports an address that resolved but matched nothing, and a malformed one, apart", () => {
       const { citing, cited } = seedThreeWays();
 
       const result = retractMemoryEdges(db, [
+        // The pair exists in the OTHER direction only — a citation is
+        // directed, so this address resolves and matches nothing.
         {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: cited },
-          relation: "narrows",
-        },
-        {
-          citing: { kind: "turn", id: citing },
-          cited: { kind: "turn", id: cited },
-          relation: "invented" as never,
+          citing: { kind: "turn", id: cited },
+          cited: { kind: "turn", id: citing },
         },
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: 0 },
-          relation: "consume",
         },
       ]);
 
       expect(result.deleted).toEqual([]);
+      // The `invalid-relation` arm this case used to carry is gone with the
+      // relation component of the address: a retraction can no longer name a
+      // word, so it can no longer name a word wrongly.
       expect(result.rejected.map((entry) => entry.reason)).toEqual([
         "no-such-edge",
-        "invalid-relation",
         "invalid-node",
       ]);
       expect(countMemoryEdges(db)).toBe(3);
     });
 
-    test("retracting a pair's last relation leaves no row — it is not downgraded to a bare citation", () => {
+    test("takes the pair's PRE-CUTOVER wordless row with it, and downgrades nothing to one", () => {
       const citing = addTurn(1);
       const cited = addTurn(2);
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: null,
-            provenance: "text-ref",
-          },
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: "grounds",
-            provenance: "asserted",
-          },
-        ],
-        300,
-      );
+      // Both seeded past the write path: a relation write would DISPLACE the
+      // wordless row rather than stand beside it, and the state this case is
+      // about is the pre-cutover one where both are on file.
+      legacyEdge(citing, cited, null, 300);
+      legacyEdge(citing, cited, "grounds", 300);
 
-      retractMemoryEdges(db, [
+      const result = retractMemoryEdges(db, [
         {
           citing: { kind: "turn", id: citing },
           cited: { kind: "turn", id: cited },
-          relation: "grounds",
         },
       ]);
 
-      // The bare row the relation superseded does not come back: resurrecting
-      // the pair as "cited but unclassified" would re-assert something the
-      // retraction never claimed. A body still naming the target restores it
-      // through `reconcileCitedPairs` on the next write.
+      expect(result.deleted).toHaveLength(2);
+      // Nothing is resurrected as "cited but unclassified": that would
+      // re-assert something the retraction never claimed, and after D1 there
+      // is no writer left that could put the row back.
       expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
     });
   });
@@ -625,6 +513,10 @@ describe("universal memory edges", () => {
   // lane-model-v12 D2 (ticket 04) put it back to every self row, so the case
   // below is the bare one only because that is what this fixture happens to
   // send — the next test covers the relation-carrying one.
+  //
+  // The self-loop guard runs BEFORE main-agent-edges D1's wordless refusal, so
+  // a wordless self row is reported as what is most wrong with it — the two
+  // ends being the same node — rather than as the retired write path.
   test("rejects a BARE self-loop and malformed nodes without writing them", () => {
     const turnId = addTurn(1);
 
@@ -834,7 +726,7 @@ describe("universal memory edges", () => {
       return rows;
     }
 
-    test("carries every legacy pair over, remapping the retired vocabulary", () => {
+    test("carries every WORDED legacy pair over, remapping the retired vocabulary, and skips the wordless ones", () => {
       createLegacyTurnCitationsTable();
       const legacy = seedLegacyEdges(12);
 
@@ -847,26 +739,31 @@ describe("universal memory edges", () => {
         )
         .get()!.count;
       expect(sourceCount).toBe(12);
-      // One row per PAIR (spec C5) — the legacy table's wider key is gone, so
-      // migrating 12 distinct pairs yields 12 rows, not 12 relations.
-      expect(migrated).toBe(12);
-      expect(countMemoryEdges(db)).toBe(12);
+      // One row per PAIR (spec C5) — the legacy table's wider key is gone.
+      // NINE, not twelve: `builds-on` (indices 0, 4, 8) remaps to no relation
+      // at all, and main-agent-edges D1 retires the wordless row a winnerless
+      // pair used to fold into. A historical import is not the place to
+      // re-open a population ticket 01's cutover deletes, so those three pairs
+      // are simply not migrated.
+      expect(migrated).toBe(9);
+      expect(countMemoryEdges(db)).toBe(9);
 
-      // Spot-check the remap: `implements` (index 1, 5, 9) → `depends-on`;
-      // `builds-on` (index 0, 4, 8) → no relation, pair preserved;
+      // Spot-check the remap: `implements` (index 1, 5, 9) → `consume`;
       // `evidence-for` lands on `verifies`; `supersedes` lands on `override`
       // (lane-model-v12 ticket 03 — the word left the CHECK the fold writes
       // into, so it can no longer pass through unchanged).
-      const relationFor = (pairIndex: number): string | null =>
+      const relationFor = (pairIndex: number): string | null | undefined =>
         db
           .query<{ relation: string | null }, [number, number]>(
             `SELECT relation FROM memory_edges
              WHERE citing_kind = 'turn' AND citing_id = ?
                AND cited_kind = 'turn' AND cited_id = ?`,
           )
-          .get(legacy[pairIndex]!.citing, legacy[pairIndex]!.cited)?.relation ?? null;
+          .get(legacy[pairIndex]!.citing, legacy[pairIndex]!.cited)?.relation;
 
-      expect(relationFor(0)).toBeNull();
+      // `undefined`, not `null`: the `builds-on` pair has NO ROW, rather than a
+      // row carrying no word. That difference is the whole of D1 here.
+      expect(relationFor(0)).toBeUndefined();
       expect(relationFor(1)).toBe("consume");
       expect(relationFor(2)).toBe("override");
       expect(relationFor(3)).toBe("verifies");
@@ -915,11 +812,13 @@ describe("universal memory edges", () => {
       seedLegacyEdges(5);
       db.query("DELETE FROM memory_edges").run();
 
-      expect(migrateTurnCitationsToEdges(db)).toBe(5);
+      // THREE of the five: indices 0 and 4 are `builds-on`, which remaps to no
+      // relation and is therefore not migrated at all (main-agent-edges D1).
+      expect(migrateTurnCitationsToEdges(db)).toBe(3);
       const secondRun = migrateTurnCitationsToEdges(db);
 
       expect(secondRun).toBe(0);
-      expect(countMemoryEdges(db)).toBe(5);
+      expect(countMemoryEdges(db)).toBe(3);
     });
 
     test("does nothing when the legacy table does not exist", () => {
@@ -973,21 +872,25 @@ describe("universal memory edges", () => {
           .all(pair.citing, pair.cited);
       }
 
-      test("the legacy relation JOINS the one already stored instead of overwriting it (D2)", () => {
+      test("the legacy relation PROMOTES the row already stored rather than joining it (D5)", () => {
         const pair = seedOverlappingPair();
 
         const migrated = migrateTurnCitationsToEdges(db);
 
-        // One row added, not one row rewritten: with (pair, relation)
-        // identity there is no contest for the citation side to win — the
-        // legacy claim and the live one both fit, which is exactly what spec
-        // C16's overwrite rule existed to work around.
-        expect(migrated).toBe(1);
+        // NO row added. This case used to prove the opposite — that the legacy
+        // claim and the live one both fit, because identity was
+        // (pair, relation). Under main-agent-edges D5 the pair IS the row, so
+        // the fold-in goes through the same precedence every live write obeys:
+        // the stored `consume` reads as class `use`, the legacy `evidence-for`
+        // remaps to `verifies` which is class `verify`, and a strictly more
+        // specific class promotes the stored row IN PLACE.
+        expect(migrated).toBe(0);
+        // The promotion revises WHAT is claimed, not who claimed it or when:
+        // provenance and creation time are the live row's, untouched.
         expect(readEdges(pair)).toEqual([
-          { relation: "consume", provenance: "asserted", createdAtEpoch: 2000 },
-          { relation: "verifies", provenance: "judged", createdAtEpoch: 1000 },
+          { relation: "verifies", provenance: "asserted", createdAtEpoch: 2000 },
         ]);
-        expect(countMemoryEdges(db)).toBe(2);
+        expect(countMemoryEdges(db)).toBe(1);
       });
 
       test("a second call over the same overlap changes nothing", () => {
@@ -999,13 +902,16 @@ describe("universal memory edges", () => {
         const after = readEdges(pair);
 
         expect(secondRun).toBe(0);
+        // The second pass finds the class it would assert already stored, so
+        // it is a NO-OP rather than a second promotion (D5).
         expect(after).toEqual(before);
-        expect(countMemoryEdges(db)).toBe(2);
+        expect(countMemoryEdges(db)).toBe(1);
       });
 
       // `builds-on` remaps to NULL (spec C2) — the absence of a statement
-      // about the relation, not a statement that there is none. It therefore
-      // carries only the pair, and the pair is already on file.
+      // about the relation, not a statement that there is none. Under
+      // main-agent-edges D1 such a pair is not migrated at all, so it cannot
+      // reach the stored row to disturb it either.
       test("a citation whose relation remapped to NULL adds nothing to a pair already recorded", () => {
         createLegacyTurnCitationsTable();
         const citing = addTurn(1);
@@ -1033,7 +939,16 @@ describe("universal memory edges", () => {
         expect(migrated).toBe(0);
       });
 
-      test("a relationless citation lands as a bare pair when nothing records the pair yet", () => {
+      /**
+       * MAIN-AGENT-EDGES D1 inverts this case. It used to read "a relationless
+       * citation lands as a BARE pair when nothing records the pair yet" — the
+       * fold's one remaining producer of wordless rows. The wordless
+       * population is retired as a write path and deleted at cutover, so a
+       * historical import may not re-open it: a pair whose winning relation is
+       * null is skipped, and the fact that the legacy table once held it
+       * survives only in the legacy table.
+       */
+      test("a relationless citation is not migrated at all — the fold mints no wordless row (D1)", () => {
         createLegacyTurnCitationsTable();
         const citing = addTurn(1);
         const cited = addTurn(2);
@@ -1042,21 +957,32 @@ describe("universal memory edges", () => {
            VALUES (?, ?, 'builds-on', 3000)`,
         ).run(citing, cited);
 
-        expect(migrateTurnCitationsToEdges(db)).toBe(1);
-        expect(readEdges({ citing, cited })).toEqual([
-          { relation: null, provenance: "judged", createdAtEpoch: 3000 },
-        ]);
+        expect(migrateTurnCitationsToEdges(db)).toBe(0);
+        expect(readEdges({ citing, cited })).toEqual([]);
+        expect(countMemoryEdges(db)).toBe(0);
       });
     });
   });
 
-  // lane-model-v12 tickets 08/09 (spec D1, "边的身份"): identity is
-  // (pair, relation, tail_tag, head_tag), and the two SIDES are the whole of
-  // what a caller states — ticket 09 deleted the legacy `tags` column they
-  // used to be projected onto. This block is storage-only: the
-  // canonical/declared/subset gate lives one layer up
-  // (`shared/turn-phase.ts`), so what is proved here is the row shape, the
-  // identity, the retraction address and the query index.
+  /**
+   * lane-model-v12 tickets 08/09 (spec D1, "边的身份"): the two SIDES are the
+   * whole of the lane surface a caller states — ticket 09 deleted the legacy
+   * `tags` column they used to be projected onto. This block is storage-only:
+   * the canonical/declared/subset gate lives one layer up
+   * (`shared/turn-phase.ts`), so what is proved here is the row shape, the
+   * columns and the query index.
+   *
+   * WHAT THIS BLOCK NO LONGER PROVES (main-agent-edges D5). The sides used to
+   * be IDENTITY-BEARING: identity was (pair, relation, tail, head), so a
+   * second side placement minted a second, independent row, a crossing and its
+   * same-lane namesake coexisted, and a retraction had to name both sides to
+   * match one of them. Identity is the PAIR now. Every case that turned on
+   * that wider key is deleted below with a note in its place; the COLUMNS
+   * survive untouched — still stored, still indexed in
+   * `memory_edge_side_tags`, still cascading on delete — and only their role
+   * in identity is gone. Changing a stored side is `declareEdgeSides`' job
+   * (`tests/db/logical-edge-writes.test.ts`), never a write's.
+   */
   describe("lane-model-v12 ticket 08: two-sided lane identity", () => {
     function rawSidesOf(
       db: Database,
@@ -1177,30 +1103,13 @@ describe("universal memory edges", () => {
       expect(stored[0]?.headTag).toBe("lane-b");
     });
 
-    test("a DIFFERENT side pair on the same (pair, relation) is a SECOND, independent row", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "consume" as const,
-        provenance: "asserted" as const,
-      };
-
-      writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 300);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "laneB", headTag: "laneB" }], 400);
-
-      const stored = getOutgoingEdges(db, { kind: "turn", id: citing });
-      // MUTATION CHECK: a conflict target that ignored the side columns would
-      // collapse these two independent facts into one row.
-      expect(stored).toHaveLength(2);
-      expect(stored.map((edge) => [edge.tailTag, edge.headTag])).toEqual([
-        ["laneA", "laneA"],
-        ["laneB", "laneB"],
-      ]);
-      expect(countMemoryEdges(db)).toBe(2);
-      expect(stored[0]?.id).not.toBe(stored[1]?.id);
-    });
+    // DELETED (main-agent-edges D5): "a DIFFERENT side pair on the same
+    // (pair, relation) is a SECOND, independent row". Identity is the pair, so
+    // a second side placement never mints a row — the write leaves the stored
+    // sides exactly as they are and only the class may be promoted. Re-placing
+    // a side is `declareEdgeSides`' job, pinned in
+    // `tests/db/logical-edge-writes.test.ts` (including that an attach never
+    // re-places one).
 
     /**
      * The row ORDER of a multi-row read, which since ticket 09 is broken by
@@ -1210,25 +1119,25 @@ describe("universal memory edges", () => {
      * whatever order the b-tree happens to hand over and the `relations` recall
      * field renders non-deterministically.
      *
+     * THE ROWS ARE SEEDED IN SQL now (main-agent-edges D5): one pair holds one
+     * row, so the only population a multi-row read can still see is the legacy
+     * stock ticket 01's cutover has yet to fold — 109 such pairs in
+     * production. That is exactly the population whose read order this pins,
+     * so the fixture builds it rather than pretending a writer will.
+     *
      * MUTATION: shorten `EDGE_IDENTITY_ORDER` to `"relation ASC"` — this is
      * the only test that reddens, which is why it exists (the mutation
      * survived the whole suite before it).
      */
-    test("a multi-row read is ordered by the two SIDES after relation, not left to the b-tree", () => {
+    test("a multi-row LEGACY read is ordered by the two SIDES after relation, not left to the b-tree", () => {
       const citing = addTurn(1);
       const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "extends" as const,
-        provenance: "asserted" as const,
-      };
 
       // Written in an order that is neither the row-id order nor the sorted
       // one, so a query that fell back on either would be visible here.
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-c", headTag: "lane-a" }], 300);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-b" }], 310);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-a" }], 320);
+      legacyEdge(citing, cited, "extends", 300, { tailTag: "lane-c", headTag: "lane-a" });
+      legacyEdge(citing, cited, "extends", 310, { tailTag: "lane-a", headTag: "lane-b" });
+      legacyEdge(citing, cited, "extends", 320, { tailTag: "lane-a", headTag: "lane-a" });
 
       const expected = [
         ["lane-a", "lane-a"],
@@ -1252,23 +1161,13 @@ describe("universal memory edges", () => {
       ).toEqual(expected);
     });
 
-    test("a CROSSING and its same-lane namesake coexist: (a,b) and (a,a) are two rows", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "extends" as const,
-        provenance: "asserted" as const,
-      };
+    // DELETED (main-agent-edges D5): "a CROSSING and its same-lane namesake
+    // coexist: (a,b) and (a,a) are two rows". Same retirement as the case
+    // above — the sides no longer separate two rows, because there is only
+    // ever one row for the pair to separate. An edge is placed on one crossing
+    // at a time, and moving it there is a declaration.
 
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-a" }], 300);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-b" }], 400);
-
-      expect(countMemoryEdges(db)).toBe(2);
-    });
-
-    test("re-writing the SAME side pair is an idempotent restatement: one row, first sighting stands", () => {
+    test("re-writing a pair a second time is an idempotent restatement: one row, first sighting stands, sides untouched", () => {
       const citing = addTurn(1);
       const cited = addTurn(2);
       const pair = {
@@ -1282,10 +1181,13 @@ describe("universal memory edges", () => {
         [{ ...pair, provenance: "retrieval", tailTag: "A", headTag: "B" }],
         300,
       );
-      // Same sides, different provenance/time — still the same row.
+      // Different sides, different provenance and time — still the same row,
+      // and still the sides the FIRST write placed. main-agent-edges D5: a
+      // second side placement never mints a row and never re-places a stored
+      // side; only `declareEdgeSides` moves one.
       const second = writeMemoryEdges(
         db,
-        [{ ...pair, provenance: "judged", tailTag: "A", headTag: "B" }],
+        [{ ...pair, provenance: "judged", tailTag: "C", headTag: "D" }],
         400,
       );
 
@@ -1318,99 +1220,22 @@ describe("universal memory edges", () => {
       expect(stored[0]?.createdAtEpoch).toBe(300);
     });
 
-    test("retraction addresses exactly ONE row: a lane-placed retraction leaves siblings untouched", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "override" as const,
-        provenance: "asserted" as const,
-      };
-
-      writeMemoryEdges(db, [pair], 300);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 400);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "laneB", headTag: "laneB" }], 500);
-      expect(countMemoryEdges(db)).toBe(3);
-
-      const result = retractMemoryEdges(db, [
-        {
-          citing: pair.citing,
-          cited: pair.cited,
-          relation: "override",
-          tailTag: "laneA",
-          headTag: "laneA",
-        },
-      ]);
-
-      expect(result.rejected).toEqual([]);
-      expect(result.deleted).toHaveLength(1);
-      expect(result.deleted[0]?.tailTag).toBe("laneA");
-
-      const survivors = getOutgoingEdges(db, { kind: "turn", id: citing });
-      expect(survivors.map((edge) => edge.tailTag).sort()).toEqual(["", "laneB"]);
-    });
-
-    test("a retraction addressing ONE side of a crossing does not match the row — an address names BOTH sides", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "consume" as const,
-        provenance: "asserted" as const,
-      };
-      writeMemoryEdges(db, [{ ...pair, tailTag: "lane-a", headTag: "lane-b" }], 300);
-
-      const wrong = retractMemoryEdges(db, [
-        {
-          citing: pair.citing,
-          cited: pair.cited,
-          relation: "consume",
-          tailTag: "lane-a",
-          headTag: "lane-a",
-        },
-      ]);
-      expect(wrong.deleted).toEqual([]);
-      expect(wrong.rejected[0]?.reason).toBe("no-such-edge");
-      expect(countMemoryEdges(db)).toBe(1);
-
-      const right = retractMemoryEdges(db, [
-        {
-          citing: pair.citing,
-          cited: pair.cited,
-          relation: "consume",
-          tailTag: "lane-a",
-          headTag: "lane-b",
-        },
-      ]);
-      expect(right.deleted).toHaveLength(1);
-      expect(countMemoryEdges(db)).toBe(0);
-    });
-
-    test("a retraction with NO side arguments still deletes exactly the UNSETTLED row, unaffected by placed siblings", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-      const pair = {
-        citing: { kind: "turn" as const, id: citing },
-        cited: { kind: "turn" as const, id: cited },
-        relation: "consume" as const,
-        provenance: "asserted" as const,
-      };
-
-      writeMemoryEdges(db, [pair], 300);
-      writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 400);
-
-      const result = retractMemoryEdges(db, [
-        { citing: pair.citing, cited: pair.cited, relation: "consume" },
-      ]);
-
-      expect(result.deleted).toHaveLength(1);
-      expect(result.deleted[0]?.tailTag).toBe("");
-      const survivors = getOutgoingEdges(db, { kind: "turn", id: citing });
-      expect(survivors).toHaveLength(1);
-      expect(survivors[0]?.tailTag).toBe("laneA");
-    });
+    // DELETED, all three (main-agent-edges D4/D5, ruling T2432 P1): "retraction
+    // addresses exactly ONE row: a lane-placed retraction leaves siblings
+    // untouched", "a retraction addressing ONE side of a crossing does not
+    // match the row — an address names BOTH sides", and "a retraction with NO
+    // side arguments still deletes exactly the UNSETTLED row, unaffected by
+    // placed siblings".
+    //
+    // All three pinned the SIDES as part of the retraction address, and there
+    // is no such address any more: `retractMemoryEdges` takes `{citing, cited}`
+    // and removes every row of the pair. The rule they enforced — that a
+    // retraction must not overreach — is now enforced by the pair being the
+    // whole edge (there is nothing beside it to overreach onto) plus the class
+    // compare-and-swap one layer up in `retractTurnRelations`, which refuses a
+    // stale precondition BY NAME instead of silently matching nothing. Both
+    // are pinned in `tests/db/logical-edge-writes.test.ts`; the pair-addressed
+    // deletion itself is pinned in the `retraction (D3)` block above.
 
     describe("the query index (memory_edge_side_tags)", () => {
       /**
@@ -1488,30 +1313,42 @@ describe("universal memory edges", () => {
         expect(getEdgesBySideTag(db, "alpha").map((e) => e.id)).toEqual([edgeId]);
       });
 
-      test("retraction cascades on the index: the retracted row's rows go, a sibling's stay", () => {
+      /**
+       * The CASCADE survives main-agent-edges D5 untouched — the side index is
+       * keyed on the edge's row id, so a deleted row takes its side rows with
+       * it. What changed is where the "sibling" comes from: the two rows used
+       * to be two side placements of ONE pair, and a pair holds one row now,
+       * so the neighbour that must NOT be disturbed is a different pair's
+       * edge. That is the stronger reading anyway — a retraction reaching into
+       * another pair's index rows would be a real fault, while the old case's
+       * sibling could only ever be lost together with it.
+       */
+      test("retraction cascades on the index: the retracted row's rows go, another pair's stay", () => {
         const citing = addTurn(1);
         const cited = addTurn(2);
-        const pair = {
+        const other = addTurn(3);
+        const shape = {
           citing: { kind: "turn" as const, id: citing },
-          cited: { kind: "turn" as const, id: cited },
           relation: "narrows" as const,
           provenance: "asserted" as const,
         };
 
-        const first = writeMemoryEdges(db, [{ ...pair, tailTag: "laneA", headTag: "laneA" }], 300);
-        const second = writeMemoryEdges(db, [{ ...pair, tailTag: "laneB", headTag: "laneB" }], 400);
+        const first = writeMemoryEdges(
+          db,
+          [{ ...shape, cited: { kind: "turn", id: cited }, tailTag: "laneA", headTag: "laneA" }],
+          300,
+        );
+        const second = writeMemoryEdges(
+          db,
+          [{ ...shape, cited: { kind: "turn", id: other }, tailTag: "laneB", headTag: "laneB" }],
+          400,
+        );
         const firstId = first.written[0]!.id;
         const secondId = second.written[0]!.id;
         expect(sideIndexRows(db)).toHaveLength(4);
 
         retractMemoryEdges(db, [
-          {
-            citing: pair.citing,
-            cited: pair.cited,
-            relation: "narrows",
-            tailTag: "laneA",
-            headTag: "laneA",
-          },
+          { citing: shape.citing, cited: { kind: "turn", id: cited } },
         ]);
 
         expect(sideIndexRows(db).map((row) => row.edgeRowId)).toEqual([secondId, secondId]);
@@ -1583,30 +1420,14 @@ describe("universal memory edges", () => {
       });
     });
 
-    test("a bare (untagged) write ignores any side arguments — a lane is a RELATION-level fact, not the bare existence row's", () => {
-      const citing = addTurn(1);
-      const cited = addTurn(2);
-
-      const { written } = writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited },
-            relation: null,
-            provenance: "text-ref",
-            tailTag: "ignored",
-            headTag: "ignored",
-          },
-        ],
-        300,
-      );
-
-      expect(written).toHaveLength(1);
-      expect(written[0]?.tailTag).toBe("");
-      expect(written[0]?.headTag).toBe("");
-      expect(getEdgesBySideTag(db, "ignored")).toEqual([]);
-    });
+    // DELETED (main-agent-edges D1): "a bare (untagged) write ignores any side
+    // arguments — a lane is a RELATION-level fact, not the bare existence
+    // row's". The claim held that a wordless write stores `''` on both sides
+    // whatever sides it names; there is no wordless write left to store
+    // anything, so the case has no subject. The refusal that replaced it is
+    // pinned by name at the top of this file. Nothing about a lane's being a
+    // relation-level fact is lost with it: after D1 EVERY row a writer can
+    // create carries a relation.
   });
 });
 
@@ -1730,11 +1551,14 @@ describe("getTurnRelationEdges (edge-read-surface spec, ticket 01)", () => {
   test("excludes a bare (relation-NULL) pair — no word to render", () => {
     const subject = addTurn(1);
     const target = addTurn(2);
-    writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: subject }, cited: { kind: "turn", id: target }, relation: null, provenance: "text-ref" }],
-      500,
-    );
+    // Seeded in SQL: main-agent-edges D1 retired the wordless WRITE, but the
+    // stored population stands until ticket 01's cutover deletes it, and this
+    // reader has to keep skipping it in the meantime.
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 500)`,
+    ).run(subject, target);
 
     const edges = getTurnRelationEdges(db, subject);
     expect(edges.outbound).toEqual([]);
@@ -1980,15 +1804,19 @@ describe("getRelationEdgesAmongTurns carries both side columns (lane-model-v12 t
   test("a settled edge reports its tag on BOTH sides; an unsettled one reports the empty sentinel on both", () => {
     const t1 = addTurn(1);
     const t2 = addTurn(2);
+    const t3 = addTurn(3);
+    // TWO PAIRS, not two rows of one (main-agent-edges D5): the pair is the
+    // whole of a row's identity, so the settled and the unsettled edge have to
+    // be different edges to coexist at all.
     writeMemoryEdges(
       db,
       [
         { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "extends", provenance: "asserted", ...deriveSideTags(["lane-a"]) },
-        { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: "consume", provenance: "asserted", ...deriveSideTags([]) },
+        { citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t3 }, relation: "consume", provenance: "asserted", ...deriveSideTags([]) },
       ],
       100,
     );
-    const rows = getRelationEdgesAmongTurns(db, [t1, t2]);
+    const rows = getRelationEdgesAmongTurns(db, [t1, t2, t3]);
     const settled = rows.find((row) => row.relation === "extends")!;
     const unsettled = rows.find((row) => row.relation === "consume")!;
     expect([settled.tailTag, settled.headTag]).toEqual(["lane-a", "lane-a"]);

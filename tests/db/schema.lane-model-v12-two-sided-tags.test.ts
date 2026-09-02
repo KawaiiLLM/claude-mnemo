@@ -650,25 +650,53 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
     ).toEqual([]);
   });
 
-  test("a bare row is not a lane fact: both sides unsettled, no side-index row", () => {
-    const { written } = write(["ignored", "ignored"], null);
+  /**
+   * MAIN-AGENT-EDGES D1 retires the case that stood here ("a bare row is not a
+   * lane fact: both sides unsettled, no side-index row"). A wordless write is
+   * refused by name, so there is no bare row for a side argument to be
+   * ignored on. Its surviving half — an UNSETTLED side indexes nothing — is
+   * pinned by "the same fully-unsettled edge written twice leaves ONE row"
+   * above, which asserts the same empty index over a row that can still be
+   * written.
+   */
+  test("the wordless write this file used to place sides on is refused by name (D1)", () => {
+    const result = write(["ignored", "ignored"], null);
 
-    expect(columns()).toEqual([{ id: written[0]!.id, tailTag: "", headTag: "" }]);
+    expect(result.written).toEqual([]);
+    expect(result.rejected.map((entry) => entry.reason)).toEqual([
+      "bare-row-retired",
+    ]);
+    expect(columns()).toEqual([]);
     expect(sideRows()).toEqual([]);
   });
 
   /**
-   * THE behavioural pin for ticket 09's narrowed identity key. While `tags`
-   * was still in that key the two side columns were a FUNCTION of it, so
-   * taking them out reddened DDL text and nothing else — this property only
-   * became independently true once the merged component left. Mutation: drop
-   * `tail_tag, head_tag` from the UNIQUE in `memoryEdgesTableDdl`'s
-   * `sides-only` arm and the three writes collapse to one row.
+   * THE behavioural pin for ticket 09's narrowed identity key, now read off
+   * RAW SQL. While `tags` was still in that key the two side columns were a
+   * FUNCTION of it, so taking them out reddened DDL text and nothing else —
+   * this property only became independently true once the merged component
+   * left.
+   *
+   * main-agent-edges D5 took the WRITE PATH away from it: identity there is
+   * the pair, so `writeMemoryEdges` can no longer produce a second row for one
+   * pair under any side arguments. The stored UNIQUE key still names
+   * (pair, relation, tail, head) until ticket 01's rebuild narrows it, and
+   * that is what still admits the 109 legacy multi-row pairs production holds
+   * — so the property is asserted where it now lives, against the table.
+   * Mutation: drop `tail_tag, head_tag` from the UNIQUE in
+   * `memoryEdgesTableDdl`'s `sides-only` arm and the second insert throws
+   * instead of landing.
    */
-  test("different side pairs on one (pair, relation) are three independent rows", () => {
-    write(["lane-a", "lane-a"]);
-    write(["lane-b", "lane-b"]);
-    write(["lane-a", "lane-b"]);
+  test("the stored UNIQUE key still separates side pairs on one (pair, relation) — three legacy rows", () => {
+    const insert = db.query<unknown, [number, number, string, string]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', ?, ?, '', '', 300)`,
+    );
+    insert.run(citing, cited, "lane-a", "lane-a");
+    insert.run(citing, cited, "lane-b", "lane-b");
+    insert.run(citing, cited, "lane-a", "lane-b");
 
     expect(columns().map((row) => [row.tailTag, row.headTag])).toEqual([
       ["lane-a", "lane-a"],
@@ -677,21 +705,26 @@ describe("lane-model-v12 ticket 09 — the write path maintains the two sides al
     ]);
   });
 
+  /**
+   * The CASCADE, re-addressed by main-agent-edges D4/D5: `retractMemoryEdges`
+   * takes `{citing, cited}` and removes every row of the pair, so the sibling
+   * this case used to leave standing — a second side placement of the SAME
+   * pair — cannot exist to be left. What the cascade still owes is that a
+   * deleted row takes its own side-index rows with it, which is what the
+   * foreign key's ON DELETE CASCADE is for.
+   */
   test("retraction takes the side-index rows with it", () => {
     write(["lane-a", "lane-a"]);
-    write(["lane-b", "lane-b"]);
-    expect(sideRows()).toHaveLength(4);
+    expect(sideRows()).toHaveLength(2);
 
     retractMemoryEdges(db, [
       {
         citing: { kind: "turn", id: citing },
         cited: { kind: "turn", id: cited },
-        relation: "extends",
-        tailTag: "lane-a",
-        headTag: "lane-a",
       },
     ]);
 
-    expect(sideRows().map((row) => row.tag)).toEqual(["lane-b", "lane-b"]);
+    expect(columns()).toEqual([]);
+    expect(sideRows()).toEqual([]);
   });
 });

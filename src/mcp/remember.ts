@@ -2126,11 +2126,6 @@ function handleClearLane(
     `Cleared E${segmentId}'s lane "${tag}" — ${receipt.turnsCleared} member turn(s) released, ` +
       `${receipt.edgesDeleted} edge(s) deleted.`,
   ];
-  if (receipt.bareRowsRestored > 0) {
-    lines.push(
-      `  ${receipt.bareRowsRestored} bare row(s) restored — the citing prose still names the target.`,
-    );
-  }
   lines.push(`remember(delete, id="E${segmentId}/#${tag}") removes the now-empty lane.`);
   return textResult(lines.join("\n"));
 }

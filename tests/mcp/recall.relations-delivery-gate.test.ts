@@ -187,19 +187,20 @@ describe("the relations gate asks for DELIVERY, and the recorder draws the line 
     expect(checkRelationsGate(db, reader, citing, "S1/T1").ok).toBe(true);
   });
 
-  test("empty AND the ladder cut before the end: the reader never reached the field, so nothing grants", () => {
-    // The zero-edge turn renders no relations block at all, so "was the empty
-    // set delivered" is exactly "did the ladder reach the end of the block".
-    // A body the budget cut short did not, and a reader who saw a truncation
-    // marker cannot tell an empty set from a set it never reached.
-    const citing = seedTurn(1, "a body long enough that a tiny turn budget cannot hold it ".repeat(20));
-    const reader = "session:5";
-
-    read(reader, { turn: 20 });
-
-    expect(relationsRow(reader, citing)).toBeNull();
-    expect(checkRelationsGate(db, reader, citing, "S1/T1").ok).toBe(false);
-  });
+  // DELETED (main-agent-edges D3, the read-once 00 addendum): "empty AND the
+  // ladder cut before the end: the reader never reached the field, so nothing
+  // grants". It seeded a ZERO-EDGE turn with a body too long for a tiny turn
+  // budget, and demanded a refusal because a reader who saw a truncation
+  // marker cannot tell an empty set from a set it never reached.
+  //
+  // `checkRelationsGate` now admits a citing turn with ZERO outgoing rows
+  // carrying a relation UNCONDITIONALLY — writer-agnostic, checked before the
+  // completeness lookup — so this state is exactly the one the exception
+  // exists for: there is nothing on such a turn a writer could have failed to
+  // read, and demanding a re-read bought a round trip for an empty set. The
+  // state is not adapted with a seeded edge because that case is already the
+  // "dropped" test above, which is the same ladder-never-reached refusal on a
+  // turn that HAS a set to miss.
 
   test("cut, then another writer stamps: staleness is unchanged by the relaxation", () => {
     const citing = seedCiterWithEdges(5);

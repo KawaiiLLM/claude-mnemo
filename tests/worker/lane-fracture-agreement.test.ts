@@ -227,11 +227,31 @@ function seedGhostLaneFixture(db: Database): GhostLaneFixture {
         provenance: "asserted",
         ...deriveSideTags(["window-lane"]),
       },
-      carrier(g2, g1),
-      carrier(g3, g2),
-      carrier(g4, g3),
-      carrier(g5, g4),
-      carrier(g6, g5),
+      // MAIN-AGENT-EDGES D1 — ONE PAIR, ONE ROW, and it is what decides the
+      // DIRECTION of the carrier chain below.
+      //
+      // This fixture's whole subject is a lane whose claiming edges are
+      // invisible to the segment-global pass, so the ghost claims and the
+      // carrier chain have to be two DIFFERENT edge sets over the same six
+      // turns. Until D1 they could sit on the same pairs — `memory_edges` held
+      // one row per (pair, relation, tailTag, headTag), so `g2 -> g1` carried a
+      // `carrier-lane` extends AND a `ghost-lane` indexes side by side. A pair
+      // now holds ONE row: the second write would have found `extends` already
+      // there, seen the same `use` class and no coverage change, and no-opped —
+      // leaving the ghost lane with no edges at all, six islands, and five
+      // fractures instead of two.
+      //
+      // So the carrier runs the other way. The ghost claims keep the direction
+      // their word implies (an index turn indexes what came before it), and the
+      // carrier — pure scaffolding, present only so `extends` drags the six
+      // turns into the window projection — takes the pairs the ghost lane does
+      // not want. Connectivity is a union-find over the lane's own edges and is
+      // direction-blind, so the carrier lane is whole either way.
+      carrier(g1, g2),
+      carrier(g2, g3),
+      carrier(g3, g4),
+      carrier(g4, g5),
+      carrier(g5, g6),
       ghostClaim(g2, g1),
       ghostClaim(g3, g2),
       ghostClaim(g5, g4),

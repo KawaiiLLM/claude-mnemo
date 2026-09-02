@@ -243,18 +243,59 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
   });
 
   // -----------------------------------------------------------------------
-  // Pinned case 4: a CITED turn at 19 incoming + 2 new -> refused WHOLE
+  // Pinned case 4: a CITED turn already AT the cap -> the WHOLE call refused
   // -----------------------------------------------------------------------
 
-  test("a cited turn at 19 incoming + 2 new atoms refuses the whole call, naming that turn", () => {
+  /**
+   * This case used to reach the cap by putting TWO relation classes on ONE
+   * pair in one call — "two atoms into one node", which is what D2's multi-row
+   * identity made of them. main-agent-edges D5 retires that arithmetic: one
+   * pair is one row, the most specific class wins, and a single citing turn
+   * can therefore never contribute more than ONE incoming atom to a target.
+   * So the over-cap state is reached the only way that is left — a target
+   * already AT 20 — and what the case still proves is the part that survives
+   * unchanged: the whole call is refused with zero writes, and the offending
+   * endpoint is named, so the innocent target beside it does not land either.
+   */
+  test("a cited turn already at the cap refuses the WHOLE call, naming that turn", () => {
+    const target = seedTurn(1);
+    for (let index = 0; index < MAX_TURN_RELATION_DEGREE; index += 1) {
+      storeEdge(seedTurn(200 + index), target);
+    }
+    expect(incomingAtoms(target)).toBe(MAX_TURN_RELATION_DEGREE);
+
+    const citing = seedTurn(2);
+    const innocent = seedTurn(3);
+    const result = attachTurnRelations(
+      db,
+      citing,
+      [
+        { relationClass: "use", targets: [address(target)] },
+        { relationClass: "verify", targets: [address(innocent)] },
+      ],
+      NOW + 1,
+    );
+
+    expect(result.written).toEqual([]);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]!.reason).toBe("incoming-degree-cap");
+    expect(result.rejected[0]!.raw).toBe(address(target));
+    expect(incomingAtoms(target)).toBe(MAX_TURN_RELATION_DEGREE);
+    // Nothing landed — not even the target that was never over its cap.
+    expect(outgoingAtoms(citing)).toBe(0);
+  });
+
+  /**
+   * The other half of what the retired "+2" arithmetic used to say, stated the
+   * way D5 makes it true: two classes on one pair are ONE atom, so a call that
+   * would once have been two additions is now one and lands at the boundary.
+   */
+  test("two classes on one pair are ONE incoming atom — a call at 19 incoming still lands", () => {
     const target = seedTurn(1);
     for (let index = 0; index < 19; index += 1) {
       storeEdge(seedTurn(200 + index), target);
     }
-    expect(incomingAtoms(target)).toBe(19);
 
-    // Two DIFFERENT relation classes on the same pair are two atoms (D2's
-    // multi-row identity), which is how one call adds two edges into one node.
     const citing = seedTurn(2);
     const result = attachTurnRelations(
       db,
@@ -266,11 +307,8 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
       NOW + 1,
     );
 
-    expect(result.written).toEqual([]);
-    expect(result.rejected).toHaveLength(1);
-    expect(result.rejected[0]!.reason).toBe("incoming-degree-cap");
-    expect(result.rejected[0]!.raw).toBe(address(target));
-    expect(incomingAtoms(target)).toBe(19);
+    expect(result.rejected).toEqual([]);
+    expect(incomingAtoms(target)).toBe(20);
   });
 
   test("a cited turn at 19 incoming + 1 new atom lands", () => {
@@ -295,20 +333,19 @@ describe("relation degree caps, enforced in attachTurnRelations (spec D0)", () =
     for (let index = 0; index < 21; index += 1) {
       cited.push(seedTurn(100 + index));
     }
-    // 20 bare rows: prose naming a target, carrying no relation word.
+    // 20 bare rows: prose naming a target, carrying no relation word. Seeded
+    // PAST the write path — main-agent-edges D1 retired the wordless write
+    // (`bare-row-retired`), but the stored population stands until ticket 01's
+    // cutover deletes it, and until then it must still not exhaust a turn's
+    // edge budget.
+    const insertBare = db.query<unknown, [number, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', '', '', '', '', ${NOW})`,
+    );
     for (let index = 0; index < 20; index += 1) {
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: citing },
-            cited: { kind: "turn", id: cited[index]! },
-            relation: null,
-            provenance: "text-ref",
-          },
-        ],
-        NOW,
-      );
+      insertBare.run(citing, cited[index]!);
     }
     expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toHaveLength(20);
     expect(outgoingAtoms(citing)).toBe(0);

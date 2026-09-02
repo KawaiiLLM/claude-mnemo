@@ -1048,6 +1048,47 @@ export function relationsReadRemedy(address: string): string {
 }
 
 /**
+ * THE FRESH-TURN EXCEPTION (main-agent-edges D3, the settlement-read-once 00
+ * addendum): has this citing turn ZERO outgoing relation atoms?
+ *
+ * The relations gate asks a writer to have the current set in front of it
+ * because the set is what decides whether a new edge is legal or redundant.
+ * On a turn that carries no outgoing edge at all there IS no such set: the
+ * read the gate demands would deliver an empty field, and demanding it costs
+ * the main agent a round trip on its very first edge — which, under D3, is the
+ * ordinary case, since the main agent now writes its edges on its own turn's
+ * `note` as the turn lands.
+ *
+ * WORDLESS ROWS DO NOT COUNT. `relation IS NOT NULL` is the predicate: a
+ * pre-cutover bare row records that some prose named a target, which tells a
+ * writer nothing about what its turn claims, so a turn holding only those is
+ * still a turn with nothing to have read.
+ *
+ * WRITER-AGNOSTIC, and deliberately so. The exception is a property of the
+ * TURN, not of who is writing: settlement filling the first edge on a turn the
+ * main agent left bare is in exactly the same position, and a rule that
+ * admitted one writer and not the other would be a second gate wearing the
+ * first one's name.
+ *
+ * IT RUNS INSIDE THE WRITE TRANSACTION, BEFORE THE RECEIPT LOOKUP — which is
+ * the whole of its safety. Reading the count inside the caller's own
+ * transaction means no concurrent attach can land between the check and the
+ * write; running it before `getFieldCompleteness` means a turn with edges is
+ * still judged by the ledger exactly as before, staleness included. Every
+ * other guard still applies: the `type` field gate, address resolution, phase
+ * legality, and the 20/20 degree caps.
+ */
+function hasNoOutgoingRelationAtoms(db: Database, turnId: number): boolean {
+  const row = db
+    .query<{ count: number }, [number]>(
+      `SELECT COUNT(*) AS count FROM memory_edges
+        WHERE citing_kind = 'turn' AND citing_id = ? AND relation IS NOT NULL`,
+    )
+    .get(turnId);
+  return (row?.count ?? 0) === 0;
+}
+
+/**
  * The relation-mutation check (peer round P1-8), run inside the mutation's own
  * transaction like every other gate call. It is STRICTER than `checkFieldGate`
  * in the one way that matters here: a complete read is required
@@ -1100,6 +1141,10 @@ export function checkRelationsGate(
 ): WriteGateVerdict {
   const stamp = getFieldStamp(db, "turn", turnId, RELATIONS_GATE_FIELD);
   if (stamp && stamp.writer === writer) {
+    return { ok: true };
+  }
+
+  if (hasNoOutgoingRelationAtoms(db, turnId)) {
     return { ok: true };
   }
 

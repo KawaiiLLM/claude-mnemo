@@ -378,47 +378,16 @@ describe("segments and membership", () => {
       expect(cleared.applied[0]?.insight).toBeNull();
     });
 
-    test("a citation written in insight becomes a real pair — the whole point of admitting it to the scan in the same change (spec K7)", () => {
-      const cited = addTurn(7);
-
-      const segment = createSegment(db, {
-        title: "lease fencing",
-        content: "no citation here",
-        insight: `The retry route was ruled out by [S${sessionId}/T7].`,
-        nowEpoch: 100,
-      });
-
-      const edges = getOutgoingEdges(db, { kind: "segment", id: segment.id });
-      expect(edges).toHaveLength(1);
-      expect(edges[0]?.cited).toEqual({ kind: "turn", id: cited });
-      expect(edges[0]?.relation).toBeNull();
-      expect(edges[0]?.provenance).toBe("text-ref");
-    });
-
-    test("a rewrite that drops the insight citation drops its pair, same as title/content", () => {
-      const cited = addTurn(7);
-      const segment = createSegment(db, {
-        title: "lease fencing",
-        insight: `Ruled out by [S${sessionId}/T7].`,
-        nowEpoch: 100,
-      });
-      expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(1);
-
-      applySegmentWrites(
-        db,
-        [
-          {
-            segmentId: segment.id,
-            expectedRevision: segment.revision,
-            insight: "Ruled out, and the reason no longer names a turn.",
-          },
-        ],
-        { nowEpoch: 200 },
-      );
-
-      expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(0);
-      expect(cited).toBeGreaterThan(0);
-    });
+    // TWO TESTS ARE RETIRED HERE (main-agent-edges D1 / R10-2): "a citation
+    // written in insight becomes a real pair" and "a rewrite that drops the
+    // insight citation drops its pair". Both pinned the wordless
+    // `segment -> turn` row `reconcileSegmentCitedPairs` maintained over a
+    // segment's prose. That rescan and its eight call sites are deleted with
+    // the wordless population — an edge is a class, and a prose mention
+    // asserts none. What ticket 14 actually added and what survives is
+    // `insight` being a STORED, REWRITABLE, INDEXED field: the create/extend
+    // test above and the FTS test below are that claim, and neither ever
+    // depended on an edge row.
 
     test("insight is indexed, so a segment is findable by what it concluded", () => {
       const segment = createSegment(db, {
@@ -1229,141 +1198,16 @@ describe("segments and membership", () => {
     });
   });
 
-  describe("cited pairs from a segment body (spec C6)", () => {
-    test("a bare qualified reference in a NEW segment's content creates an unattributed pair", () => {
-      const target = addTurn(1);
-
-      const segment = createSegment(db, {
-        title: "spine work",
-        content: `Builds on [S${sessionId}/T1].`,
-        nowEpoch: 100,
-      });
-
-      expect(
-        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
-      ).toEqual([
-        {
-          id: expect.any(Number),
-          citing: { kind: "segment", id: segment.id },
-          cited: { kind: "turn", id: target },
-          relation: null,
-          tailTag: "",
-          headTag: "",
-          // relation-vocabulary-v13 ticket 02: a bare prose-citation row
-          // carries no class and no coverage.
-          relationClass: "",
-          relationCoverage: "",
-          provenance: "text-ref",
-          createdAtEpoch: 100,
-        },
-      ]);
-    });
-
-    // Acceptance criterion 2 (segment side): the same grammar in the TITLE,
-    // and the segment-address `[E<n>]` form.
-    test("a title citation and a segment-to-segment [E<n>] citation both create pairs", () => {
-      const target = addTurn(1);
-      const other = createSegment(db, { title: "the older chapter", nowEpoch: 90 });
-
-      const segment = createSegment(db, {
-        title: `continues [S${sessionId}/T1]`,
-        content: `See also [E${other.id}].`,
-        nowEpoch: 100,
-      });
-
-      const citedKey = (node: { kind: string; id: number }) => `${node.kind}:${node.id}`;
-      expect(
-        getOutgoingEdges(db, { kind: "segment", id: segment.id })
-          .map((edge) => citedKey(edge.cited))
-          .sort(),
-      ).toEqual(
-        [citedKey({ kind: "turn", id: target }), citedKey({ kind: "segment", id: other.id })].sort(),
-      );
-    });
-
-    // Acceptance criterion 3 (segment side): the rewrite-drops-citation sequence.
-    test("a rewrite that drops a reference drops its pair", () => {
-      const kept = addTurn(1);
-      const dropped = addTurn(2);
-      const segment = createSegment(db, {
-        title: "spine work",
-        content: `Cites [S${sessionId}/T1] and [S${sessionId}/T2].`,
-        nowEpoch: 100,
-      });
-      expect(
-        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
-      ).toHaveLength(2);
-
-      applySegmentWrites(
-        db,
-        [
-          {
-            segmentId: segment.id,
-            expectedRevision: segment.revision,
-            content: `Only [S${sessionId}/T1] now.`,
-          },
-        ],
-        { nowEpoch: 200 },
-      );
-
-      // [S15069/T1728], container-unification D10: a segment is a CONTAINER,
-      // not a relation node, so a segment-sourced pair can only ever be BARE.
-      // The property under test is unchanged — a rewrite drops what it stopped
-      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
-      // now reads off the row's own creation stamp instead of a relation word
-      // it can no longer carry: a reconcile that deleted and reinserted the
-      // row would move that stamp.
-      const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
-      expect(surviving.map((edge) => edge.cited.id)).toEqual([kept]);
-      expect(surviving[0]?.relation).toBeNull();
-      expect(surviving.some((edge) => edge.cited.id === dropped)).toBe(false);
-    });
-
-    test("a rewrite that still cites a pair leaves its row undisturbed", () => {
-      const target = addTurn(1);
-      const segment = createSegment(db, {
-        title: "spine work",
-        content: `Cites [S${sessionId}/T1].`,
-        nowEpoch: 100,
-      });
-
-      applySegmentWrites(
-        db,
-        [
-          {
-            segmentId: segment.id,
-            expectedRevision: segment.revision,
-            content: `Restating [S${sessionId}/T1] once more.`,
-          },
-        ],
-        { nowEpoch: 200 },
-      );
-
-      // [S15069/T1728], container-unification D10: a segment is a CONTAINER,
-      // not a relation node, so a segment-sourced pair can only ever be BARE.
-      // The property under test is unchanged — a rewrite drops what it stopped
-      // naming and leaves what it still names UNDISTURBED — but "undisturbed"
-      // now reads off the row's own creation stamp instead of a relation word
-      // it can no longer carry: a reconcile that deleted and reinserted the
-      // row would move that stamp.
-      const surviving = getOutgoingEdges(db, { kind: "segment", id: segment.id });
-      expect(surviving).toHaveLength(1);
-      // Created with the segment, not by the rewrite: the row was left alone.
-      expect(surviving[0]?.createdAtEpoch).toBe(100);
-    });
-
-    test("a reference naming no real row is dropped, not written", () => {
-      const segment = createSegment(db, {
-        title: "spine work",
-        content: `Cites [S${sessionId}/T999] and [E999999].`,
-        nowEpoch: 100,
-      });
-
-      expect(
-        getOutgoingEdges(db, { kind: "segment", id: segment.id }),
-      ).toEqual([]);
-    });
-  });
+  // THE SEGMENT CITATION RESCAN IS RETIRED (main-agent-edges D1 / R10-2).
+  //
+  // A `describe` block stood here pinning that a bare `[S<n>/T<m>]` / `[E<n>]`
+  // in a segment's title, content, insight, goal, constraints or reference
+  // wrote a wordless row, that a rewrite dropping the reference dropped it,
+  // and that a rewrite still naming it left the row undisturbed. All of it
+  // described `reconcileSegmentCitedPairs`, which is deleted along with its
+  // eight call sites and the rest of the wordless population: an edge is a
+  // class, and a segment's prose asserts none. D1 ruled out a replacement
+  // identity table, so there is no successor to adapt these to.
 
   // write-mode-edit-semantics ticket 03 (spec D11): the segment surface's
   // first whole-field write. Data-layer only — no gate here (ticket 06 owns
@@ -1473,40 +1317,14 @@ describe("segments and membership", () => {
       });
     });
 
-    describe("citation rebuild on overwrite (the other half of the trap)", () => {
-      test("an overwrite drops the old reference's pair and creates the new one", () => {
-        const oldTarget = addTurn(1);
-        const newTarget = addTurn(2, 200);
-        const segment = createSegment(db, { title: "citation rebuild", nowEpoch: 100 });
-
-        writeSegmentWorkingStateField(db, segment.id, "reference", `See [S${sessionId}/T1].`, 200);
-        expect(
-          getOutgoingEdges(db, { kind: "segment", id: segment.id }).map((edge) => edge.cited),
-        ).toEqual([{ kind: "turn", id: oldTarget }]);
-
-        writeSegmentWorkingStateField(
-          db,
-          segment.id,
-          "reference",
-          `See [S${sessionId}/T2] instead.`,
-          300,
-        );
-        expect(
-          getOutgoingEdges(db, { kind: "segment", id: segment.id }).map((edge) => edge.cited),
-        ).toEqual([{ kind: "turn", id: newTarget }]);
-      });
-
-      test("clearing to null drops the field's citation, same as an overwrite that stops naming it", () => {
-        const target = addTurn(1);
-        const segment = createSegment(db, { title: "clear drops citation", nowEpoch: 100 });
-        writeSegmentWorkingStateField(db, segment.id, "goal", `Depends on [S${sessionId}/T1].`, 200);
-        expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(1);
-        expect(target).toBeGreaterThan(0);
-
-        writeSegmentWorkingStateField(db, segment.id, "goal", null, 300);
-        expect(getOutgoingEdges(db, { kind: "segment", id: segment.id })).toHaveLength(0);
-      });
-    });
+    // "CITATION REBUILD ON OVERWRITE" IS RETIRED (main-agent-edges D1 / R10-2).
+    // Two tests stood here: an overwrite dropping the old reference's wordless
+    // row and creating the new one, and a clear-to-null dropping it. Both
+    // pinned `reconcileSegmentCitedPairs` running on every working-state field
+    // write. The rescan is deleted with the wordless population; the OTHER
+    // half of the trap these were named for — that the field's own value is
+    // rebuilt rather than appended to — is pinned by the tests above, which do
+    // not touch `memory_edges` at all.
   });
 
   // -------------------------------------------------------------------------

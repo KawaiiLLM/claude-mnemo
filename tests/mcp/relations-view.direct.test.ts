@@ -86,7 +86,7 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
   function edge(
     citingId: number,
     citedId: number,
-    relation: string | null,
+    relation: string,
     tailTag = "",
     headTag = "",
     classification: { relationClass: RelationClassValue; relationCoverage: RelationCoverageValue } = {
@@ -110,6 +110,40 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
       ],
       NOW,
     );
+  }
+
+  /**
+   * A PRE-CUTOVER physical row, written past the write path (main-agent-edges
+   * D5). `writeMemoryEdges` cannot mint a second row on a pair any more — a
+   * second class promotes the row in place and a second placement is a no-op —
+   * but a database that predates the cutover holds exactly this stock (109
+   * multi-row turn pairs in production), and the READERS below are untouched
+   * by D5: they must keep rendering what is stored until ticket 01's rebuild
+   * folds those pairs down. So the fixtures whose subject IS a multi-row pair
+   * seed it in SQL, which is what such a database actually looks like.
+   */
+  function legacyEdgeRow(
+    citingId: number,
+    citedId: number,
+    relation: string,
+    tailTag = "",
+    headTag = "",
+  ): void {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?, ?, '', '', ?)`,
+    ).run(citingId, citedId, relation, tailTag, headTag, NOW);
+  }
+
+  /** The same pre-cutover stock, wordless (main-agent-edges D1). */
+  function legacyBareRow(citingId: number, citedId: number): void {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', ?)`,
+    ).run(citingId, citedId, NOW);
   }
 
   function lines(promptNumber: number, inSession = sessionId): string[] {
@@ -137,19 +171,26 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
     ]);
   });
 
-  test("a bare row (relation IS NULL) is a prose reference, not an edge, and renders nothing", () => {
+  test("a stored bare row (relation IS NULL) is a prose reference, not an edge, and renders nothing", () => {
     const subject = turn(2);
     const cited = turn(1);
-    edge(subject, cited, null);
+    // main-agent-edges D1 retired the wordless WRITE path — `writeMemoryEdges`
+    // refuses a `relation: null` input by name — but the stored population
+    // survives until ticket 01's cutover deletes it, and the reader is
+    // untouched: it must go on treating such a row as no edge at all.
+    legacyBareRow(subject, cited);
 
     expect(lines(2)).toEqual([]);
   });
 
-  test("a bare row beside a relation row on the SAME pair contributes no line of its own", () => {
+  test("a stored bare row beside a relation row on the SAME pair contributes no line of its own", () => {
     const subject = turn(2);
     const cited = turn(1);
-    edge(subject, cited, null);
-    edge(subject, cited, "extends", "lane-a", "lane-a");
+    // Both rows seeded past the write path: the relation write would DROP the
+    // wordless row it displaces, so a pre-cutover database is the only place
+    // the two coexist, and the reader is what has to be right about it.
+    legacyBareRow(subject, cited);
+    legacyEdgeRow(subject, cited, "extends", "lane-a", "lane-a");
 
     expect(lines(2)).toEqual(["extends -> T1 (#lane-a)"]);
   });
@@ -196,23 +237,27 @@ describe("the relations field renders the node's direct edge set (spec D8)", () 
     expect(lines(2)[0]).not.toContain("=>");
   });
 
-  test("several relations on ONE pair merge only when their two sides are identical", () => {
+  test("several relations on ONE legacy pair merge only when their two sides are identical", () => {
     const subject = turn(2);
     const target = turn(1);
-    edge(subject, target, "extends", "lane-a", "lane-a");
-    edge(subject, target, "indexes", "lane-a", "lane-a");
+    // Legacy stock: main-agent-edges D5 stops the write path from producing
+    // this, and the reader's fold is what still has to render it.
+    legacyEdgeRow(subject, target, "extends", "lane-a", "lane-a");
+    legacyEdgeRow(subject, target, "indexes", "lane-a", "lane-a");
 
     expect(lines(2)).toEqual(["extends,indexes -> T1 (#lane-a)"]);
   });
 
-  test("a pair with TWO placements renders two rows — one suffix cannot carry both attributions", () => {
+  test("a legacy pair with TWO placements renders two rows — one suffix cannot carry both attributions", () => {
     const subject = turn(2);
     const target = turn(1);
-    edge(subject, target, "extends", "lane-a", "lane-a");
-    edge(subject, target, "indexes", "lane-b", "lane-b");
+    legacyEdgeRow(subject, target, "extends", "lane-a", "lane-a");
+    legacyEdgeRow(subject, target, "indexes", "lane-b", "lane-b");
 
     // Grouping is by (other endpoint, tailTag, headTag), never by the pair
     // alone: production holds 109 turn pairs carrying more than one placement.
+    // main-agent-edges D5 retires the WRITE that makes them; the reader keeps
+    // the grouping until ticket 01's rebuild folds the stored stock down.
     expect(lines(2)).toEqual([
       "extends -> T1 (#lane-a)",
       "indexes -> T1 (#lane-b)",

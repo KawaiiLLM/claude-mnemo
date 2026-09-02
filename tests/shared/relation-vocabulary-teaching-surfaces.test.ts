@@ -338,17 +338,30 @@ describe("no teaching surface still names a retired relation vocabulary or the p
 
   test("no relation describe states a type or phase requirement on either end", () => {
     for (const relation of RELATION_CLASSES) {
-      const description = settlementNoteInputShape[relation].description ?? "";
-      expect(description, relation).not.toContain("same phase");
-      expect(description, relation).not.toContain("cross-phase");
-      expect(description, relation).not.toContain("evidence-phase");
-      // There is no second copy to drift FROM: main-agent-edge-capability
-      // ticket 01 restored the main agent's field, but as the SAME object
-      // settlement's shape reads — one description, not two.
+      // BOTH surfaces, because main-agent-edges D3 / R10-5 split them: the
+      // public `note` takes bare addresses (and `{turn, coverage}` for
+      // `correct`), settlement additionally takes the two-sided declaration
+      // form, so there ARE two descriptions now where there used to be one
+      // shared object. What the split must not become is two vocabularies, so
+      // the phase-freedom rule is asserted on each of them separately rather
+      // than once on an object they happened to share.
+      const publicDescription =
+        ((noteInputShape as Record<string, { description?: string }>)[relation]?.description) ?? "";
+      const settlementDescription = settlementNoteInputShape[relation].description ?? "";
       expect(relation in noteInputShape, relation).toBe(true);
-      expect((noteInputShape as Record<string, unknown>)[relation], relation).toBe(
-        settlementNoteInputShape[relation],
-      );
+      for (const description of [publicDescription, settlementDescription]) {
+        expect(description, relation).not.toContain("same phase");
+        expect(description, relation).not.toContain("cross-phase");
+        expect(description, relation).not.toContain("evidence-phase");
+      }
+      // And the two still teach the SAME CLASS: the one-line reading of what
+      // the word means is byte-identical across the surfaces, and only the
+      // entry form differs.
+      expect(publicDescription.length, relation).toBeGreaterThan(0);
+      expect(
+        settlementDescription.startsWith(publicDescription.slice(0, 60)),
+        relation,
+      ).toBe(true);
     }
   });
 });

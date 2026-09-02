@@ -118,6 +118,61 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     return written.written[0]!.id;
   }
 
+  /**
+   * A SECOND row on a pair that already has one, written PAST the write path
+   * — and its side-index rows with it, so the fixture is byte-for-byte the
+   * stored shape.
+   *
+   * main-agent-edges D5 made the pair the whole of a row's identity: a second
+   * write onto a pair PROMOTES its row or is a no-op, and never mints another,
+   * so `writeMemoryEdges` can no longer produce the two-rows-on-one-pair state
+   * a lane COLLISION is by definition. Production still holds 109 such pairs
+   * until ticket 01's cutover folds them, and the collision arm exists for
+   * exactly that stock — so the fixture states it in SQL rather than
+   * pretending a writer will still produce it.
+   */
+  function legacyEdge(
+    citing: number,
+    cited: number,
+    options: {
+      relation?: string;
+      provenance?: "asserted" | "judged";
+      tailTag?: string;
+      headTag?: string;
+      createdAtEpoch?: number;
+    } = {},
+  ): number {
+    const tailTag = options.tailTag ?? "";
+    const headTag = options.headTag ?? "";
+    const id = db
+      .query<{ id: number }, [number, number, string, string, string, string, number]>(
+        `INSERT INTO memory_edges
+           (citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
+            tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+         VALUES ('turn', ?, 'turn', ?, ?, ?, ?, ?, '', '', ?)
+         RETURNING id`,
+      )
+      .get(
+        citing,
+        cited,
+        options.relation ?? "extends",
+        options.provenance ?? "asserted",
+        tailTag,
+        headTag,
+        options.createdAtEpoch ?? NOW,
+      )!.id;
+    const insertSide = db.query<unknown, [number, string, string]>(
+      "INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)",
+    );
+    if (tailTag !== "") {
+      insertSide.run(id, "tail", tailTag);
+    }
+    if (headTag !== "") {
+      insertSide.run(id, "head", headTag);
+    }
+    return id;
+  }
+
   function tagsOf(turnId: number): string[] {
     return JSON.parse(
       db.query<{ tags: string }, [number]>("SELECT tags FROM turns WHERE id = ?").get(turnId)!.tags,
@@ -248,13 +303,15 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   test("two edges landing on ONE identity key fold through the established rule: asserted survives, judged goes", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
-    const viaA = seedEdge(t2, t1, {
+    // Two rows on ONE pair: pre-cutover stock, seeded past the write path —
+    // see `legacyEdge`. A collision cannot exist in any other shape now.
+    const viaA = legacyEdge(t2, t1, {
       tailTag: "lane-a",
       headTag: "lane-a",
       provenance: "judged",
       createdAtEpoch: NOW - 100,
     });
-    const viaB = seedEdge(t2, t1, {
+    const viaB = legacyEdge(t2, t1, {
       tailTag: "lane-b",
       headTag: "lane-b",
       provenance: "asserted",
@@ -282,13 +339,13 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   test("EQUAL provenance keeps the EARLIER row, and the receipt says which clause decided", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
-    const earlier = seedEdge(t2, t1, {
+    const earlier = legacyEdge(t2, t1, {
       tailTag: "lane-b",
       headTag: "lane-b",
       provenance: "asserted",
       createdAtEpoch: NOW - 500,
     });
-    const later = seedEdge(t2, t1, {
+    const later = legacyEdge(t2, t1, {
       tailTag: "lane-a",
       headTag: "lane-a",
       provenance: "asserted",
@@ -306,8 +363,13 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   test("a different RELATION on the same pair is a different key — nothing is folded", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
-    const extendsEdge = seedEdge(t2, t1, { tailTag: "lane-a", headTag: "lane-a" });
-    const groundsEdge = seedEdge(t2, t1, {
+    // Both seeded past the write path, for the same reason the collision
+    // fixtures above are: under main-agent-edges D5 a second write onto this
+    // pair would promote or no-op the FIRST row rather than add a second, and
+    // the property under test is that two STORED rows of one pair that differ
+    // only in relation do not fold into each other.
+    const extendsEdge = legacyEdge(t2, t1, { tailTag: "lane-a", headTag: "lane-a" });
+    const groundsEdge = legacyEdge(t2, t1, {
       relation: "grounds",
       tailTag: "lane-b",
       headTag: "lane-b",

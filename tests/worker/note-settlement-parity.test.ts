@@ -214,19 +214,71 @@ describe("settlement's tool surface differs from the main agent's by a named set
       // `tests/mcp/definitions.test.ts`, which asserts they differ AND that
       // both state the same closed vocabulary.
       expect(registered.tags).not.toBe(noteInputShape.tags);
-      // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the edge
-      // fields REJOIN this enumeration — RESTORED to `noteInputShape` as the
-      // owning declaration, exactly like `insight`/`type` above, reversing
-      // lane-model-v12 ticket 08's one-release inversion (declared on
-      // settlement's own shape, main agent had none).
       for (const field of ["insight", "type"] as const) {
         expect(registered[field]).toBe(noteInputShape[field]);
       }
+
+      // MAIN-AGENT-EDGES D3 / R10-5: THE SIX EDGE FIELDS LEAVE THE
+      // OBJECT-IDENTITY ENUMERATION, DELIBERATELY.
+      //
+      // main-agent-edge-capability ticket 01 had them REJOIN it — one
+      // `relationTargetEntryShape` borrowed by both surfaces, so a contract
+      // change to one class reached both writers from a single edit. D3 keeps
+      // that reason and serves it differently: the VOCABULARY is still one
+      // list, and the two surfaces now differ in ENTRY SHAPE because they do
+      // different jobs. The main agent states a node fact (citing, cited,
+      // class, coverage); settlement additionally DECLARES an ambiguous lane
+      // side on it (D4). A single shared object could only serve both by
+      // offering the main agent side parameters it must not use.
+      //
+      // So what is pinned here is the pair of claims that survive the split:
+      // the same parameter NAMES on both surfaces, derived from
+      // `db/citations.ts`, and the entry-shape difference itself — asserted,
+      // not tolerated, so an accidental re-merge fails this test.
+      const publicShape = noteInputShape as Record<string, unknown>;
       for (const [key] of [...RELATION_FIELD_ENTRIES, ...RETRACTION_FIELD_ENTRIES]) {
         expect(registered[key], key).toBeDefined();
-        expect(registered[key], key).toBe((noteInputShape as Record<string, unknown>)[key]);
         expect(key in noteInputShape, key).toBe(true);
+        // The names match; the objects must NOT, or the split has been undone.
+        expect(registered[key], key).not.toBe(publicShape[key]);
       }
+
+      // The difference, stated as behaviour rather than as identity. A
+      // two-sided entry is what settlement alone may send: it is the D4
+      // declaration riding on the relation write. On the public arm the same
+      // entry is a named PARSE ERROR (`.strict()` on the object arm), which is
+      // the whole point — a main agent that learned the old shape is told the
+      // shape moved instead of having its lane placement silently dropped.
+      const twoSided = [{ turn: "S1/T1", tailTag: "lane-a", headTag: "lane-b" }];
+      for (const [key] of RELATION_FIELD_ENTRIES) {
+        const settlementField = registered[key] as { safeParse(v: unknown): { success: boolean } };
+        const publicField = publicShape[key] as { safeParse(v: unknown): { success: boolean } };
+        expect(settlementField.safeParse(twoSided).success, key).toBe(true);
+        expect(publicField.safeParse(twoSided).success, key).toBe(false);
+        // Both still take the class's own shared reading of a bare address:
+        // the draft form on settlement's side, and — for every class but
+        // `correct`, whose coverage bit is required by the write path — the
+        // only form the main agent has.
+        expect(settlementField.safeParse(["S1/T1"]).success, key).toBe(true);
+        expect(publicField.safeParse(["S1/T1"]).success, key).toBe(true);
+      }
+
+      // The retraction mirrors go further apart still: a retraction addresses
+      // the PAIR (T2432 P1) and its class comes from the parameter name, so
+      // the public entry is an address and nothing else. Settlement's mirrors
+      // keep the wider object arm, which the retraction path ignores.
+      for (const [key] of RETRACTION_FIELD_ENTRIES) {
+        const publicField = publicShape[key] as { safeParse(v: unknown): { success: boolean } };
+        expect(publicField.safeParse(["S1/T1"]).success, key).toBe(true);
+        expect(publicField.safeParse([{ turn: "S1/T1" }]).success, key).toBe(false);
+        expect(publicField.safeParse(twoSided).success, key).toBe(false);
+      }
+
+      // MAIN-AGENT-EDGES D4: `declare` is settlement's alone, and its absence
+      // from the public shape is the schema-level half of "a lane side is
+      // settlement's judgment over the finished arc".
+      expect(registered.declare).toBeDefined();
+      expect("declare" in noteInputShape).toBe(false);
     } finally {
       db?.close();
     }

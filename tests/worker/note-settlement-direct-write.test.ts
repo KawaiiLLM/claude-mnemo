@@ -349,10 +349,29 @@ describe("a rejected direct write leaves no partial state (one transaction per c
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
+    const t3 = seedTurn(sessionDbId, 3);
     updateTurnById(db, t1, { type: ["design"] });
+    // MAIN-AGENT-EDGES D1/D3. This seed used to be a WORDLESS row on the very
+    // pair the call below writes (`relation: null`, T2 -> T1), and both halves
+    // of that are retired: `writeMemoryEdges` refuses a wordless input outright
+    // (`bare-row-retired`), and `checkRelationsGate` now admits unconditionally
+    // when the citing turn carries no relation-bearing row at all — which an
+    // edgeless T2 would have been, making the rejection this test measures
+    // impossible to provoke.
+    //
+    // So T2 gets a real stored edge, pointed at a THIRD turn so that the pair
+    // the call writes is still free (a stored T2 -> T1 row would turn the write
+    // into a promotion rather than the relation attach this test refuses).
     writeMemoryEdges(
       db,
-      [{ citing: { kind: "turn", id: t2 }, cited: { kind: "turn", id: t1 }, relation: null, provenance: "text-ref" }],
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t3 },
+          relation: "consume",
+          provenance: "asserted",
+        },
+      ],
       NOW - 500,
     );
     const job = claimWindow(sessionDbId, 1, 2);

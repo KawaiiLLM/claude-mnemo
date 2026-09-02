@@ -448,6 +448,45 @@ const TYPE_VOCABULARY_LIST = MEMORY_TYPES.join("/");
 // the write gate REFUSES a non-canonical tag naming the exact problem
 // (`db/lanes.ts`'s `checkCanonicalLaneTag`) rather than normalizing it, so no
 // schema-level coercion may run in front of it, on either writer.
+// MAIN-AGENT-EDGES D3 / R10-5: THE PUBLIC `note` ENTRY UNION, SPLIT FROM THE
+// SETTLEMENT ONE.
+//
+// An edge is a fact about two nodes — citing, cited, class, coverage — and the
+// main agent writes exactly that, on its own turn, without caring which lane
+// either endpoint is in. A lane SIDE is an attribution, resolved at read time
+// (declared -> unique -> none) and DECLARED only where an endpoint sits in
+// several lanes, which is settlement's job and settlement's alone (D4,
+// `declareEdgeSides`). So the public surface offers no side at all:
+//
+//   - `verify` / `use`: a bare address STRING, and nothing else;
+//   - `correct`: a string is refused (the coverage bit is required), so the
+//     entry is `{turn, coverage}`;
+//   - the three `retract…` mirrors: a bare address string. A retraction
+//     addresses the PAIR (T2432 P1) and the class comes from the parameter
+//     name, so there is nothing else for an entry to carry.
+//
+// A TWO-SIDED ENTRY IS REFUSED HERE, not accepted and ignored. `.strict()` on
+// the object arm turns `{turn, tailTag, headTag}` into a named parse error, so
+// a main agent that learned the old shape is TOLD the shape moved rather than
+// having its lane placement silently dropped — the silent-drop failure this
+// codebase keeps paying for.
+const publicRelationTargetEntryShape = z.union([
+  z.string(),
+  z
+    .object({
+      turn: z.string().min(1),
+      // Required on a `correct` entry and refused on `verify`/`use` by the
+      // WRITE PATH (`db/citations.ts` -> `shared/relation-class.ts`'s
+      // `checkRelationCoverage`), which is the one place that pairing is
+      // stated. Optional here because all three fields share one entry shape.
+      coverage: z.enum(["full", "partial"]).optional(),
+    })
+    .strict(),
+]);
+
+/** The public retraction entry: an address, and only an address. */
+const publicRetractionTargetEntryShape = z.string();
+
 const relationTargetEntryShape = z.union([
   z.string(),
   z
@@ -484,6 +523,26 @@ const RELATION_TAG_FORM_LINE =
   "endpoint turn's own tags. The same word on both sides means one lane spanning " +
   "the edge; two different lanes is a legal crossing, and so is the same word in " +
   "two different tasks, which is two lanes.";
+
+// MAIN-AGENT-EDGES D3: the PUBLIC surface's entry-form line. It says what a
+// main-agent entry IS and, equally, what it is not: there are no lane sides on
+// this surface, because a side is an attribution settlement resolves or
+// declares, not a fact the writing turn knows about itself.
+const PUBLIC_RELATION_FORM_LINE =
+  "Entries carry the edge and nothing else: `verify`/`use` take a bare address " +
+  "string, `correct` takes `{turn, coverage}`. No lane sides — an edge's lane is " +
+  "resolved from its endpoints' own tags, and the rare ambiguous side is declared " +
+  "by settlement, so a `{turn, tailTag, headTag}` entry is refused here. One pair " +
+  "of turns carries ONE edge: naming the same target twice keeps the most specific " +
+  "class, and a later stronger class replaces the stored one in place.";
+
+// The public retraction mirrors' own one-sentence note — identical across all
+// three, since the form is uniform regardless of which class it retracts.
+const PUBLIC_RETRACTION_FORM_LINE =
+  "Each entry is a bare address string. A retraction addresses the PAIR, and this " +
+  "parameter's own class is the precondition: if the edge now reads as a different " +
+  "class the call is refused, naming the class it now carries, so a stale read " +
+  "never deletes a claim it did not see.";
 
 // The retraction mirrors' own one-sentence note — identical across every
 // mirror, since the form is uniform regardless of which word it retracts.
@@ -598,93 +657,98 @@ export const noteInputShape = {
   // reaches both writers from a single edit and the two can never drift into
   // two vocabularies for it.
   //
+  // MAIN-AGENT-EDGES D3: the six fields take the PUBLIC entry shapes above,
+  // not the settlement one. What the main agent writes is the node fact —
+  // citing, cited, class, coverage — and nothing about lanes; a two-sided
+  // entry is a named parse error rather than a silently dropped placement.
+  // `settlementNoteInputShape` declares its own six below, and the borrow by
+  // object identity that used to keep them one object is gone WITH A REASON
+  // stated there: the vocabulary is still one (`db/citations.ts`'s
+  // `RELATION_FIELD_ENTRIES` feeds both), only the entry shape differs.
+  //
   // Targets are turn addresses, `S<session>/T<prompt>` (brackets optional); a
   // segment target is refused (relations are turn-only). No `mode`: there is
-  // no PRIOR value at this layer to write over or edit — a relation write only
-  // ever ADDS a row, and removing one is a retraction.
+  // no PRIOR value at this layer to write over or edit.
   //
   // ADR-0009's three-way split (FORMAT on each `.describe()`, TIMING on the
-  // tool description, JUDGMENT in the Memory Rubric alone) leaves each describe
-  // with the one-line READING of its word plus `RELATION_TAG_FORM_LINE`'s
-  // two-sided admission test; no describe states a phase requirement, since v12
-  // retired phase pairing outright, and none says which word to choose.
-  // relation-vocabulary-v13 ticket 02: THREE CLASSES REPLACE SEVEN WORDS.
-  // Each describe carries the one-line READING of its class plus
-  // `RELATION_TAG_FORM_LINE`'s two-sided admission test; the PRECEDENCE that
-  // decides between them (CORRECT > VERIFY > USE, and both are subsets of USE)
-  // is judgment and lives in the Memory Rubric alone, per ADR-0009's three-way
-  // split. Property order is the precedence's own order, most specific first.
+  // tool description, JUDGMENT in the Memory Rubric alone) leaves each
+  // describe with the one-line READING of its class plus the entry FORM; the
+  // PRECEDENCE that decides between them (CORRECT > VERIFY > USE) is judgment
+  // and lives in the Memory Rubric alone. Property order is the precedence's
+  // own order, most specific first.
   correct: z
-    .array(relationTargetEntryShape)
+    .array(publicRelationTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose PRINCIPAL result this turn negates, limits or re-scopes. " +
-        'REQUIRES the coverage bit on every entry: `"coverage": "full"` when no substantial part ' +
+        'Every entry is `{turn, coverage}`: `"coverage": "full"` when no substantial part ' +
         "of the cited result may still serve as a PREMISE (it survives only as history — permanent " +
         "historical facts like having dispatched something or written a file never rescue it), " +
-        '`"coverage": "partial"` when a definite non-empty part still stands as one. An entry with ' +
-        "no coverage is refused, naming the missing bit. " +
-        RELATION_TAG_FORM_LINE +
+        '`"coverage": "partial"` when a definite non-empty part still stands as one. A bare address ' +
+        "is refused, naming the missing bit. " +
+        PUBLIC_RELATION_FORM_LINE +
         " Judgment lives in the Memory Rubric.",
     ),
   verify: z
-    .array(relationTargetEntryShape)
+    .array(publicRelationTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose PRINCIPAL result this turn's own work confirms or supports — narrow: this " +
         "turn's work must bear on whether that result holds, and prose saying \"confirms\" about a " +
         "DETAIL of the cited turn is not this class. A check that came out AGAINST the cited result " +
-        "is `correct`. No `coverage` — refused if sent. " +
-        RELATION_TAG_FORM_LINE +
+        "is `correct`. Each entry is a bare address string; no `coverage` — refused if sent. " +
+        PUBLIC_RELATION_FORM_LINE +
         " Judgment lives in the Memory Rubric.",
     ),
   use: z
-    .array(relationTargetEntryShape)
+    .array(publicRelationTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose PRINCIPAL result or output was a DIRECT input to this turn's own new " +
         "conclusion or output — actually consulted, adopted, tested or incorporated. Ancestors are " +
         "excluded: cite the layer you used, not what it rested on. The fallback class, used where " +
-        "this turn makes no claim about whether the cited result still holds. No `coverage` — " +
-        "refused if sent. " +
-        RELATION_TAG_FORM_LINE +
+        "this turn makes no claim about whether the cited result still holds. Each entry is a bare " +
+        "address string; no `coverage` — refused if sent. " +
+        PUBLIC_RELATION_FORM_LINE +
         " Judgment lives in the Memory Rubric.",
     ),
-  // The three retraction mirrors. A relation is never overwritten (a relation
-  // write is purely additive), so correcting a wrong one is two auditable acts
-  // — retract, then write the right relation. The spelling is mechanical
-  // (`retract` + the class parameter's own name), pinned against
-  // `db/citations.ts`'s derived `RETRACTION_FIELD_ENTRIES` by a guard test, so
-  // the two halves of the vocabulary cannot drift apart.
+  // The three retraction mirrors. A relation is never overwritten in place by
+  // a WEAKER claim, so correcting a wrong one is two auditable acts — retract,
+  // then write the right relation. The spelling is mechanical (`retract` + the
+  // class parameter's own name), pinned against `db/citations.ts`'s derived
+  // `RETRACTION_FIELD_ENTRIES` by a guard test, so the two halves of the
+  // vocabulary cannot drift apart.
   //
-  // A mirror addresses a CLASS, so it deletes whichever stored row means that
-  // class at the addressed placement — including a row written under the
-  // retired seven-word vocabulary. That is what keeps every stored edge
-  // deletable through three parameters (`db/citations.ts`'s
-  // `retractTurnRelations` states why an undeletable row is a deadlock).
+  // A mirror addresses the PAIR and carries its class as a COMPARE-AND-SWAP
+  // PRECONDITION (main-agent-edges D4, T2432 P1): the edge goes if it still
+  // reads as that class, and the call is refused naming the CURRENT class if
+  // another writer has promoted it since. That is what keeps every stored edge
+  // deletable through three parameters without letting a stale read delete a
+  // claim it never saw.
   retractCorrect: z
-    .array(relationTargetEntryShape)
+    .array(publicRetractionTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose correct edge FROM this turn is deleted, whichever coverage bit it carries; " +
         "an address carrying no such edge rejects the call, naming it. No `coverage` here — " +
         "withdrawing an assertion does not restate it. " +
-        RETRACTION_TAG_FORM_LINE,
+        PUBLIC_RETRACTION_FORM_LINE,
     ),
   retractVerify: z
-    .array(relationTargetEntryShape)
+    .array(publicRetractionTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose verify edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
+        PUBLIC_RETRACTION_FORM_LINE,
     ),
   retractUse: z
-    .array(relationTargetEntryShape)
+    .array(publicRetractionTargetEntryShape)
     .optional()
     .describe(
       "Addresses whose use edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
-        RETRACTION_TAG_FORM_LINE,
+        PUBLIC_RETRACTION_FORM_LINE,
     ),
+
   // The retraction-only mirrors (peer round T1466, finding P1-2) used to sit
   // here: `retractSupersedes`, and `retractRefutes` beside it from lane-model
   // v12 ticket 02. Both are DELETED by ticket 03. They existed to break the E2
@@ -1062,22 +1126,116 @@ export const settlementNoteInputShape = {
     .describe(
       "Two closed vocabularies, nothing else: the ONE tag of the task this turn belongs to, and lane tags DECLARED in that task. Writing this field is how a turn's task changes — membership is derived from it, there is no assignment verb — so a whole-set replacement that drops the task tag makes the turn unowned. Anything else rejects, listing what is legal there; a second task tag rejects naming both; a lane tag without its own task's tag rejects naming the one that is missing. When neither tier fits — no task tag, no declared lane — leave the field empty; that is the ordinary outcome, not a failure. You are headless and cannot ask anyone, so never open a task or mint a lane merely to give a turn a home: remember(create) at its lane tier is for a lane your own finalization pass judged into existence on the content's evidence, and opening a container because nothing fit is the main agent's act, in front of the user.",
     ),
-  // RESTORED (main-agent-edge-capability ticket 01, ruling [S15069/T1651]):
-  // BORROWED from `noteInputShape` by object IDENTITY again — the same
-  // pattern `mode`/`type`/`insight` above already use — rather than declared
-  // fresh here. lane-model-v12 ticket 08 had inverted this for one release
-  // (declared here, main agent had none); this ticket restores the original
-  // direction: `note` owns the seven relation fields and their seven
-  // `retract…` mirrors, settlement reuses them, so a contract change to one
-  // word reaches both writers from a single edit and the two vocabularies
-  // cannot drift apart. See `noteInputShape`'s own field block for the full
-  // restoration note.
-  correct: noteInputShape.correct,
-  verify: noteInputShape.verify,
-  use: noteInputShape.use,
-  retractCorrect: noteInputShape.retractCorrect,
-  retractVerify: noteInputShape.retractVerify,
-  retractUse: noteInputShape.retractUse,
+  // MAIN-AGENT-EDGES D3 / R10-5: THE SETTLEMENT SHAPE DECLARES ITS OWN SIX,
+  // and this is the ONE thing on this shape that stopped borrowing from
+  // `noteInputShape` by object identity.
+  //
+  // The borrow existed so a contract change to one class reached both writers
+  // from a single edit. That reason is intact and served differently: the
+  // VOCABULARY is still one list (`db/citations.ts`'s `RELATION_FIELD_ENTRIES`
+  // derives both surfaces' parameter names, and its guard test still pins
+  // them), and the READING of each class is the same sentence. What differs is
+  // the ENTRY SHAPE, and it differs because the two writers do different jobs:
+  // the main agent states a node fact (D3), settlement additionally DECLARES
+  // an ambiguous lane side on it (D4). A single shared shape could only serve
+  // both by offering the main agent side parameters it must not use — which is
+  // exactly the "teach a writer a field the other writer owns" failure the
+  // three-way split exists to prevent.
+  correct: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose PRINCIPAL result this turn negates, limits or re-scopes. " +
+        'REQUIRES the coverage bit on every entry: `"coverage": "full"` when no substantial part ' +
+        "of the cited result may still serve as a PREMISE (it survives only as history — permanent " +
+        "historical facts like having dispatched something or written a file never rescue it), " +
+        '`"coverage": "partial"` when a definite non-empty part still stands as one. An entry with ' +
+        "no coverage is refused, naming the missing bit. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
+    ),
+  verify: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose PRINCIPAL result this turn's own work confirms or supports — narrow: this " +
+        "turn's work must bear on whether that result holds, and prose saying \"confirms\" about a " +
+        "DETAIL of the cited turn is not this class. A check that came out AGAINST the cited result " +
+        "is `correct`. No `coverage` — refused if sent. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
+    ),
+  use: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose PRINCIPAL result or output was a DIRECT input to this turn's own new " +
+        "conclusion or output — actually consulted, adopted, tested or incorporated. Ancestors are " +
+        "excluded: cite the layer you used, not what it rested on. The fallback class, used where " +
+        "this turn makes no claim about whether the cited result still holds. No `coverage` — " +
+        "refused if sent. " +
+        RELATION_TAG_FORM_LINE +
+        " Judgment lives in the Memory Rubric.",
+    ),
+  retractCorrect: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose correct edge FROM this turn is deleted, whichever coverage bit it carries; " +
+        "an address carrying no such edge rejects the call, naming it. No `coverage` here — " +
+        "withdrawing an assertion does not restate it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractVerify: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose verify edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+  retractUse: z
+    .array(relationTargetEntryShape)
+    .optional()
+    .describe(
+      "Addresses whose use edge FROM this turn is deleted; an address carrying no such edge rejects the call, naming it. " +
+        RETRACTION_TAG_FORM_LINE,
+    ),
+
+  // MAIN-AGENT-EDGES D4: THE DECLARATION PARAMETER, SETTLEMENT-ONLY.
+  //
+  // A lane side is an ATTRIBUTION, not part of the edge: it resolves at read
+  // time as declared -> unique -> none, and 69% of production's edges join
+  // their lanes with no writer having said anything. What is left is the
+  // ambiguous case — an endpoint sitting in several lanes — and this is the
+  // parameter that settles it. It does NOT write an edge: the pair must
+  // already carry one, and this patches that same row in place.
+  //
+  // It exists on this surface alone because it is the one thing settlement can
+  // know that the writing turn cannot: which of several lanes an endpoint's
+  // edge belongs to is a judgment over the finished arc, not a fact the turn
+  // has about itself while landing.
+  declare: z
+    .array(
+      z
+        .object({
+          turn: z.string().min(1),
+          class: z.enum(["correct", "verify", "use"]).optional(),
+          tailTag: z.string().nullable().optional(),
+          headTag: z.string().nullable().optional(),
+        })
+        .strict(),
+    )
+    .optional()
+    .describe(
+      "Declares a lane side on an edge THIS turn already carries — it never creates one. " +
+        "`turn` is the CITED end's address; the citing end is this call's own `turn`. " +
+        "`class` is optional and is a PRECONDITION: send it and the call is refused, naming the " +
+        "class the pair now carries, if the edge has changed under you. " +
+        "Each side is three-state: OMIT it to leave it alone, send a tag to declare it, send " +
+        "`null` to clear it. A tag must be one of that endpoint's own lane tags in its task. " +
+        "An endpoint that is in exactly ONE lane is refused as derivable: a stored side means " +
+        '"this endpoint is in several lanes and this is the one", and nothing else.',
+    ),
   // The retraction-only mirrors (finding P1-2) used to be re-exported here
   // too: settlement is the surface that actually MEETS a frozen-legacy row —
   // the commit gate's E2 refusal names it — so a settlement window with no way

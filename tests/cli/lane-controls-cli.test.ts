@@ -75,7 +75,10 @@ interface Fixture {
  *   E3 T3 --indexes--> T2   (ownership, ownership)   clean
  *   E4 T4 --grounds--> T1   ('', '')                 both sides unsettled — out of C2's domain
  *   E5 T4 --consume--> T2   (ownership, '')          one side unsettled — out of C2's domain
- *   E6 T2 --narrows--> T1   (drafting, ownership)    C2: tail tag never DECLARED
+ *   E6 T2 --narrows--> T1   (drafting, ownership)    C2: tail tag never DECLARED.
+ *       Shares its PAIR with E1, so main-agent-edges D1 makes it unwritable
+ *       through `writeMemoryEdges`; it is inserted at the storage layer as the
+ *       legacy multi-row stock it is -- see the note beside the insert.
  *   E7 T6 --grounds--> T1   (ownership, ownership)   C2: tail tag not ON T6
  *   E8 T7 --grounds--> T4   ('', '')                 both sides unsettled — out of C2's domain
  *   E9 T9 --extends--> T8   (ownership, ownership)   clean, in segment B
@@ -200,7 +203,6 @@ function seedFixture(): Fixture {
       edge(turns.T3!, turns.T2!, "indexes", "ownership", "ownership"),
       edge(turns.T4!, turns.T1!, "grounds", "", ""),
       edge(turns.T4!, turns.T2!, "consume", "ownership", ""),
-      edge(turns.T2!, turns.T1!, "narrows", "drafting", "ownership"),
       edge(turns.T6!, turns.T1!, "grounds", "ownership", "ownership"),
       edge(turns.T7!, turns.T4!, "grounds", "", ""),
       edge(turns.T9!, turns.T8!, "extends", "ownership", "ownership"),
@@ -210,6 +212,44 @@ function seedFixture(): Fixture {
     ],
     NOW,
   );
+
+  // E6, AND WHY IT IS THE ONE ROW THIS FIXTURE INSERTS BY HAND.
+  //
+  // `T2 --narrows--> T1` shares its PAIR with E1 (`T2 --extends--> T1`), and
+  // main-agent-edges D1 retired that shape as a WRITE: a pair holds one row, so
+  // `writeMemoryEdges` no longer inserts a second one — it compares the classes
+  // (`narrows` is `correct`, `extends` is `use`), finds the incoming claim
+  // strictly stronger, and PROMOTES E1's row in place, keeping E1's own two
+  // side tags. The `drafting` tail that is E6's entire reason for existing
+  // never reaches storage, and the C2 count this fixture is built to make
+  // hand-countable drops by one.
+  //
+  // The row is still legal STOCK, though, and that is the point worth keeping:
+  // a pre-cutover database holds many such pairs, the readers are untouched,
+  // and D4's caps count a legacy multi-row pair once precisely because it
+  // exists. This fixture is a deliberately imperfect database, so it keeps
+  // carrying one — inserted at the storage layer, the only level that can still
+  // produce the shape, with the side-tag index rows `writeMemoryEdges` would
+  // have written beside it.
+  const e6RowId = db
+    .query<{ id: number }, [number, number, number]>(
+      `INSERT INTO memory_edges (
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, tail_tag, head_tag,
+         relation_class, relation_coverage, created_at_epoch
+       ) VALUES ('turn', ?, 'turn', ?, 'narrows', 'asserted', 'drafting', 'ownership', '', '', ?)
+       RETURNING id`,
+    )
+    .get(turns.T2!, turns.T1!, NOW)!.id;
+  for (const [side, tag] of [
+    ["tail", "drafting"],
+    ["head", "ownership"],
+  ] as const) {
+    db.query<unknown, [number, string, string]>(
+      `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+    ).run(e6RowId, side, tag);
+  }
+
   db.close();
 
   return { sessionId, segmentA, segmentB, turns };

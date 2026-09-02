@@ -938,17 +938,22 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     expect(edges[0]!.provenance).toBe("judged");
   });
 
-  test("one pair carries two relations at once — the duplicate-target mirror is gone (D2)", () => {
+  // MAIN-AGENT-EDGES D1/D5 INVERTED THIS TEST, so it is rewritten rather than
+  // deleted: the property it pinned — "ONE pair may carry two relations at
+  // once", the duplicate-target mirror's absence — is exactly what one row per
+  // pair retires. A logical edge IS the pair, and a pair whose two ends stand
+  // in two relations at once was never a graph fact; it was a storage
+  // accident that made "what does this turn say about that one" a question
+  // with several answers.
+  //
+  // What replaces it is the same call, asserted the other way round: the two
+  // entries collapse onto one row carrying the MORE SPECIFIC class
+  // (`RELATION_CLASS_SPECIFICITY`: use < verify < correct), and the weaker one
+  // is a no-op the receipt reports as already present rather than a second row.
+  test("one pair, one row: two classes on one target collapse onto the more specific one (D1/D5)", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const t2 = seedTurn(sessionDbId, 2);
-    // T1 decision-phase, T2 delivery+decision: legal for `grounds` (no
-    // restriction) and for `extends` (decision -> decision).
-    // relation-vocabulary-v13 ticket 02: the two relations are now two
-    // CLASSES (`use` and `verify`) rather than two of the seven words — the
-    // property under test is unchanged, that ONE pair may carry two rows at
-    // once. The placed half must name a lane both endpoints carry; the other
-    // stays BARE, which is also the point.
     updateTurnById(db, t1, { type: ["design"], tags: ["lane-home", "lane-a"] });
     updateTurnById(db, t2, { type: ["implement", "correction"], tags: ["lane-home", "lane-a"] });
     const job = claimWindow(sessionDbId, 1, 2);
@@ -963,14 +968,16 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       NOW,
     );
 
-    expect(resultText(result)).toContain("2 relation");
-    const relations = getOutgoingEdges(db, { kind: "turn", id: t2 })
-      .map((edge) => edge.relation)
-      .sort();
-    // INTERIM storage words (ticket 05a replaces the mapping): `use` ->
-    // `extends`, `verify` -> `verifies`. Sorted, so the pair reads
-    // deterministically.
-    expect(relations).toEqual(["extends", "verifies"]);
+    // One row landed, and the call is not silently half-dropped: the weaker
+    // `use` is accounted for by name.
+    expect(resultText(result)).toContain("1 relation");
+    const edges = getOutgoingEdges(db, { kind: "turn", id: t2 });
+    expect(edges).toHaveLength(1);
+    // INTERIM storage words (ticket 05a replaces the mapping): `verify` ->
+    // `verifies`. The stored class is the specific one, whichever order the
+    // fields were processed in.
+    expect(edges[0]!.relation).toBe("verifies");
+    expect(edges[0]!.relationClass).toBe("verify");
   });
 
   // Indexes-rescope spec (ticket 01, [S15069/T1232]): `indexes` (the renamed,
@@ -1142,7 +1149,7 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
   // the same one validator it inherited the mandate from. This block pins the
   // permission in the place the mandate used to be pinned.
   describe("no word requires a lane tag on the settlement path either", () => {
-    test("a bare extends through the facade LANDS untagged, and the tagged form still lands beside it", () => {
+    test("a bare extends through the facade LANDS untagged, and a later side placement neither mints a row nor re-places the stored side", () => {
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
@@ -1160,9 +1167,17 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
       expect(resultText(result)).toContain("1 relation");
       expect(getOutgoingEdges(db, { kind: "turn", id: t2 })[0]?.tailTag).toBe("");
 
-      // The placed form is a SECOND, independent row (identity is (pair,
-      // relation, tail, head)) and sits beside the draft rather than replacing
-      // it.
+      // MAIN-AGENT-EDGES D1/D4: THE SECOND HALF SAYS THE OPPOSITE NOW.
+      //
+      // The placed form used to be a SECOND, independent row, because a row's
+      // identity was (pair, relation, tail, head) and a side was therefore part
+      // of what an edge WAS. It is not: a side is an ATTRIBUTION over one edge,
+      // and the pair is the edge. So a second placement onto a pair that
+      // already holds a row mints nothing — and it does not silently re-place
+      // the stored side either, which is the half worth pinning: the call that
+      // used to add a lane now changes nothing at all, and the one thing that
+      // moves a stored side is `declareEdgeSides` (D4, the `declare`
+      // parameter).
       const placed = write(
         context,
         {
@@ -1171,12 +1186,14 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
         },
         NOW + 1,
       );
-      expect(resultText(placed)).toContain("1 relation");
+      // Accounted for by name rather than dropped: the class is the same and
+      // brings no coverage change, so the stored row already says everything
+      // this call asserts.
+      expect(resultText(placed)).toContain("already present");
       expect(
         getOutgoingEdges(db, { kind: "turn", id: t2 })
-          .map((edge) => `${edge.tailTag}|${edge.headTag}`)
-          .sort(),
-      ).toEqual(["\u007C", "lane-a|lane-a"].sort());
+          .map((edge) => `${edge.tailTag}|${edge.headTag}`),
+      ).toEqual(["\u007C"]);
     });
 
     test("a bare narrows through the facade lands the same way", () => {
@@ -1231,41 +1248,57 @@ describe("a relation stands on its own — no pre-existing pair, no eligibility 
     // The assertion/retraction split: settlement is the writer that MEETS the
     // untagged stock (a window over ancient turns), so its retraction mirrors
     // are the ones that must keep working on bare addresses.
-    test("retractExtends/retractNarrows through the facade still take bare addresses", () => {
+    //
+    // MAIN-AGENT-EDGES D5 rewrote what this pins. The fixture seeds a legacy
+    // MULTI-ROW pair — `extends` (class `use`) and `narrows` (class
+    // `correct/partial`) between the same two turns — which is exactly the 109
+    // pairs production still holds. Under one-pair-one-row that stock is ONE
+    // logical edge and it reads as its most specific class, so the call that
+    // works is the single mirror naming THAT class, and it takes the whole
+    // pair with it. The mirror naming the weaker word is refused by name
+    // (`stale-class`) rather than deleting half an edge on a stale reading.
+    test("a legacy MULTI-ROW pair retracts as ONE edge, through the mirror naming its materialized class", () => {
       const sessionDbId = seedSession();
       const t1 = seedTurn(sessionDbId, 1);
       const t2 = seedTurn(sessionDbId, 2);
       updateTurnById(db, t1, { type: ["design"] });
       updateTurnById(db, t2, { type: ["design"] });
-      // Legacy stock: seeded through the storage primitive, because the write
-      // gate above now refuses to mint an untagged stance edge at all.
-      writeMemoryEdges(
-        db,
-        [
-          {
-            citing: { kind: "turn", id: t2 },
-            cited: { kind: "turn", id: t1 },
-            relation: "extends",
-            provenance: "judged",
-          },
-          {
-            citing: { kind: "turn", id: t2 },
-            cited: { kind: "turn", id: t1 },
-            relation: "narrows",
-            provenance: "judged",
-          },
-        ],
-        NOW - 500,
-      );
+      // Legacy stock, and it now has to be seeded by raw SQL. It used to go
+      // through `writeMemoryEdges`, which under main-agent-edges D1 is exactly
+      // the path that can no longer produce this shape: the second input finds
+      // the pair's row already there, sees `narrows` (class `correct`) as
+      // strictly more specific than the stored `extends` (class `use`), and
+      // PROMOTES that one row instead of inserting a second. The two-row pair
+      // is pre-cutover STOCK — 109 of them in production, readers untouched —
+      // so the fixture reaches under the write path to build one, which is the
+      // only level that still can.
+      const seedLegacyRow = (relation: string) => {
+        db.query<unknown, [number, number, string, number]>(
+          `INSERT INTO memory_edges (
+             citing_kind, citing_id, cited_kind, cited_id,
+             relation, provenance, tail_tag, head_tag,
+             relation_class, relation_coverage, created_at_epoch
+           ) VALUES ('turn', ?, 'turn', ?, ?, 'judged', '', '', '', '', ?)`,
+        ).run(t2, t1, relation, NOW - 500);
+      };
+      seedLegacyRow("extends");
+      seedLegacyRow("narrows");
       const job = claimWindow(sessionDbId, 1, 2);
+
+      // The weaker mirror is refused: the pair's materialized class is
+      // `correct`, and a `use` retraction is acting on a reading that is no
+      // longer true of the edge.
+      const stale = write(
+        baseContext(job, { reviewableTurnIds: new Set([t2]) }),
+        { turn: `S${sessionDbId}/T2`, retractUse: [`S${sessionDbId}/T1`] },
+        NOW,
+      );
+      expect(resultText(stale)).toContain("is now `correct`, not `use`");
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(2);
 
       const result = write(
         baseContext(job, { reviewableTurnIds: new Set([t2]) }),
-        {
-          turn: `S${sessionDbId}/T2`,
-          retractUse: [`S${sessionDbId}/T1`],
-          retractCorrect: [`S${sessionDbId}/T1`],
-        },
+        { turn: `S${sessionDbId}/T2`, retractCorrect: [`S${sessionDbId}/T1`] },
         NOW,
       );
 
@@ -1450,7 +1483,26 @@ describe("the relations gate (peer round P1-8)", () => {
   }
 
   test("an attach with no relations read is refused, naming the read that earns it", () => {
-    const { sessionDbId, context } = seedPair();
+    const { sessionDbId, citing, third, context } = seedPair();
+    // MAIN-AGENT-EDGES D3: the gate only has something to demand once the
+    // citing turn HAS an outgoing relation set. A turn with zero atoms takes
+    // the fresh-turn exception (its own tests live in
+    // `tests/db/logical-edge-writes.test.ts`), so this fixture seeds one edge
+    // first — the state where "read the set before you change it" is a real
+    // requirement rather than a round trip for an empty field.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citing },
+          cited: { kind: "turn", id: third },
+          relation: "consume",
+          provenance: "judged",
+          relationClass: "use",
+        },
+      ],
+      NOW - 500,
+    );
     // The turn itself has been read — the entity grant the `type` gate asks
     // for is in hand, and it is still not enough.
     recallMemory(db, {
@@ -1695,15 +1747,19 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
       expect(sidesOf(citing)).toEqual([["", "lane-a"]]);
     });
 
-    test("a half-settled entry beside a fully placed one lands them both", () => {
+    // MAIN-AGENT-EDGES D5 INVERTED THIS. It used to pin that the same class
+    // under two DIFFERENT lane placements was two independent claims — D2's
+    // multi-row identity, and the mechanism that produced 109 multi-row pairs
+    // in production. One pair is one row now: the two entries are ONE claim,
+    // the first placement is the one that lands, and "a second side placement
+    // → never a new row" is what the assertion says.
+    test("the same pair placed twice in one call is ONE row, not two", () => {
       const { sessionDbId, citing, context } = pair();
 
       const result = write(
         context,
         {
           turn: `S${sessionDbId}/T2`,
-          // One field, two entries: the same class under two DIFFERENT lane
-          // placements is two independent claims (D2's own multi-row identity).
           use: [
             { turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" },
             { turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "" },
@@ -1712,8 +1768,51 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
         NOW,
       );
 
-      expect(resultText(result)).toContain("2 relation");
-      expect(sidesOf(citing).sort()).toEqual([["lane-a", ""], ["lane-a", "lane-a"]]);
+      expect(resultText(result)).toContain("1 relation");
+      expect(sidesOf(citing)).toEqual([["lane-a", "lane-a"]]);
+    });
+
+    // main-agent-edges D4/D5: the ONE outcome the attach/declare split could
+    // have made silent. A placement onto a pair that already has a row changes
+    // nothing, and "already present" is a truthful receipt that reads as
+    // success — so the receipt says the placement was not applied and names
+    // the parameter that would apply it.
+    test("a placement onto an existing pair is reported, not silently dropped", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      write(context, { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] }, NOW);
+
+      const second = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW + 1,
+      );
+
+      expect(resultText(second)).toContain("named a lane side that was NOT applied");
+      expect(resultText(second)).toContain("`declare`");
+      expect(sidesOf(citing)).toEqual([["", ""]]);
+    });
+
+    // The mirror case, and the reason the notice is computed from the STORED
+    // sides rather than from "was this pair already there": a placement that
+    // landed with the row says nothing.
+    test("a placement that DID land is not reported as unapplied", () => {
+      const { sessionDbId, citing, context } = pair();
+
+      const result = write(
+        context,
+        {
+          turn: `S${sessionDbId}/T2`,
+          use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
+        },
+        NOW,
+      );
+
+      expect(resultText(result)).not.toContain("NOT applied");
+      expect(sidesOf(citing)).toEqual([["lane-a", "lane-a"]]);
     });
 
     // The acceptance is of the SHAPE, not the content: without this, "a draft
@@ -1982,31 +2081,26 @@ describe("the two-sided edge write gate (lane-model-v12 ticket 08)", () => {
     expect(getOutgoingEdges(db, { kind: "turn", id: citing })).toEqual([]);
   });
 
-  test("a placed edge and its own draft coexist, and a retraction addresses exactly one", () => {
-    const { sessionDbId, citing, context } = pair();
-
-    write(context, { turn: `S${sessionDbId}/T2`, use: [`S${sessionDbId}/T1`] }, NOW);
-    write(
-      context,
-      {
-        turn: `S${sessionDbId}/T2`,
-        use: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
-      },
-      NOW + 1,
-    );
-    expect(sidesOf(citing)).toHaveLength(2);
-
-    const retracted = write(
-      context,
-      {
-        turn: `S${sessionDbId}/T2`,
-        retractUse: [{ turn: `S${sessionDbId}/T1`, tailTag: "lane-a", headTag: "lane-a" }],
-      },
-      NOW + 2,
-    );
-    expect(resultText(retracted)).toContain("Retracted 1 relation(s)");
-    expect(sidesOf(citing)).toEqual([["", ""]]);
-  });
+  // DELETED (main-agent-edges D1 + D4, ruling T2432 P1): "a placed edge and its
+  // own draft coexist, and a retraction addresses exactly one".
+  //
+  // It pinned two things that are now both false, and each on its own would
+  // have retired it:
+  //
+  //   - a draft (`''`/`''`) and a placed (`lane-a`/`lane-a`) write onto the
+  //     SAME pair produced two rows, because a side was part of a row's
+  //     identity. One pair now holds one row, and a second placement onto it
+  //     mints nothing and re-places nothing (D1) — pinned in this file's own
+  //     "a bare extends through the facade LANDS untagged" test, which asserts
+  //     that inverted outcome directly.
+  //   - a retraction was addressed BY those sides, picking one of the two rows
+  //     out. A retraction now addresses the PAIR and takes every row of it
+  //     (D4): the side tags left the address entirely, so "addresses exactly
+  //     one of a pair's rows" is not a thing a caller can express or a thing
+  //     the mirrors can do. The surviving behaviour — a legacy multi-row pair
+  //     retracting as ONE edge through the mirror naming its materialized
+  //     class — is pinned above, in "a legacy MULTI-ROW pair retracts as ONE
+  //     edge".
 });
 
 // ---------------------------------------------------------------------------

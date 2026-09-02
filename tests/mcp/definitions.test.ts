@@ -730,15 +730,23 @@ describe("tool surface", () => {
   // correct/verify/use. The seven words they absorb are gone from BOTH write
   // surfaces (`override`/`narrows` -> `correct` plus its coverage bit,
   // `verifies` -> `verify`, `extends`/`consume`/`grounds`/`indexes` -> `use`).
-  // `settlementNoteInputShape` still borrows `noteInputShape`'s field objects
-  // by object IDENTITY, so one edit reaches both writers.
+  // MAIN-AGENT-EDGES D3 / R10-5: the object-IDENTITY borrow this test used to
+  // assert is GONE — `settlementNoteInputShape` declares its own six. The
+  // reason the borrow existed (one edit reaches both writers) is served by the
+  // vocabulary staying one derived list, not by one shared zod object: the
+  // ENTRY SHAPES differ now, because the main agent states a node fact while
+  // settlement additionally declares a lane side. So what is pinned here is
+  // what still has to be true of BOTH — the parameter exists on each surface,
+  // and each carries the class's own reading — plus the fact that the two are
+  // deliberately NOT one object any more.
   it("correct/verify/use are present on both write surfaces, the seven retired words are not, and each carries a reading only", () => {
     const shape = settlementNoteInputShape;
     for (const key of ["correct", "verify", "use"] as const) {
       expect(Object.keys(settlementNoteInputShape)).toContain(key);
       expect(Object.keys(noteInputShape)).toContain(key);
-      expect(settlementNoteInputShape[key]).toBe(noteInputShape[key]);
+      expect(settlementNoteInputShape[key]).not.toBe(noteInputShape[key]);
       expect(shape[key].description?.toLowerCase()).toContain("memory rubric");
+      expect(noteInputShape[key].description?.toLowerCase()).toContain("memory rubric");
     }
     // THE OLD WORDS ARE NOT PARAMETERS ANY MORE, on either surface, assertion
     // or mirror. A word the tool still accepted after the rubric stopped
@@ -962,21 +970,23 @@ describe("tool surface", () => {
   // ticket 04 (edge-mechanism-revision D3/D6) closed the gap ticket 02 pinned
   // here: settlement's surface declares the retraction mirrors AND its facade
   // wires them to `retractTurnRelations`, together, as that ticket required.
-  // Object IDENTITY, not shape equality — the same rule the parity test
-  // applies to the relation half: a settlement-flavoured copy of a describe
-  // would let the two writers drift into two vocabularies for one word.
-  // main-agent-edge-capability ticket 01 RESTORES the direction ticket 08 had
-  // inverted: `noteInputShape` is the owning declaration again, and
-  // `settlementNoteInputShape` borrows the SAME field objects.
-  it("both write surfaces declare every retraction mirror, as the SAME field objects", () => {
+  // main-agent-edge-capability ticket 01 RESTORED the mirrors to
+  // `noteInputShape`; MAIN-AGENT-EDGES D3 then split the two surfaces' ENTRY
+  // shapes, so the object-identity assertion this test carried is retired with
+  // its relation-half twin above. A public mirror takes a bare address string
+  // (a retraction addresses the PAIR, T2432 P1, so an entry has nothing else
+  // to carry), while settlement's still takes the two-sided entry. What both
+  // must still do is DECLARE every mirror the derived vocabulary names, under
+  // the same reading.
+  it("both write surfaces declare every retraction mirror, under the same reading", () => {
     for (const [key] of RETRACTION_FIELD_ENTRIES) {
       expect(key in settlementNoteInputShape).toBe(true);
       expect(key in noteInputShape).toBe(true);
-      expect((settlementNoteInputShape as Record<string, unknown>)[key]).toBe(
-        (noteInputShape as Record<string, unknown>)[key],
-      );
       expect(
         (settlementNoteInputShape as Record<string, { description?: string }>)[key]?.description,
+      ).toContain("is deleted");
+      expect(
+        (noteInputShape as Record<string, { description?: string }>)[key]?.description,
       ).toContain("is deleted");
     }
   });
@@ -1409,11 +1419,15 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     expect(settlementNoteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(noteInputShape.tags.description).toContain("Two closed vocabularies");
     expect(settlementNoteInputShape.insight).toBe(noteInputShape.insight);
-    // main-agent-edge-capability ticket 01 (ruling [S15069/T1651]): the
-    // fourteen edge parameters REJOIN this enumeration — RESTORED to
-    // `noteInputShape` as the owning declaration, exactly as `mode`/`type`/
-    // `insight` above, reversing lane-model-v12 ticket 08's one-release
-    // inversion (declared on settlement's shape, main agent had none).
+    // MAIN-AGENT-EDGES D3 / R10-5: the six edge parameters LEAVE this
+    // enumeration and join `tags` on the not-shared side. They were shared by
+    // identity for one release (main-agent-edge-capability ticket 01); D3
+    // splits them because the two writers do different jobs — the main agent
+    // states the node fact (citing, cited, class, coverage) and settlement
+    // additionally DECLARES a lane side, so a single shared entry shape could
+    // only serve both by offering the main agent side parameters it must not
+    // use. Both surfaces still declare all six under one derived vocabulary;
+    // only the entry shape differs.
     for (const key of [
       "correct",
       "verify",
@@ -1424,7 +1438,7 @@ describe("settlementNoteInputShape shares fields with noteInputShape (ticket 07)
     ] as const) {
       expect(key in settlementNoteInputShape, key).toBe(true);
       expect(key in noteInputShape, key).toBe(true);
-      expect((settlementNoteInputShape as Record<string, unknown>)[key], key).toBe(
+      expect((settlementNoteInputShape as Record<string, unknown>)[key], key).not.toBe(
         (noteInputShape as Record<string, unknown>)[key],
       );
     }

@@ -237,7 +237,25 @@ describe("a note-less turn runs the ordinary field-render path — requested fie
   test("the grant comes from the SELECTION, not for free — a read without `relations` still refuses", () => {
     const sessionId = seedSession("relations-gate-control");
     const turnId = seedTurn(sessionId, 1);
+    const citedTurnId = seedTurn(sessionId, 2);
     const address = `S${sessionId}/T1`;
+
+    // main-agent-edges D3 (the read-once 00 addendum): the gate now admits a
+    // citing turn with ZERO outgoing relation rows unconditionally, before it
+    // ever looks at what the reader completed — there is nothing on such a
+    // turn a writer could have failed to read. So the control case has to SEED
+    // an edge first; that is the state where "the grant comes from the
+    // selection" still has content. One `use` row is the whole seed — stored
+    // under its interim legacy word (`extends`), which is what the storage
+    // vocabulary's own CHECK still accepts.
+    db.run(
+      `INSERT INTO memory_edges (
+         citing_kind, citing_id, cited_kind, cited_id,
+         relation, provenance, tail_tag, head_tag,
+         relation_class, relation_coverage, created_at_epoch
+       ) VALUES ('turn', ?, 'turn', ?, 'extends', 'asserted', '', '', 'use', '', ?)`,
+      [turnId, citedTurnId, NOW - 10],
+    );
 
     recallMemory(db, {
       id: address,

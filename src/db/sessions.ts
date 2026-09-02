@@ -1,7 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { reconcileCitedPairs } from "./memory-edges";
-import { parseQualifiedReferences, validateReferences } from "./references";
 import { indexSessionToFTS } from "./search";
 
 // The 4-state lineage resolution status. Only `resolved`/`root` are terminal;
@@ -357,34 +355,13 @@ export function updateSessionSummaryRewrite(
 
   indexSessionToFTS(db, session);
 
-  // Spec C6/C10: a session field can carry a bare `[S<session>/T<n>]` /
-  // `[E<n>]` citation, same grammar as a turn or segment body. The seven
-  // fields this rewrite just persisted are the session's whole
-  // citation-bearing surface, so re-scanning all of them and reconciling
-  // against `memory_edges` is a full rescan, not a diff. The writer session IS
-  // the session being written — a session states nothing about anyone else's
-  // exposure ledger, only its own. `current` is absent because it is no longer
-  // one of the seven (ticket 04): a citation left in the dead column stops
-  // producing an edge, which is the correct reading of a field nothing renders.
-  const references = [
-    ...parseQualifiedReferences(session.title),
-    ...parseQualifiedReferences(session.content),
-    ...parseQualifiedReferences(session.insight),
-    ...parseQualifiedReferences(session.decision),
-    ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.nextSteps),
-    ...parseQualifiedReferences(session.reference),
-  ];
-  const { accepted } = validateReferences(db, references, {
-    writerSessionId: sessionId,
-  });
-  reconcileCitedPairs(
-    db,
-    { kind: "session", id: sessionId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref",
-  );
+  // The session-field CITATION RESCAN is DELETED (main-agent-edges D1 / R10-2).
+  // It kept one wordless `session -> turn|segment` row per address the seven
+  // summary fields happened to name — part of production's 1,883-row wordless
+  // population, and a fact nothing acts on: an edge is a class, and a session
+  // asserts no class about anything. No replacement table (D1: reproducing the
+  // kindful endpoint space for a fact nobody reads is the cost that ruled it
+  // out). The addresses stay in the prose, where a reader reads them.
 
   return session;
 }
@@ -520,29 +497,9 @@ export function updateSessionFields(
 
   indexSessionToFTS(db, session);
 
-  // Spec C6/C10: full rescan of the session's whole citation-bearing surface,
-  // same reasoning as `updateSessionSummaryRewrite` — a per-field ledger would
-  // also work, but a session's field count is bounded, so a whole rescan is
-  // simpler and still correct against a call that touched only one field.
-  const references = [
-    ...parseQualifiedReferences(session.title),
-    ...parseQualifiedReferences(session.content),
-    ...parseQualifiedReferences(session.insight),
-    ...parseQualifiedReferences(session.decision),
-    ...parseQualifiedReferences(session.done),
-    ...parseQualifiedReferences(session.nextSteps),
-    ...parseQualifiedReferences(session.reference),
-  ];
-  const { accepted } = validateReferences(db, references, {
-    writerSessionId: sessionId,
-  });
-  reconcileCitedPairs(
-    db,
-    { kind: "session", id: sessionId },
-    accepted.map((entry) => entry.node),
-    nowEpoch,
-    "text-ref",
-  );
+  // Deleted with its twin in `updateSessionSummaryRewrite` above
+  // (main-agent-edges D1 / R10-2): the wordless rows this rescan maintained
+  // are retired as a population.
 
   return session;
 }
