@@ -1509,19 +1509,36 @@ function sameLaneKey(a: LaneKey, b: LaneKey): boolean {
  */
 export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnchorAddresses): string {
   const flagged = findingTurnIds(result);
-  const errorClasses = errorClassesByAnchor(result.errors);
+  // MAIN-AGENT-EDGES TICKET 14b (peer final pass): the SAME split as the
+  // prose renderer — E6 is a warning class (ruling S15069/T2465-T2466), so it
+  // never counts under ERRORS here either and never wears the error glyph.
+  const blocking = result.errors.filter((error) => error.class !== "E6");
+  const ambiguousSides = result.errors.filter((error) => error.class === "E6");
+  const errorClasses = errorClassesByAnchor(blocking);
+  const warningClasses = errorClassesByAnchor(ambiguousSides);
   const lines: string[] = [];
 
   // CLI-only surface: the cap stays here (finding P2-8) — the count line
   // states the true total and this reader can re-run the check.
-  const shownErrors = errorInstanceLines(result.errors, addresses, MAX_ERROR_RENDER_ENTRIES);
+  const shownErrors = errorInstanceLines(blocking, addresses, MAX_ERROR_RENDER_ENTRIES);
   lines.push(
     truncateToColumns(
-      "ERRORS (" + result.errors.length + ")" + cappedCountSuffix(result.errors.length, shownErrors.length),
+      "ERRORS (" + blocking.length + ")" + cappedCountSuffix(blocking.length, shownErrors.length),
     ),
   );
   for (const line of shownErrors) {
     lines.push(truncateToColumns(line));
+  }
+  if (ambiguousSides.length > 0) {
+    const shownWarnings = errorInstanceLines(ambiguousSides, addresses, MAX_ERROR_RENDER_ENTRIES);
+    lines.push(
+      truncateToColumns(
+        "WARNINGS (" + ambiguousSides.length + ")" + cappedCountSuffix(ambiguousSides.length, shownWarnings.length),
+      ),
+    );
+    for (const line of shownWarnings) {
+      lines.push(truncateToColumns(line));
+    }
   }
   lines.push("");
 
@@ -1546,7 +1563,12 @@ export function renderLaneDigraph(result: LaneCheckerResult, addresses?: LaneAnc
       // Errors precede warnings on the line for the same reason they precede
       // them in the report: must-fix before should-consider.
       const errorMark = anchored ? " " + ERROR_GLYPH + "[" + anchored.join(",") + "]" : "";
-      const flag = flagged.has(member.id) ? " " + FINDING_GLYPH : "";
+      const warned = warningClasses.get(member.id);
+      const flag = warned
+        ? " " + FINDING_GLYPH + "[" + warned.join(",") + "]"
+        : flagged.has(member.id)
+          ? " " + FINDING_GLYPH
+          : "";
       const crossing = seenElsewhere.has(member.id)
         ? " " + CROSSING_ARROW + " see " + formatTurnRef(member.id, addresses) + " in another lane"
         : "";

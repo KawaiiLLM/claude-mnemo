@@ -594,6 +594,42 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
   // cross (✕) with node death; lane-state-retirement ticket 01 deleted the
   // terminus target (◎) with the single per-lane terminus it marked. Every
   // member renders as the same dot.
+  // Peer final pass on ticket 14b: the digraph is a real CLI surface and must
+  // carry the SAME split as the prose renderer — E6 is a warning class.
+  test("an E6-only result renders ERRORS (0), a WARNINGS (1) line, and the warning glyph on the member — never the error glyph", () => {
+    const result: LaneCheckerResult = {
+      ...emptyResult(),
+      lanes: [
+        {
+          key: LANE_KEY,
+          phases: ["decision"],
+          members: [{ id: 41 }, { id: 40 }],
+          edgeCountsByRelation: {},
+          coverage: { status: "whole", missingTurnIds: [] },
+        },
+      ],
+      errors: [
+        {
+          class: "E6",
+          anchorId: 41,
+          citingId: 41,
+          citedId: 40,
+          relation: "use",
+          tags: [],
+          unsettledSides: ["tail", "head"],
+        },
+      ],
+    };
+    const digraph = renderLaneDigraph(result);
+    const lines = digraph.split("\n");
+    expect(lines[0]).toBe("ERRORS (0)");
+    expect(lines.some((line) => line.startsWith("WARNINGS (1)"))).toBe(true);
+    const member = lines.find((line) => line.includes("T41"))!;
+    expect(member).toContain("⚠[E6]");
+    expect(member).not.toContain("✗");
+    expect(digraph).not.toContain("✗[E6]");
+  });
+
   test("every lane member renders the ONE member glyph — no terminus target, no third glyph", () => {
     const result: LaneCheckerResult = {
       ...emptyResult(),

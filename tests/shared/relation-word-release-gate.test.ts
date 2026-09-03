@@ -142,6 +142,13 @@ interface AllowlistEntry {
   file: string;
   literal: string;
   reason: string;
+  /**
+   * For a PREFIX entry (a multi-line template admitted by its opening line):
+   * the exact number of retired-word matches the whole template carries
+   * today. One more word anywhere in that template — a runtime `override`
+   * appended to the schema DDL — and the entry no longer admits it.
+   */
+  matches?: number;
 }
 
 const ENGLISH_VERIFIES = "ordinary English verb 'verifies' (checks), not the retired relation word";
@@ -160,10 +167,10 @@ const ALLOWLIST: readonly AllowlistEntry[] = [
   { file: "src/db/schema.ts", literal: '"indexes"', reason: SCHEMA_MIGRATION_WORD },
   { file: "src/db/schema.ts", literal: '"verifies"', reason: SCHEMA_MIGRATION_WORD },
   { file: "src/db/schema.ts", literal: '"refutes"', reason: SCHEMA_MIGRATION_WORD },
-  { file: "src/db/schema.ts", literal: "`SELECT COUNT(*) AS n, group_concat(DISTINCT relation) AS words", reason: SCHEMA_MIGRATION_WORD },
-  { file: "src/db/schema.ts", literal: "`\n  -- ownership-and-note-cadence spec", reason: SCHEMA_MIGRATION_WORD },
-  { file: "src/db/schema.ts", literal: "`memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes", reason: "ordinary English 'indexes' (SQL index objects) in a migration failure message" },
-  { file: "src/db/main-agent-edges-cutover.ts", literal: "`\n  CREATE TABLE IF NOT EXISTS ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}", reason: "the cutover receipt DDL: its comments name the legacy words it archives" },
+  { file: "src/db/schema.ts", literal: "`SELECT COUNT(*) AS n, group_concat(DISTINCT relation) AS words", reason: SCHEMA_MIGRATION_WORD, matches: 1 },
+  { file: "src/db/schema.ts", literal: "`\n  -- ownership-and-note-cadence spec", reason: SCHEMA_MIGRATION_WORD, matches: 2 },
+  { file: "src/db/schema.ts", literal: "`memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes", reason: "ordinary English 'indexes' (SQL index objects) in a migration failure message", matches: 1 },
+  { file: "src/db/main-agent-edges-cutover.ts", literal: "`\n  CREATE TABLE IF NOT EXISTS ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}", reason: "the cutover receipt DDL: its comments name the legacy words it archives", matches: 1 },
   { file: "src/db/schema.ts", literal: "\"'narrows'\"", reason: SCHEMA_MIGRATION_WORD },
   { file: "src/mcp/timeline.ts", literal: "`latest override ${tailAddress}${qualifier} -> ${headAddress}`", reason: FRONTIER_LABEL },
   { file: "src/shared/topic-tag.ts", literal: '"verifies"', reason: TOPIC_STOPWORD },
@@ -177,8 +184,19 @@ const ALLOWLIST: readonly AllowlistEntry[] = [
   { file: "src/worker/note-settlement-unified-prompt.ts", literal: '"   refusal is not that commit. `commit` verifies your job lease is still"', reason: ENGLISH_VERIFIES },
 ];
 
+const WORD_RE_ALL = new RegExp(WORD_PATTERNS.join("|"), "g");
+
+function retiredWordCount(literal: string): number {
+  return (literal.match(WORD_RE_ALL) ?? []).length;
+}
+
 function allowlisted(hit: Hit): boolean {
-  return ALLOWLIST.some((entry) => entry.file === hit.file && hit.literal.startsWith(entry.literal));
+  return ALLOWLIST.some(
+    (entry) =>
+      entry.file === hit.file &&
+      hit.literal.startsWith(entry.literal) &&
+      (entry.matches === undefined || retiredWordCount(hit.literal) === entry.matches),
+  );
 }
 
 function allowlistKey(file: string, literal: string): string {
@@ -207,6 +225,20 @@ describe("raw-word release gate (main-agent-edges P3, ticket 15)", () => {
     }
   });
 
+
+  test("every prefix entry pins its template's retired-word count, and one extra word inside the template is NOT admitted", () => {
+    // A prefix entry is one that does not end with its own opening quote — an
+    // exact literal always does, so it needs no count.
+    const prefixed = ALLOWLIST.filter((entry) => entry.literal[entry.literal.length - 1] !== entry.literal[0]);
+    expect(prefixed.length).toBeGreaterThan(0);
+    for (const entry of prefixed) {
+      expect(entry.matches, `${entry.file}: prefix entry without a match count: ${entry.literal.slice(0, 60)}`).toBeDefined();
+      const hit = gateHits(SRC_ROOT).find((h) => h.file === entry.file && h.literal.startsWith(entry.literal))!;
+      expect(allowlisted(hit)).toBe(true);
+      const grown = { ...hit, literal: hit.literal.slice(0, -1) + "\n  -- an override edge added at runtime\n`" };
+      expect(allowlisted(grown), `${entry.file}: a grown template is still admitted`).toBe(false);
+    }
+  });
 
   test("the allowlist has no duplicate (file, literal)", () => {
     const seen = new Set<string>();
