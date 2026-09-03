@@ -490,10 +490,18 @@ describe("no teaching surface still states the retired tag mandate", () => {
       expect(text).not.toContain("A DRAFT — either side left empty, or both — is ACCEPTED here");
       expect(text).not.toContain("every edge inside your writable set with an empty side is error E6");
       expect(text).toContain("A BLANK SIDE IS LEGAL wherever the endpoint sits in ONE lane or in none");
-      expect(text).toContain("error E6 only where the");
+      // MAIN-AGENT-EDGES TICKET 14b (E6 warning closure, ruling
+      // S15069/T2465-T2466): E6 is a warning, never a refusal — the sentence
+      // that used to say "commit refuses ... declare it, or retract the row"
+      // is retired.
+      expect(text).toContain("warning E6 where the");
       expect(text).toContain("endpoint sits in SEVERAL lanes and no side is declared");
-      expect(text).toContain("commit refuses");
-      expect(text).toContain("while one remains in your writable set: `declare` it, or retract the row");
+      expect(text).toContain(
+        "you may `declare` it where the material you are already holding says which lane",
+      );
+      expect(text).toContain("it never refuses commit");
+      expect(text).not.toContain("error E6 only where the");
+      expect(text).not.toContain("while one remains in your writable set: `declare` it, or retract the row");
       expect(text).toContain("`{turn, class?, tailTag?, headTag?}`");
       expect(text).toContain("the tag must be canonical");
       expect(text).toContain(

@@ -1273,22 +1273,25 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     expect(tail.replace(/\n+$/, "")).toBe(WARNING_SIDE_BASELINE);
   });
 
-  test("the golden fixture's TYPE conformance is clean once compact markers are exempt; the errors block leads with its E6 count", () => {
+  test("the golden fixture's TYPE conformance is clean once compact markers are exempt; the E6 ambiguous side prints as a warning", () => {
     const result = checkLanes(fixtureTurns, fixtureEdges);
     const text = renderLaneCheckerReports(result);
-    // Ticket 20: the block no longer leads with "(none)" on this corpus — its
-    // draft edges are E6 instances. main-agent-edges D6 narrowed E6 to the
-    // `ambiguous` side, and on this corpus that is ONE row's head (see the
-    // golden block's own error test for the derivation). The TYPE half (E3)
-    // is still silent, which is what `vocabularyConformance` below pins
-    // directly.
+    // MAIN-AGENT-EDGES TICKET 14b (E6 warning closure, ruling S15069/T2465-
+    // T2466): the ERRORS block is EMPTY on this corpus — its only grammar
+    // finding is the one E6, a WARNING, so it prints under WARNINGS instead.
+    // main-agent-edges D6 narrowed E6 to the `ambiguous` side, and on this
+    // corpus that is ONE row's head (see the golden block's own error test
+    // for the derivation). The TYPE half (E3) is still silent, which is what
+    // `vocabularyConformance` below pins directly.
     expect(text.startsWith(
       "## ERRORS -- states the grammar forbids that THIS run can repair; commit refuses while one remains\n" +
-        "1 error(s)\n",
+        "(none)\n",
     )).toBe(true);
+    expect(text).toContain("1 ambiguous side(s) (E6)");
     expect(text).toContain(
       "  [E6] anchor T902 -- T902 --use--> T900: AMBIGUOUS side -- the head endpoint sits in several lanes (the tail side is {})",
     );
+    expect(text.indexOf("[E6]")).toBeGreaterThan(text.indexOf("## WARNINGS"));
     expect(text).not.toContain("[E3]");
     expect(text).not.toContain("[E4]");
     expect(text).not.toContain("Vocabulary conformance");

@@ -399,9 +399,11 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text.indexOf("## WARNINGS")).toBeLessThan(text.indexOf("## Report 1"));
   });
 
-  // Ticket 20: E6, the DRAFT edge, renders INSIDE the ERRORS block at the same
-  // rank as E3/E4 — it is not a warning and does not print below the split.
-  test("an E6 draft edge renders in the ERRORS block, naming the missing side", () => {
+  // MAIN-AGENT-EDGES TICKET 14b (E6 warning closure, user ruling
+  // S15069/T2465-T2466): E6, an AMBIGUOUS side, is a WARNING class and
+  // renders under the WARNINGS header, never inside the ERRORS block E3/E4
+  // occupy — it reuses that existing block rather than a third one.
+  test("an E6 draft edge renders under WARNINGS, naming the missing side, and the ERRORS block stays empty", () => {
     const withDrafts: LaneCheckerResult = {
       ...emptyResult(),
       errors: [
@@ -435,7 +437,12 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
       ],
     };
     const text = renderLaneCheckerReports(withDrafts);
-    expect(text).toContain("3 error(s)");
+    // The ERRORS block is empty — no E6 counted as an error, and no third
+    // block was added.
+    const errorsBlock = text.slice(text.indexOf("## ERRORS"), text.indexOf("## WARNINGS"));
+    expect(errorsBlock).toContain("(none)");
+    expect(errorsBlock).not.toContain("[E6]");
+    expect(text).toContain("3 ambiguous side(s) (E6)");
     expect(text).toContain(
       "  [E6] anchor T41 -- T41 --use--> T40: AMBIGUOUS side -- neither endpoint answers which lane",
     );
@@ -447,8 +454,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain(
       "  [E6] anchor T45 -- T45 --use--> T44: AMBIGUOUS side -- the tail endpoint sits in several lanes (the head side is {ownership})",
     );
-    // Rank, not just presence: every E6 line sits above the WARNINGS split.
-    expect(text.indexOf("[E6]")).toBeLessThan(text.indexOf("## WARNINGS"));
+    // Rank: every E6 line sits AT OR BELOW the WARNINGS split, never above it.
+    expect(text.indexOf("[E6]")).toBeGreaterThan(text.indexOf("## WARNINGS"));
   });
 
   // Requirement 6's render half: a both-sides-empty edge is reported by BOTH

@@ -881,9 +881,13 @@ describe("commit's description names the four friction categories and the exclus
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("commit-gate refusal");
     // Ticket 17: E3 left the blocking set, so it can no longer BE a gate
     // refusal a run routed around — naming it here would ask for friction
-    // that cannot happen.
-    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("(E4/E6)");
+    // that cannot happen. MAIN-AGENT-EDGES TICKET 14b: E6 left the blocking
+    // set too (ruling S15069/T2465-T2466) — the same reasoning retires it
+    // from this line as well, leaving E4 the sole class that can refuse
+    // `commit`.
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("(E4)");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain("(E3/E4/E6)");
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain("(E4/E6)");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain("a turn you could not read");
   });
 
@@ -1083,6 +1087,16 @@ describe("settlement's registered tool surface has no check (ticket 07, ADR-0007
       expect(description).toContain("{turn, class?, tailTag?, headTag?}");
       expect(description).not.toContain("{turn, tailTag, headTag}");
       expect(description).toContain("self-citation gate");
+      // MAIN-AGENT-EDGES TICKET 14b (E6 warning closure): the REGISTERED
+      // description — the string the server actually hands the model, not
+      // only the exported constant — no longer tells the run E6 refuses
+      // commit; it is a warning it may declare and may leave.
+      expect(description).not.toContain("It is error E6 only where the");
+      expect(description).not.toContain(
+        "commit refuses while one remains in your writable set: `declare` it, or retract the row",
+      );
+      expect(description).toContain("It is warning E6 where the");
+      expect(description).toContain("it never refuses commit");
     } finally {
       db?.close();
     }
