@@ -11,7 +11,7 @@ import { describe, expect, test } from "bun:test";
  * or print the stored word again. It scans every string/template literal in
  * `src/` (comments stripped, one line at a time), matches the retired words as
  * WHOLE WORDS, exempts the migration history as a file, and admits the
- * handful of legitimate English/self-test uses by (file, EXACT literal).
+ * legitimate English/self-test uses AND the migration history's bare word literals by (file, EXACT literal) — no file is exempt.
  */
 
 /**
@@ -34,16 +34,55 @@ const WORD_PATTERNS = [
 ];
 const WORD_RE = new RegExp(WORD_PATTERNS.join("|"));
 
-/** Files the gate does not read at all, each with the one reason the whole file is legitimately full of the old words. */
-const EXEMPT_FILES: ReadonlyMap<string, string> = new Map([
-  [
-    "src/db/schema.ts",
-    "the migration history: frozen word lists, legacy CHECK text and the legacy-word translation tables for pre-cutover rows live here by definition",
-  ],
-]);
-
-/** One quoted single/double string or a template literal, contents included. Not escape-perfect for a nested `${...}` containing its own quotes of the SAME kind, which does not occur in this tree (verified by the hit count below matching a byte-for-byte independent recount in the ticket's report). */
-const LITERAL_RE = /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+/**
+ * Every string/template literal in a comment-stripped source, with the line it
+ * STARTS on — a small state machine, not an AST: it walks the text once,
+ * tracking `'`, `"` and `` ` `` with backslash escapes, so a template literal
+ * that spans lines is ONE literal (the per-line scanner this replaces could
+ * not see `\`\nwrite override edges\n\``). A `${...}` inside a template is
+ * kept as text; a nested quote of the SAME kind inside one does not occur in
+ * this tree.
+ */
+export function stringLiterals(source: string): Array<{ line: number; literal: string }> {
+  const out: Array<{ line: number; literal: string }> = [];
+  let i = 0;
+  let line = 1;
+  while (i < source.length) {
+    const ch = source[i]!;
+    if (ch === "\n") {
+      line += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      const startLine = line;
+      let j = i + 1;
+      while (j < source.length) {
+        const c = source[j]!;
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "\n") {
+          if (quote !== "`") {
+            break;
+          }
+          line += 1;
+        }
+        if (c === quote) {
+          break;
+        }
+        j += 1;
+      }
+      out.push({ line: startLine, literal: source.slice(i, Math.min(j + 1, source.length)) });
+      i = j + 1;
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+}
 
 /** Strip block comments and `//` line comments (a `//` preceded by `:` — a URL inside a string — is kept). */
 export function stripComments(source: string): string {
@@ -73,26 +112,19 @@ function listSourceFiles(dir: string): string[] {
 }
 
 /**
- * Every occurrence of a relation word, as a WORD, inside a string/template
- * literal under `root` (comments stripped first). `labelRoot` is the
- * directory `file` paths are reported relative to — the real scan passes
- * `root`'s own parent so hits read `src/...`; the injection test passes a
- * synthetic root so its one hit reads relative to ITS OWN root instead.
+ * Every occurrence of a retired word, as a WORD, inside a string/template
+ * literal under `root` (comments stripped first; multi-line templates seen
+ * whole). `labelRoot` is the directory `file` paths are reported relative to.
  */
 function quotedRawWordHits(root: string, labelRoot: string = join(root, "..")): Hit[] {
   const hits: Hit[] = [];
   for (const file of listSourceFiles(root)) {
     const rel = relative(labelRoot, file);
-    const lines = stripComments(readFileSync(file, "utf8")).split("\n");
-    lines.forEach((text, index) => {
-      LITERAL_RE.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = LITERAL_RE.exec(text))) {
-        if (WORD_RE.test(m[0])) {
-          hits.push({ file: rel, line: index + 1, literal: m[0] });
-        }
+    for (const { line, literal } of stringLiterals(stripComments(readFileSync(file, "utf8")))) {
+      if (WORD_RE.test(literal)) {
+        hits.push({ file: rel, line, literal });
       }
-    });
+    }
   }
   return hits;
 }
@@ -100,9 +132,11 @@ function quotedRawWordHits(root: string, labelRoot: string = join(root, "..")): 
 const SRC_ROOT = join(import.meta.dir, "..", "..", "src");
 
 /**
- * The allowlist, keyed on (file, EXACT literal text): an entry names the
- * bytes it admits, so a moved line does not make it stale and a NEW literal
- * on the same line is still caught. One reason each.
+ * The allowlist, keyed on (file, literal PREFIX): an entry names the bytes it
+ * admits, so a moved line does not make it stale and a NEW literal on the
+ * same line is still caught. A short literal is its own prefix, closing quote
+ * included, so `"override"` admits exactly that literal and nothing longer; a
+ * multi-line template is admitted by its opening line. One reason each.
  */
 interface AllowlistEntry {
   file: string;
@@ -115,8 +149,22 @@ const TOKENIZER_SELFTEST = "arbitrary self-test string for the o200k_base tokeni
 const TOPIC_STOPWORD = "topic stopword list, unrelated to the edge relation vocabulary";
 const LANE_V12_MIGRATION = "lane-model-v12 migration literal (the merge target of `refutes`), a migration word by definition";
 const FRONTIER_LABEL = "the frontier's 'latest override' display label, kept by NAME for the correct/full pointer (main-agent-edges ticket 02 disposition)";
+const SCHEMA_MIGRATION_WORD = "schema.ts migration history: a frozen legacy word in a word list, CHECK text or legacy-to-class translation table for pre-cutover rows — the bare word literal, nothing else, is admitted";
 
 const ALLOWLIST: readonly AllowlistEntry[] = [
+  { file: "src/db/schema.ts", literal: '"override"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"narrows"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"extends"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"consume"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"grounds"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"indexes"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"verifies"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: '"refutes"', reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: "`SELECT COUNT(*) AS n, group_concat(DISTINCT relation) AS words", reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: "`\n  -- ownership-and-note-cadence spec", reason: SCHEMA_MIGRATION_WORD },
+  { file: "src/db/schema.ts", literal: "`memory_edges rebuild left ${violations.length} foreign key violation(s) while renaming collects to indexes", reason: "ordinary English 'indexes' (SQL index objects) in a migration failure message" },
+  { file: "src/db/main-agent-edges-cutover.ts", literal: "`\n  CREATE TABLE IF NOT EXISTS ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}", reason: "the cutover receipt DDL: its comments name the legacy words it archives" },
+  { file: "src/db/schema.ts", literal: "\"'narrows'\"", reason: SCHEMA_MIGRATION_WORD },
   { file: "src/mcp/timeline.ts", literal: "`latest override ${tailAddress}${qualifier} -> ${headAddress}`", reason: FRONTIER_LABEL },
   { file: "src/shared/topic-tag.ts", literal: '"verifies"', reason: TOPIC_STOPWORD },
   { file: "src/shared/token-count.ts", literal: '" extends"', reason: TOKENIZER_SELFTEST },
@@ -129,44 +177,36 @@ const ALLOWLIST: readonly AllowlistEntry[] = [
   { file: "src/worker/note-settlement-unified-prompt.ts", literal: '"   refusal is not that commit. `commit` verifies your job lease is still"', reason: ENGLISH_VERIFIES },
 ];
 
+function allowlisted(hit: Hit): boolean {
+  return ALLOWLIST.some((entry) => entry.file === hit.file && hit.literal.startsWith(entry.literal));
+}
+
 function allowlistKey(file: string, literal: string): string {
   return `${file}::${literal}`;
 }
 
-const ALLOWLIST_INDEX: ReadonlySet<string> = new Set(
-  ALLOWLIST.map((entry) => allowlistKey(entry.file, entry.literal)),
-);
-
 function gateHits(root: string, labelRoot?: string): Hit[] {
-  return quotedRawWordHits(root, labelRoot).filter((hit) => !EXEMPT_FILES.has(hit.file));
+  return quotedRawWordHits(root, labelRoot);
 }
 
 describe("raw-word release gate (main-agent-edges P3, ticket 15)", () => {
   test("no retired relation word survives as a WORD inside any string/template literal in src/ outside the allowlist", () => {
-    const outside = gateHits(SRC_ROOT).filter(
-      (hit) => !ALLOWLIST_INDEX.has(allowlistKey(hit.file, hit.literal)),
-    );
+    const outside = gateHits(SRC_ROOT).filter((hit) => !allowlisted(hit));
     expect(
       outside.map((hit) => `${hit.file}:${hit.line}: ${hit.literal.slice(0, 120)}`),
     ).toEqual([]);
   });
 
   test("every allowlist entry is still earning its place — an entry whose (file, literal) carries no hit any more is stale and must be removed", () => {
-    const hitIndex = new Set(gateHits(SRC_ROOT).map((hit) => allowlistKey(hit.file, hit.literal)));
+    const hits = gateHits(SRC_ROOT);
     for (const entry of ALLOWLIST) {
       expect(
-        hitIndex.has(allowlistKey(entry.file, entry.literal)),
+        hits.some((hit) => hit.file === entry.file && hit.literal.startsWith(entry.literal)),
         `${entry.file}: allowlisted literal no longer present: ${entry.literal.slice(0, 80)}`,
       ).toBe(true);
     }
   });
 
-  test("every exempt file exists and still carries the words its exemption is for", () => {
-    for (const [file] of EXEMPT_FILES) {
-      const hits = quotedRawWordHits(SRC_ROOT).filter((hit) => hit.file === file);
-      expect(hits.length, `${file}: exempt but carries no retired word any more — drop the exemption`).toBeGreaterThan(0);
-    }
-  });
 
   test("the allowlist has no duplicate (file, literal)", () => {
     const seen = new Set<string>();
@@ -175,6 +215,18 @@ describe("raw-word release gate (main-agent-edges P3, ticket 15)", () => {
       expect(seen.has(key), `duplicate allowlist entry: ${key}`).toBe(false);
       seen.add(key);
     }
+  });
+
+  test("a multi-line template literal is ONE literal and its retired word is seen", () => {
+    const lits = stringLiterals("const x = `\nwrite override edges\n`;\nconst y = 'a';");
+    expect(lits.map((l) => [l.line, l.literal])).toEqual([[1, "`\nwrite override edges\n`"], [4, "'a'"]]);
+    expect(lits.some((l) => WORD_RE.test(l.literal))).toBe(true);
+  });
+
+  test("a retired word in schema.ts's RUNTIME code is caught — only the bare migration word literals are admitted", () => {
+    const literal = '"an override edge written at runtime"';
+    expect(allowlisted({ file: "src/db/schema.ts", line: 1, literal })).toBe(false);
+    expect(WORD_RE.test(literal)).toBe(true);
   });
 
   test("the comment stripper keeps a URL inside a string and drops a trailing comment", () => {
@@ -229,9 +281,7 @@ describe("P2-E reproduction: a prose sentence carrying a relation word red-lines
       // THE REAL PREDICATE, run against the temp copy: every hit under this
       // root, minus the REAL allowlist (unmodified — proving no entry here
       // was written to admit this injected sentence).
-      const outside = quotedRawWordHits(tempRoot, tempRoot).filter(
-        (hit) => !ALLOWLIST_INDEX.has(allowlistKey(hit.file, hit.literal)),
-      );
+      const outside = quotedRawWordHits(tempRoot, tempRoot).filter((hit) => !allowlisted(hit));
       const injectedHit = outside.find((hit) => hit.literal === '"write override edges"');
       expect(injectedHit).not.toBeUndefined();
       expect(injectedHit!.file).toBe("src/worker/note-settlement-edge-pass-teaching.ts");
