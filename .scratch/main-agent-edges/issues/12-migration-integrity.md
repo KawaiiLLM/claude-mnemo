@@ -1,6 +1,6 @@
 # 12 — Migration integrity: tags normalised first, a rollback boundary that is real, receipts that count right
 
-**What to build:** repairs from the whole-batch peer review (S15069/T2461, P1-1, P1-2, P2-A, P2-B, P3). After it, a database with malformed `turns.tags` opens and migrates; the rollback tool refuses whenever ANY receipt-owned state moved after the cutover; the fold receipt counts what it folded.
+**What to build:** repairs from the whole-batch peer review (S15069/T2461, P1-1, P1-2, P2-A, P2-B, P3). After it, a database with malformed `turns.tags` opens and migrates; the rollback tool is deleted and the receipt tables alone carry the pre-cutover state; the fold receipt counts what it folded.
 
 **Blocked by:** None — ticket 01 landed (45e23404).
 
@@ -17,14 +17,14 @@
 ## What to change
 
 - [ ] Tags normalisation is the FIRST migration step, before any membership cutover: NULL → `[]`, non-array/invalid → `[]`, non-string members dropped, receipted — the same rule D9 transform 1 states, applied once, early. `cutoverNamedTaskMembershipTags` then reads through the strict reader and cannot throw. (Subtraction, not accommodation: the lenient parse in the membership cutover goes.)
-- [ ] (AWAITING the user's ruling, S15069/T2461 — option A) The rollback boundary covers the three receipt-owned domains DIRECTLY — every insert/update/delete on relation rows (`memory_edges` + side index), `turns.tags`, and `segment_members` since the cutover — not the existing stamp/row-id proxies. Record in the receipt what is needed to detect movement in each domain (a digest per domain, or the domain's own change counter), refuse naming the domain that moved, and either archive-and-restore the pending-edges job reset or make it a refusal condition. Restoring a dangling edge must be impossible by construction. (Option B, if ruled: delete the rollback tool, keep the receipts for manual recovery.)
+- [ ] **RULED (user, S15069/T2464): option B — DELETE the rollback tool.** `rollbackMainAgentEdgesCutover`, its outcome/refusal types, its tests and any teaching that names it go; the six archive/receipt tables and the state marker STAY (they are the receipt; recovery, if ever needed, is a hand-written one-shot from them). The `written-since` checks go with the function. Update `main-agent-edges-cutover.ts`'s doc comment and the spec's D9 wording to say receipt-only. The pending-edges job reset at cutover stays as is (it is recorded in the receipt counts).
 - [ ] `resetNoteSettlementJobToStageOne` compat SQL is valid on both shapes; a test runs it against the additive (no-stage) shape.
 - [ ] `foldedPairs` counts every pair the fold touched, including wordless+class pairs; the clone report re-run states the new number beside the old.
 
 ## What to prove
 
 - [ ] A fixture DB with three malformed tags rows (`null`, `"not json"`, `{"a":1}`) inside a named task opens, migrates, and ends with `tags='[]'` rows and correct membership — and a revert probe (normalisation moved back after the membership cutover) drives it red.
-- [ ] Three rollback refusals pinned: deleted citing turn, membership-only change, job reset — each RED when its check is removed.
+- [ ] The archive tables still hold byte-exact pre-cutover rows after the one-shot (pin the DDL, the row count and one row's full content against the clone) — that is what replaces the rollback test.
 - [ ] Revert probe per predicate, red test named; ≥3, verified applied, md5-restored.
 
 ## Constraints
