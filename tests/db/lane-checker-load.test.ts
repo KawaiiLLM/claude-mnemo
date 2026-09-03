@@ -2102,3 +2102,87 @@ describe("DISCOVER/WIDEN/segment-facts select on the SIDE columns, not on `tags`
     expect(factsFor(segmentB.id).emptyLaneTags).toEqual(["onlyA"]);
   });
 });
+
+/**
+ * ticket 15 (S15069/T2461, missing pins): DISCOVER and WIDEN each get a
+ * fixture where the RESOLVED outcome and the STORED tag actually disagree —
+ * every fixture above either declares the side outright or has the
+ * discovering endpoint ALSO be a seed turn (whose own `tags` column would
+ * independently rediscover the same lane through DISCOVER phase (b), masking
+ * a revert of phase (a)'s resolver call). Here the far endpoint is never a
+ * seed, and its side is left undeclared (`''`), so the ONLY way its lane
+ * reaches the projection is through `sideResolver.resolve(...)` deriving it
+ * from the endpoint's own (unique) lane membership.
+ */
+describe("DISCOVER/WIDEN resolve a BLANK stored side to its DERIVED lane (main-agent-edges ticket 15)", () => {
+  test("DISCOVER: a lane is discovered through an unstored side on a NON-seed endpoint — reverting to the stored tag finds nothing", () => {
+    const sessionId = seedSession("discover-derived");
+    const seed = insertTurn(sessionId, 1, { tags: [] });
+    // NOT a seed turn — reached only by following the edge below. Its own
+    // `tags` column is never scanned by DISCOVER phase (b), so this lane can
+    // ONLY be discovered through phase (a)'s per-side resolution.
+    const other = insertTurn(sessionId, 2, { tags: ["derived-only"] });
+    const segmentId = seedHomeSegment([seed, other], "discover-derived");
+    insertLane(db, segmentId, "derived-only", NOW);
+
+    // The STORED side is blank on both ends — a stored-tag-verbatim DISCOVER
+    // finds no lane at all here.
+    insertEdgeRow(db, {
+      citingId: seed,
+      citedId: other,
+      relationClass: "use",
+      tailTag: "",
+      headTag: "",
+      createdAtEpoch: NOW,
+    });
+
+    const projection = loadLaneCheckScope(db, { kind: "turns", turnIds: [seed] });
+
+    expect(projection.involvedLaneKeys).toEqual([{ segment: String(segmentId), tag: "derived-only" }]);
+    expect(projection.turns.map((t) => t.id).sort((a, b) => a - b)).toEqual(
+      [seed, other].sort((a, b) => a - b),
+    );
+    assertNoDanglingEdges(projection);
+  });
+
+  test("WIDEN: the edge `toEdgeInput` hands the core carries the DERIVED tag, never the blank stored one — reverting to the stored tag blanks it out again", () => {
+    const sessionId = seedSession("widen-derived");
+    const member = insertTurn(sessionId, 1, { tags: ["widen-derived-only"] });
+    const other = insertTurn(sessionId, 2, { tags: [] });
+    const segmentId = seedHomeSegment([member, other], "widen-derived");
+    insertLane(db, segmentId, "widen-derived-only", NOW);
+
+    // `member` is the lane's sole current member; its side of this edge is
+    // undeclared. WIDEN's candidate SQL finds the row because it is incident
+    // to `member` — the disagreement is in what `toEdgeInput` reports for
+    // the HEAD side once found: the resolved lane, or the blank column.
+    insertEdgeRow(db, {
+      citingId: other,
+      citedId: member,
+      relationClass: "use",
+      tailTag: "",
+      headTag: "",
+      createdAtEpoch: NOW,
+    });
+
+    const named = loadLaneCheckScope(db, {
+      kind: "lanes",
+      laneKeys: [{ segment: String(segmentId), tag: "widen-derived-only" }],
+    });
+
+    expect(named.edges).toHaveLength(1);
+    expect(named.edges[0]).toMatchObject({
+      citingId: other,
+      citedId: member,
+      // The stored columns stay blank (E4's own honesty requirement) …
+      storedTailTag: "",
+      storedHeadTag: "",
+      // … but the RESOLVED head reads the derived lane, not the blank one.
+      tailTag: "",
+      headTag: "widen-derived-only",
+      tailOutcome: "none",
+      headOutcome: "derived",
+    });
+    assertNoDanglingEdges(named);
+  });
+});

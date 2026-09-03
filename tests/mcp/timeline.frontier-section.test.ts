@@ -1222,3 +1222,32 @@ describe("frontier section: tag floor under the host char limit (ticket 07 P1-1)
     db.close();
   });
 });
+
+/**
+ * ticket 15 (S15069/T2461, missing pins): every fixture above stores a real
+ * tag on both sides of an edge. This one leaves BOTH sides blank on an edge
+ * between two turns that are each the SOLE current member of one lane —
+ * `loadFrontierEdges`'s resolver derives the lane on both ends anyway, so the
+ * digest counts the edge as if it had been declared. Reverting the loader to
+ * the stored column (`row.tailTag`/`row.headTag`) would report it as
+ * unattributed and drop it from every count below.
+ */
+describe("frontier section: a BLANK/BLANK edge between two SOLE lane members still counts (main-agent-edges ticket 15)", () => {
+  test("both sides derive the lane from membership alone — the digest counts the edge and its island", () => {
+    const db = makeDb();
+    const s1 = makeSession(db, "derived-blank-session");
+    const task = makeTask(db, "Derived Blank", "derived-blank-task");
+    insertLane(db, task.id, "derived-only", BASE_EPOCH);
+
+    const t1 = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, title: "sole member one", tags: ["derived-only"] });
+    const t2 = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, title: "sole member two", tags: ["derived-only"] });
+    addSegmentMembers(db, task.id, [t1, t2], BASE_EPOCH);
+    settleWindow(db, s1, 1, 2);
+
+    makeEdge(db, t2, t1, "extends", "", "");
+
+    const section = buildSegmentFrontierSection(db, task.id, null, 2000);
+    expect(section).toContain("#derived-only · 2 settled · 1 edges · islands 1+0");
+    db.close();
+  });
+});
