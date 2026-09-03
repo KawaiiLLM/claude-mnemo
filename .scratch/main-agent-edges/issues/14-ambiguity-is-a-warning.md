@@ -23,6 +23,7 @@
 - [ ] `grep -rn "derived-side-citer\|removed-side-citer\|note_settlement_claim_scope\|note_settlement_pre_side_resolutions\|invalidateOverlappingSettlementJobs" src tests` → 0 hits.
 - [ ] A structural change (task move / lane merge) that makes a side ambiguous under a live claimed job: edge kept, job status/generation/snapshots unchanged, relations read shows `ambiguous`; revert probe (old invalidate/delete behaviour restored) red, test named.
 - [ ] `commit` with an outstanding E6 succeeds; with an E4 refuses; probe: E6 back in the error set → red.
+- [ ] Closure of the deletion (the peer's second-round checklist, S15069/T2467): no half-mechanism survives in schema (tables, CHECKs, migrations), dispatch (both shapes), the claim monitor, `clearSettlementJobTransitionScratch`/scratch cleanup, tool teaching, receipts/reports, or tests — list every site removed. E4 stays an ERROR and is still cleared automatically by write validation and the structural seam; a test proves E4 alone still refuses commit after E6's demotion.
 - [ ] Revert probe per predicate, ≥4, verified applied, md5-restored.
 
 ## Constraints
