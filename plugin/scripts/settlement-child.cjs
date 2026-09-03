@@ -39029,7 +39029,7 @@ function invalidateOverlappingSettlementJobs(db, turnIds, options) {
 function resetNoteSettlementJobToStageOne(db, jobId, nowEpoch) {
   const hasStageColumns = hasColumn(db, "note_settlement_jobs", "stage");
   const job = db.query(
-    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
+    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL"} AS stage,
               claim_generation AS claimGeneration
          FROM note_settlement_jobs WHERE id = ?`
   ).get(jobId);

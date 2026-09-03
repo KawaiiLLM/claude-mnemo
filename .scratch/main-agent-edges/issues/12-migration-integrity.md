@@ -120,3 +120,26 @@ still in `cutoverNamedTaskMembershipTags` the moved order would pass silently.
 - `spec.md` line 123 (the Tests checklist) still says the receipt "restores
   every changed row byte-for-byte within the rollback boundary and refuses
   outside it". It is outside D9 and outside this ticket's pathspec allowance.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `0ff832cd` no-ff, clean; bundles rebuilt. `npx tsc --noEmit` 0; guards green. Full `bun test`
+**4788 / 0 / 276** against 4785/0/274 — the worker's +3/+2/−2 exactly. Deletion closure grep for the
+rollback tool and the ambiguous-delete disposition: one hit, a comment stating their absence.
+
+My probes, on the normaliser's own predicates (the worker's five were order, counts, compat SQL and
+transform 5):
+
+| # | mutation in `schema.ts` `normaliseTurnTagsInvariant` | result |
+|---|---|---|
+| I1 | non-array JSON no longer coerced to `[]` (only invalid JSON) | RED ×2 (THE ORDER; TRANSFORM 1) |
+| I2 | non-string members no longer dropped (EXISTS clause made unsatisfiable) | RED ×1 (TRANSFORM 1) — first attempt hit the wrong line and was discarded as not-a-probe; re-run with the applied diff shown |
+
+Restored by `cp`, md5 verified. Accepted. The worker's flagged spec sentence (Tests checklist still
+promising a byte-for-byte rollback) is annotated SUPERSEDED in this commit. Its other rulings stand as
+stated: the normalisation commits in its own transaction before the one-shot (the deferral window
+needs the value legal even when the one-shot never runs); `foldedPairs` did not move on this corpus
+because the mixed wordless+class population is 0; a citer whose only lost row was wordless is still not
+stamped (D1 teaching) — left as is.

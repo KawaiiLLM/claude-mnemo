@@ -8957,7 +8957,7 @@ function invalidateOverlappingSettlementJobs(db, turnIds, options) {
 function resetNoteSettlementJobToStageOne(db, jobId, nowEpoch) {
   const hasStageColumns = hasColumn(db, "note_settlement_jobs", "stage");
   const job = db.query(
-    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
+    `SELECT id, status, ${hasStageColumns ? "stage" : "NULL"} AS stage,
               claim_generation AS claimGeneration
          FROM note_settlement_jobs WHERE id = ?`
   ).get(jobId);
@@ -12566,7 +12566,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtkoduam" : "dev";
+    BUILD_ID = true ? "0.29.0-mtl4xlj9" : "dev";
   }
 });
 
@@ -12596,25 +12596,12 @@ var init_build_state = __esm({
 });
 
 // src/db/main-agent-edges-cutover.ts
-function readMainAgentEdgesCutoverState(db) {
-  const exists = db.query(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
-  ).get(MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE) !== null;
-  if (!exists) {
-    return null;
-  }
-  return db.query(
-    `SELECT status, applied_at_epoch AS appliedAtEpoch,
-                write_gate_sequence AS writeGateSequence,
-                rolled_back_at_epoch AS rolledBackAtEpoch
-           FROM ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE} WHERE id = 1`
-  ).get() ?? null;
-}
-var MAIN_AGENT_EDGES_CUTOVER_RECEIPT, MAIN_AGENT_EDGES_CUTOVER_WRITER, MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE, MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL;
+var MAIN_AGENT_EDGES_CUTOVER_RECEIPT, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT, MAIN_AGENT_EDGES_CUTOVER_WRITER, MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE, MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE, MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL;
 var init_main_agent_edges_cutover = __esm({
   "src/db/main-agent-edges-cutover.ts"() {
     "use strict";
     MAIN_AGENT_EDGES_CUTOVER_RECEIPT = "main-agent-edges-cutover";
+    MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT = "main-agent-edges-turn-tags";
     MAIN_AGENT_EDGES_CUTOVER_WRITER = "migration:main-agent-edges-cutover";
     MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE = "main_agent_edges_cutover_state";
     MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE = "main_agent_edges_cutover_edge_archive";
@@ -12626,12 +12613,11 @@ var init_main_agent_edges_cutover = __esm({
     MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL = `
   CREATE TABLE IF NOT EXISTS ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE} (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    status TEXT NOT NULL CHECK (status IN ('complete', 'rolled_back')),
+    status TEXT NOT NULL CHECK (status = 'complete'),
     applied_at_epoch INTEGER NOT NULL,
-    -- The write-gate sequence AFTER the cutover's own stamps: the rollback
-    -- boundary (module header).
-    write_gate_sequence INTEGER NOT NULL,
-    rolled_back_at_epoch INTEGER
+    -- The write-gate sequence AFTER the cutover's own stamps: what a later
+    -- reader uses to tell its own writes from the migration's (module header).
+    write_gate_sequence INTEGER NOT NULL
   );
 
   -- Every old memory_edges row, all columns verbatim, keyed on its old id.
@@ -12649,7 +12635,7 @@ var init_main_agent_edges_cutover = __esm({
     relation_coverage TEXT NOT NULL,
     created_at_epoch INTEGER NOT NULL,
     disposition TEXT NOT NULL CHECK (
-      disposition IN ('kept', 'rewritten', 'folded', 'deleted-wordless', 'deleted-ambiguous')
+      disposition IN ('kept', 'rewritten', 'folded', 'deleted-wordless')
     )
   );
 
@@ -12819,9 +12805,9 @@ __export(schema_exports, {
   initializeDatabase: () => initializeDatabase,
   initializeSchema: () => initializeSchema,
   migrateTurnCitationsToEdges: () => migrateTurnCitationsToEdges,
+  normaliseTurnTagsInvariant: () => normaliseTurnTagsInvariant,
   planMainAgentEdgesCutover: () => planMainAgentEdgesCutover,
   retireLegacyPendingNoteDebts: () => retireLegacyPendingNoteDebts,
-  rollbackMainAgentEdgesCutover: () => rollbackMainAgentEdgesCutover,
   runLaneModelV12EdgeMigration: () => runLaneModelV12EdgeMigration,
   runMainAgentEdgesCutover: () => runMainAgentEdgesCutover
 });
@@ -14084,7 +14070,7 @@ function memoryEdgesPostCutoverTableDdl(tableName) {
   );
 `;
 }
-function rebuildTurnsForTagsInvariant(db, mode) {
+function rebuildTurnsForTagsInvariant(db) {
   const carriedColumns = presentConditionalTurnsColumns(db);
   const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
   const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
@@ -14119,9 +14105,9 @@ function rebuildTurnsForTagsInvariant(db, mode) {
     db,
     [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
     ["cites_recorded", "election_tier"],
-    `rebuildTurnsForTagsInvariant(${mode})`
+    "rebuildTurnsForTagsInvariant"
   );
-  const tagsColumnDdl = mode === "enforce" ? "tags TEXT NOT NULL DEFAULT '[]'" : "tags TEXT";
+  const tagsColumnDdl = "tags TEXT NOT NULL DEFAULT '[]'";
   const columnList = `
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
@@ -14192,9 +14178,7 @@ ${carriedColumnDdl}
   `);
   db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
   db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
-  if (mode === "enforce") {
-    db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
-  }
+  db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
 }
 function reexecArchivedTurnsTriggers(db) {
   const archived = db.query(
@@ -14220,7 +14204,7 @@ function ensureTurnsTagsInvariant(db) {
     try {
       runWriteTransaction(db, () => {
         db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run();
-        rebuildTurnsForTagsInvariant(db, "enforce");
+        rebuildTurnsForTagsInvariant(db);
       });
     } finally {
       db.exec("PRAGMA foreign_keys = ON;");
@@ -14228,6 +14212,73 @@ function ensureTurnsTagsInvariant(db) {
     return;
   }
   db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
+}
+function normaliseTurnTagsInvariant(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
+  if (!hasTable3(db, "turns") || !hasColumn2(db, "turns", "tags")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT)) {
+    return;
+  }
+  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
+  const normalisedTurns = runWriteTransaction(db, () => {
+    if (hasMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT)) {
+      return /* @__PURE__ */ new Set();
+    }
+    const idsOf = (where) => db.query(`SELECT id FROM turns WHERE ${where}`).all().map((row) => row.id);
+    const nullTurns = idsOf("tags IS NULL");
+    const nonArrayTurns = idsOf(
+      "tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')"
+    );
+    const nonStringTurns = db.query(
+      `SELECT id FROM turns t
+          WHERE tags IS NOT NULL AND json_valid(tags) AND json_type(tags) = 'array'
+            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE type <> 'text')`
+    ).all().map((row) => row.id);
+    const touched = /* @__PURE__ */ new Set([...nullTurns, ...nonArrayTurns, ...nonStringTurns]);
+    const archiveTags = db.query(
+      `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE} (turn_id, tags)
+       SELECT id, tags FROM turns WHERE id = ?`
+    );
+    const archiveMembership = hasTable3(db, "segment_members") ? db.query(
+      `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE}
+             (segment_id, turn_id, created_at_epoch)
+           SELECT segment_id, turn_id, created_at_epoch FROM segment_members WHERE turn_id = ?`
+    ) : null;
+    for (const turnId of touched) {
+      archiveTags.run(turnId);
+      archiveMembership?.run(turnId);
+    }
+    archiveTurnStamps(db, touched, ["tags"]);
+    db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run();
+    db.query(
+      `UPDATE turns SET tags = '[]'
+        WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`
+    ).run();
+    db.query(
+      `UPDATE turns
+          SET tags = (SELECT json_group_array(value) FROM json_each(turns.tags) WHERE type = 'text')
+        WHERE json_valid(tags) AND json_type(tags) = 'array'
+          AND EXISTS (SELECT 1 FROM json_each(turns.tags) WHERE type <> 'text')`
+    ).run();
+    for (const turnId of [...touched].sort((a, b) => a - b)) {
+      stampField(db, "turn", turnId, "tags", MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
+    }
+    const receipt = {
+      nullToEmpty: nullTurns.length,
+      nonArrayToEmpty: nonArrayTurns.length,
+      nonStringMembersDropped: nonStringTurns.length,
+      turnsChanged: touched.size
+    };
+    writeMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT, nowEpoch, receipt);
+    return touched;
+  });
+  if (normalisedTurns.size > 0) {
+    repairStaleSegmentFacets(db);
+    for (const turnId of normalisedTurns) {
+      reindexTurnFromDb(db, turnId);
+    }
+  }
 }
 function cutoverRowToMemoryEdge(row) {
   return {
@@ -14253,17 +14304,18 @@ function planMainAgentEdgesCutover(rows, facts) {
     coveragePromoted: 0,
     redundantCleared: 0,
     invalidCleared: 0,
-    ambiguousDeleted: 0,
     wordlessDeleted: 0
   };
   const byPair = /* @__PURE__ */ new Map();
+  const rawRowsPerPair = /* @__PURE__ */ new Map();
   for (const row of rows) {
+    const key = `${row.citingKind}:${row.citingId}>${row.citedKind}:${row.citedId}`;
+    rawRowsPerPair.set(key, (rawRowsPerPair.get(key) ?? 0) + 1);
     if (!isRelationClass(row.relationClass)) {
       dispositions.set(row.id, "deleted-wordless");
       counts.wordlessDeleted += 1;
       continue;
     }
-    const key = `${row.citingKind}:${row.citingId}>${row.citedKind}:${row.citedId}`;
     const bucket = byPair.get(key);
     if (bucket) {
       bucket.push(row);
@@ -14273,15 +14325,18 @@ function planMainAgentEdgesCutover(rows, facts) {
   }
   const lanesOf = (turnId) => facts.get(turnId)?.lanes ?? [];
   const survivors = [];
-  for (const group of byPair.values()) {
+  for (const [pairKey2, group] of byPair) {
     const winner = selectLogicalEdgeRow(group.map(cutoverRowToMemoryEdge));
     const winnerRow = group.find((row) => row.id === winner.id);
+    const collapsed = (rawRowsPerPair.get(pairKey2) ?? 1) > 1;
+    if (collapsed) {
+      counts.foldedPairs += 1;
+    }
     let relationCoverage = winnerRow.relationCoverage;
     let tailTag = winnerRow.tailTag;
     let headTag = winnerRow.headTag;
     let rewritten = false;
     if (group.length > 1) {
-      counts.foldedPairs += 1;
       counts.foldedRowsDeleted += group.length - 1;
       const classes = new Set(group.map((row) => `${row.relationClass}/${row.relationCoverage}`));
       if (classes.size > 1) {
@@ -14333,14 +14388,6 @@ function planMainAgentEdgesCutover(rows, facts) {
     };
     tailTag = clearSide(tailTag, winnerRow.citingId);
     headTag = clearSide(headTag, winnerRow.citedId);
-    const tailAmbiguous = tailTag === "" && lanesOf(winnerRow.citingId).length >= 2;
-    const headAmbiguous = headTag === "" && lanesOf(winnerRow.citedId).length >= 2;
-    if (tailAmbiguous || headAmbiguous) {
-      dispositions.set(winner.id, "deleted-ambiguous");
-      counts.ambiguousDeleted += 1;
-      stampedCiters.add(winnerRow.citingId);
-      continue;
-    }
     dispositions.set(winner.id, rewritten ? "rewritten" : "kept");
     if (rewritten || group.length > 1) {
       stampedCiters.add(winnerRow.citingId);
@@ -14464,56 +14511,8 @@ function runMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3), n
           }
         }
       }
-      for (const table of [
-        MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE
-      ]) {
-        db.query(`DELETE FROM ${table}`).run();
-      }
-      db.query("DELETE FROM migration_receipts WHERE name = ?").run(
-        MAIN_AGENT_EDGES_CUTOVER_RECEIPT
-      );
       archiveTableDdl(db, "memory_edges");
       archiveTableDdl(db, "turns");
-      const nullTurns = db.query("SELECT id FROM turns WHERE tags IS NULL").all().map((row) => row.id);
-      const nonArrayTurns = db.query(
-        `SELECT id FROM turns
-            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`
-      ).all().map((row) => row.id);
-      const nonStringTurns = db.query(
-        `SELECT id FROM turns t
-            WHERE tags IS NOT NULL AND json_valid(tags) AND json_type(tags) = 'array'
-              AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE type <> 'text')`
-      ).all().map((row) => row.id);
-      const normalisedTurns = /* @__PURE__ */ new Set([...nullTurns, ...nonArrayTurns, ...nonStringTurns]);
-      const archiveTags = db.query(
-        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE} (turn_id, tags)
-         SELECT id, tags FROM turns WHERE id = ?`
-      );
-      const archiveMembership = db.query(
-        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE}
-           (segment_id, turn_id, created_at_epoch)
-         SELECT segment_id, turn_id, created_at_epoch FROM segment_members WHERE turn_id = ?`
-      );
-      for (const turnId of normalisedTurns) {
-        archiveTags.run(turnId);
-        archiveMembership.run(turnId);
-      }
-      const nullToEmpty = db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run().changes;
-      const nonArrayToEmpty = db.query(
-        `UPDATE turns SET tags = '[]'
-            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`
-      ).run().changes;
-      const nonStringMembersDropped = db.query(
-        `UPDATE turns
-              SET tags = (SELECT json_group_array(value) FROM json_each(turns.tags) WHERE type = 'text')
-            WHERE json_valid(tags) AND json_type(tags) = 'array'
-              AND EXISTS (SELECT 1 FROM json_each(turns.tags) WHERE type <> 'text')`
-      ).run().changes;
       const rows = db.query(
         `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
                   cited_kind AS citedKind, cited_id AS citedId,
@@ -14554,12 +14553,8 @@ function runMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3), n
         );
       }
       archiveTurnStamps(db, plan.stampedCiters, ["relations"]);
-      archiveTurnStamps(db, normalisedTurns, ["tags"]);
       for (const citerId of [...plan.stampedCiters].sort((a, b) => a - b)) {
         stampTurnRelationsRevision(db, citerId, MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
-      }
-      for (const turnId of [...normalisedTurns].sort((a, b) => a - b)) {
-        stampField(db, "turn", turnId, "tags", MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
       }
       const rowsBefore = rows.length;
       db.exec(memoryEdgesPostCutoverTableDdl("memory_edges_post_cutover"));
@@ -14619,7 +14614,7 @@ function runMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3), n
         );
       }
       const sideIndexRows = countMemoryEdgeSideTagRows(db);
-      rebuildTurnsForTagsInvariant(db, "enforce");
+      rebuildTurnsForTagsInvariant(db);
       reexecArchivedTurnsTriggers(db);
       restoreArchivedSequence(db, "turns");
       const violations = db.query("PRAGMA foreign_key_check").all();
@@ -14630,12 +14625,6 @@ function runMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3), n
       }
       const writeGateSequence = snapshotWriteGateSequence(db);
       const receipt = {
-        tagsNormalised: {
-          nullToEmpty,
-          nonArrayToEmpty,
-          nonStringMembersDropped,
-          turnsChanged: normalisedTurns.size
-        },
         ...plan.counts,
         rowsBefore,
         rowsAfter,
@@ -14649,143 +14638,14 @@ function runMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3), n
       writeMigrationReceipt(db, MAIN_AGENT_EDGES_CUTOVER_RECEIPT, nowEpoch, receipt);
       db.query(
         `INSERT INTO ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
-           (id, status, applied_at_epoch, write_gate_sequence, rolled_back_at_epoch)
-         VALUES (1, 'complete', ?, ?, NULL)
+           (id, status, applied_at_epoch, write_gate_sequence)
+         VALUES (1, 'complete', ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-           status = 'complete', applied_at_epoch = excluded.applied_at_epoch,
-           write_gate_sequence = excluded.write_gate_sequence, rolled_back_at_epoch = NULL`
+           applied_at_epoch = excluded.applied_at_epoch,
+           write_gate_sequence = excluded.write_gate_sequence`
       ).run(nowEpoch, writeGateSequence);
       return { ran: "cut-over", receipt };
     });
-  } finally {
-    db.exec("PRAGMA foreign_keys = ON;");
-    if (!memoryEdgesPredatesCutover(db)) {
-      repairStaleSegmentFacets(db);
-      for (const row of db.query(
-        `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`
-      ).all()) {
-        reindexTurnFromDb(db, row.turnId);
-      }
-    }
-  }
-}
-function rollbackMainAgentEdgesCutover(db, nowEpoch = Math.floor(Date.now() / 1e3)) {
-  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
-  const state = readMainAgentEdgesCutoverState(db);
-  if (state?.status === "rolled_back") {
-    return { ok: false, refusal: { reason: "already-rolled-back" } };
-  }
-  if (state === null || memoryEdgesPredatesCutover(db)) {
-    return { ok: false, refusal: { reason: "not-cut-over" } };
-  }
-  const stampsAfterBoundary = db.query(
-    `SELECT COUNT(*) AS n FROM write_gate_stamps
-          WHERE entity_type = 'turn' AND field IN ('relations', 'tags') AND write_sequence > ?`
-  ).get(state.writeGateSequence)?.n ?? 0;
-  const archivedMaxId = db.query(
-    `SELECT MAX(id) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`
-  ).get()?.n ?? 0;
-  const edgeRowsAfterBoundary = db.query("SELECT COUNT(*) AS n FROM memory_edges WHERE id > ?").get(archivedMaxId)?.n ?? 0;
-  if (stampsAfterBoundary > 0 || edgeRowsAfterBoundary > 0) {
-    return {
-      ok: false,
-      refusal: { reason: "written-since", stampsAfterBoundary, edgeRowsAfterBoundary }
-    };
-  }
-  db.exec("PRAGMA foreign_keys = OFF;");
-  try {
-    const outcome = runWriteTransaction(db, () => {
-      const tableDdl = db.query(
-        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
-            WHERE kind = 'table' AND name = 'memory_edges'`
-      ).get();
-      if (!tableDdl) {
-        throw new Error("main-agent-edges rollback: the archived memory_edges DDL is missing");
-      }
-      db.exec("DROP TABLE memory_edges");
-      db.exec(tableDdl.sql);
-      const edgesRestored = db.query(
-        `INSERT INTO memory_edges
-             (id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-              tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-           SELECT id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-                  tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch
-             FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY id`
-      ).run().changes;
-      for (const index of db.query(
-        `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
-            WHERE kind = 'index' AND tbl_name = 'memory_edges' AND sql IS NOT NULL`
-      ).all()) {
-        db.exec(index.sql);
-      }
-      restoreArchivedSequence(db, "memory_edges");
-      rebuildMemoryEdgeSideTagsIndexCore(db);
-      rebuildTurnsForTagsInvariant(db, "relax");
-      reexecArchivedTurnsTriggers(db);
-      restoreArchivedSequence(db, "turns");
-      const archivedTurns = db.query(
-        `SELECT turn_id AS turnId, tags FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`
-      ).all();
-      const restoreTags = db.query(
-        "UPDATE turns SET tags = ? WHERE id = ?"
-      );
-      const clearMembership = db.query(
-        "DELETE FROM segment_members WHERE turn_id = ?"
-      );
-      const restoreMembership = db.query(
-        `INSERT OR REPLACE INTO segment_members (segment_id, turn_id, created_at_epoch)
-         SELECT segment_id, turn_id, created_at_epoch
-           FROM ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE} WHERE turn_id = ?`
-      );
-      for (const turn of archivedTurns) {
-        restoreTags.run(turn.tags, turn.turnId);
-        clearMembership.run(turn.turnId);
-        restoreMembership.run(turn.turnId);
-      }
-      const deleteStamp = db.query(
-        "DELETE FROM write_gate_stamps WHERE entity_type = ? AND entity_id = ? AND field = ?"
-      );
-      const restoreStamp = db.query(
-        `INSERT INTO write_gate_stamps
-           (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      );
-      for (const stamp of db.query(
-        `SELECT entity_type AS entityType, entity_id AS entityId, field, writer,
-                  write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
-             FROM ${MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE}`
-      ).all()) {
-        deleteStamp.run(stamp.entityType, stamp.entityId, stamp.field);
-        if (stamp.writer !== null) {
-          restoreStamp.run(
-            stamp.entityType,
-            stamp.entityId,
-            stamp.field,
-            stamp.writer,
-            stamp.writeSequence,
-            stamp.writtenAtEpoch
-          );
-        }
-      }
-      const violations = db.query("PRAGMA foreign_key_check").all();
-      if (violations.length > 0) {
-        throw new Error(
-          `main-agent-edges rollback left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`
-        );
-      }
-      db.query(
-        `UPDATE ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
-            SET status = 'rolled_back', rolled_back_at_epoch = ? WHERE id = 1`
-      ).run(nowEpoch);
-      return { ok: true, edgesRestored, turnsRestored: archivedTurns.length };
-    });
-    repairStaleSegmentFacets(db);
-    for (const row of db.query(
-      `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`
-    ).all()) {
-      reindexTurnFromDb(db, row.turnId);
-    }
-    return outcome;
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -14834,6 +14694,7 @@ function initializeSchema(db) {
   ensureTurnTypeMultiValueColumn(db);
   retireTurnCitesRecordedColumn(db);
   ensureTurnEraGrantColumn(db);
+  normaliseTurnTagsInvariant(db);
   retireTopicRegistry(db);
   repairDerivedSegmentFacets(db);
   runLaneRegistryMigration(db);
@@ -14892,13 +14753,7 @@ function cutoverNamedTaskMembershipTags(db, nowEpoch = Math.floor(Date.now() / 1
       if (typeof taskTag !== "string" || taskTag === "") {
         continue;
       }
-      let turnTags;
-      try {
-        const parsed = JSON.parse(row.turnTags ?? "[]");
-        turnTags = Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
-      } catch {
-        turnTags = [];
-      }
+      const turnTags = readTurnTags(row.turnTags);
       if (turnTags.includes(taskTag)) {
         continue;
       }
@@ -16172,6 +16027,7 @@ var init_schema = __esm({
     init_search();
     init_segments();
     init_turn_tag_gate();
+    init_turn_tags();
     init_relation_class();
     init_segment_era();
     MEMORY_FTS_DDL = `
