@@ -537,3 +537,46 @@ describe("single-lane adjacency pagination on the route (ticket 05)", () => {
     expect(list).not.toContain('id="E' + segmentId + '/L*", page=2');
   });
 });
+
+/**
+ * ticket 15 (S15069/T2461, missing pins): a BLANK/BLANK edge between two
+ * turns that are each the SOLE current member of one lane, addressed through
+ * the CANONICAL route (`E<n>/#<tag>`) rather than through the render
+ * function directly — proving the disagreement between resolved and stored
+ * attribution survives the addressing layer too, not just the render it
+ * eventually calls (the same page is pinned more deeply, by header field, in
+ * `tests/mcp/timeline.lane-adjacency.test.ts`).
+ */
+describe("E<n>/#<tag> route: a BLANK/BLANK edge between two SOLE lane members still counts (main-agent-edges ticket 15)", () => {
+  test("the canonical address's page counts the edge as forward even though neither side stores a tag", () => {
+    const sessionId = seedSession("lane-view-derived-blank");
+    const segment = createSegment(db, { title: "derived-blank", nowEpoch: NOW });
+    const t1 = insertTurn(sessionId, 1);
+    const t2 = insertTurn(sessionId, 2);
+    addSegmentMembers(db, segment.id, [t1, t2], NOW);
+    insertLane(db, segment.id, "derived-only", NOW);
+    claimLaneTags(t1, ["derived-only"]);
+    claimLaneTags(t2, ["derived-only"]);
+    settleWindow(sessionId, 1, 2);
+
+    // Undeclared on both sides — `deriveSideTags` is NOT used here on purpose,
+    // so the row stores blank tags rather than the lane word.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t2 },
+          cited: { kind: "turn", id: t1 },
+          ...wordEdgeClass("extends"),
+          provenance: "asserted",
+          tailTag: "",
+          headTag: "",
+        },
+      ],
+      NOW,
+    );
+
+    const output = timelineQuery(db, { id: `E${segment.id}/#derived-only` });
+    expect(output).toContain("2 settled · 1 forward");
+  });
+});

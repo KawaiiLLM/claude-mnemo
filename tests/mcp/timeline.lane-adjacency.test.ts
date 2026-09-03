@@ -1318,3 +1318,35 @@ describe("lane view: read grants", () => {
     db.close();
   });
 });
+
+/**
+ * ticket 15 (S15069/T2461, missing pins): a BLANK/BLANK edge between two
+ * turns that are each the SOLE current member of one lane — every fixture
+ * elsewhere in this file declares a real tag on at least one side.
+ * `loadFrontierEdges`'s resolver derives the lane on both ends from
+ * membership alone, so the ruled table counts the edge as forward and folds
+ * both members into one island. Reverting the loader to the stored column
+ * would report neither side as attributed and drop the edge from the page.
+ */
+describe("ruled adjacency table: a BLANK/BLANK edge between two SOLE lane members still counts (main-agent-edges ticket 15)", () => {
+  test("both sides derive the lane from membership alone — forward count and island both see it", () => {
+    const db = makeDb();
+    const s1 = makeSession(db, "adjacency-derived-blank");
+    const task = makeTask(db, "Adjacency Derived Blank", "adjacency-derived-blank-task");
+    insertLane(db, task.id, "derived-only", BASE_EPOCH);
+
+    const t1 = makeTurn(db, s1, { prompt: 1, epoch: BASE_EPOCH + 100, title: "sole member one", tags: ["derived-only"] });
+    const t2 = makeTurn(db, s1, { prompt: 2, epoch: BASE_EPOCH + 200, title: "sole member two", tags: ["derived-only"] });
+    addSegmentMembers(db, task.id, [t1, t2], BASE_EPOCH);
+    settleWindow(db, s1, 1, 2);
+
+    makeEdge(db, t2, t1, "extends", "", "");
+
+    const parsed = parseLanePage(renderLane(db, task.id, "derived-only"));
+    expect(parsed.header.settled).toBe(2);
+    expect(parsed.header.forward).toBe(1);
+    expect(parsed.header.islands).toBe(1);
+    expect(parsed.header.singletons).toBe(0);
+    db.close();
+  });
+});
