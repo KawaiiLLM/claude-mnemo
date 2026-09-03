@@ -624,7 +624,7 @@ describe("renderLaneDigraph -- CLI-only, glyphs the ticket names", () => {
     const lines = digraph.split("\n");
     expect(lines[0]).toBe("ERRORS (0)");
     expect(lines.some((line) => line.startsWith("WARNINGS (1)"))).toBe(true);
-    const member = lines.find((line) => line.includes("T41"))!;
+    const member = lines.find((line) => line.includes("●") && line.includes("T41"))!;
     expect(member).toContain("⚠[E6]");
     expect(member).not.toContain("✗");
     expect(digraph).not.toContain("✗[E6]");
