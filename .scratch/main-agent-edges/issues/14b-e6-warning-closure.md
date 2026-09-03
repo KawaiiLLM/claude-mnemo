@@ -110,3 +110,19 @@ note-settlement-sdk-query.ts:1971:     // the order they always ran (an E3/E4/E6
 ```
 
 All pre-existing mentions not touched by items 1–3 above were already warning-worded or neutral from ticket 14's own landing — verified none assert E6 blocks.
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `b68b5cfe` no-ff, clean; bundles rebuilt. `npx tsc --noEmit` 0; guards green. Full `bun test`
+**4802 / 0 / 276** = 4801 + the integrator's one new gate test (`9c3b2750`); the ticket itself adds no
+test count. One more stale sentence found by my own grep and fixed here: the D9 cluster teaching in
+`note-settlement-sdk-query.ts` still said "E6 is the per-row list commit judges" → "the per-row list you
+may declare from" (no pin named the old wording; the surrounding block's tests stay green).
+
+My probe: the renderer's E6 split disabled (`=== "E5"`) → RED, "an E6 draft edge renders under WARNINGS
+… and the ERRORS block stays empty". Restored, md5 verified. Accepted, including the two extra sites the
+worker found (the commit tool's `(E4/E6)` friction example, the module-doc incident paragraph).
+Flagged and left: `renderLaneDigraph` (CLI-only, flag-gated) still prints E6 in its `ERRORS (n)` line —
+a one-line follow-up when someone next touches that renderer, not a release matter.

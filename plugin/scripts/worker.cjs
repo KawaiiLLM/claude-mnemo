@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtl8pcew" : "dev";
+var BUILD_ID = true ? "0.29.0-mtlah3zt" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -22455,9 +22455,11 @@ function renderNoteSettlementUnifiedPrompt(context, writableSet) {
     "a type emptied AFTER your transition is the NEXT window's topic-pass debt.",
     "`lane_check` still SHOWS you every E3, under the warnings, as a finding",
     "this run cannot repair.",
-    "Do not chase it and do not retype a turn to silence it. E4 and E6 anchored",
-    "on that same turn ARE yours \u2014 both are relation grammar, both are repaired",
-    "by a `declare` entry or a retraction, and both block your `commit`.",
+    "Do not chase it and do not retype a turn to silence it. E4 anchored on",
+    "that same turn IS yours \u2014 relation grammar, repaired by a `declare`",
+    "entry or a retraction, and it blocks your `commit`. E6 anchored there is",
+    "a WARNING you MAY declare \u2014 where the material you are already holding",
+    "says which lane \u2014 and MAY leave otherwise; it blocks nothing.",
     "",
     // SETTLEMENT-GATE-TAXONOMY TICKET 04 (user ruling [S15069/T2274]).
     "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING \u2014 a severed",
@@ -24907,19 +24909,28 @@ function renderCrossSegmentWarning(warning, addresses) {
 }
 function renderLaneCheckerReports(result, anchorAddresses) {
   const sections = [];
+  const blockingErrors = result.errors.filter((error) => error.class !== "E6");
+  const ambiguousSides = result.errors.filter((error) => error.class === "E6");
   sections.push(ERRORS_SECTION_HEADER);
-  const shownErrors = errorInstanceLines(result.errors, anchorAddresses);
-  if (result.errors.length === 0) {
+  const shownErrors = errorInstanceLines(blockingErrors, anchorAddresses);
+  if (blockingErrors.length === 0) {
     sections.push("(none)");
   } else {
     sections.push(
-      result.errors.length + " error(s)" + cappedCountSuffix(result.errors.length, shownErrors.length)
+      blockingErrors.length + " error(s)" + cappedCountSuffix(blockingErrors.length, shownErrors.length)
     );
     sections.push(...shownErrors);
   }
   sections.push("");
   sections.push(WARNINGS_SECTION_HEADER);
   sections.push(LANE_CHECK_WARNING_NOTICE);
+  if (ambiguousSides.length > 0) {
+    const shownAmbiguous = errorInstanceLines(ambiguousSides, anchorAddresses);
+    sections.push(
+      ambiguousSides.length + " ambiguous side(s) (E6) -- warning; declare it or leave it, never blocks commit" + cappedCountSuffix(ambiguousSides.length, shownAmbiguous.length)
+    );
+    sections.push(...shownAmbiguous);
+  }
   sections.push("");
   sections.push("## Report 1 -- lane statistics");
   if (result.lanes.length === 0) {

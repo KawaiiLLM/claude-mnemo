@@ -561,7 +561,7 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "your own settling queue, since membership is a NODE fact and an edge only " +
   "gets its two sides from you. Those same rows are ALSO listed one by one as " +
   "E6 above, on purpose and not as a double count: the cluster tells you the " +
-  "SCALE of what is unattributed, E6 is the per-row list commit judges. " +
+  "SCALE of what is unattributed, E6 is the per-row list you may declare from. " +
   "LANE PROLIFERATION is a task " +
   "declaring more lanes than max(1, 0.05 x its member turns). INDEX " +
   "GRANULARITY names a turn whose whole convergence batch is ONE node — a " +
