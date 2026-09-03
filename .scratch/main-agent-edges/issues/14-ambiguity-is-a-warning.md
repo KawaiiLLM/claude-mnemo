@@ -251,3 +251,31 @@ absence (`ambiguity-is-a-warning.test.ts`'s CHECK-migration fixture and its drop
   `./note-settlement`. No logic change.
 - `tests/db/lane-checker-load.test.ts`, `tests/mcp/timeline*.test.ts`, `tests/db/lanes.merge.test.ts`,
   `tests/shared/relation-word-release-gate.test.ts` — NOT touched (ticket 15's files).
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `e2669f64` no-ff, clean beside ticket 15 (the gate's literal-keyed allowlist survived the
+teaching edits untouched). Bundles rebuilt. `npx tsc --noEmit` 0; guards green. Full `bun test`
+**4801 / 0 / 276**: 4802 (after 15) + 2 (the integrator's gate rewrite, `fa1207d4`) − 3 (this ticket's
+net) = 4801, accounted. Closure grep over `src/` for the seven deleted names: 0 live hits (absence
+comments and the `DROP TABLE IF EXISTS` statements only).
+
+My probes, on sites the worker's six did not use:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `narrowWritableProvenanceCheck`: the filtered copy keeps every row (retired provenances survive the rebuild) | RED — "the CHECK migration rebuilds an old snapshot table and drops the retired rows" |
+| I2 | the bounded address list reports the shown count instead of the remainder | RED ×2 (the P2-D bound tests) |
+
+Restored by `cp`, md5 verified. Accepted. The worker's two keeps are right and inside the ticket's
+"only it uses" line: the claim monitor on both dispatch shapes serves ordinary lease loss (not
+invalidation), and `resetNoteSettlementJobToStageOne` is the cutover fence's own tool (relocated to
+`note-settlement.ts`, renamed). One half-mechanism it named survives and needs a later subtraction:
+`settlementWritePermissions`/`settlementTurnPermissions` and the facade's field gate can no longer
+answer `fields: false` — every surviving provenance carries both authorities — so the refusal branch is
+unreachable; deleting it reaches `write-gate.ts` and the finding-class rule's condition 3. Recorded as
+follow-up 16, not built here. The six suites that used a draft edge as their generic "blocking finding"
+were re-aimed at E4 rather than left vacuous — the right call; one byte-shape fixture keeps its `[E6]`
+text for its measured length.
