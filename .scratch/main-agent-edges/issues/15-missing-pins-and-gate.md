@@ -77,3 +77,34 @@ UNVERIFIED: whether the 326 `typecheck:tests` baseline is itself expected to the
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_017wgBfgUE6NJuqgHWpbVi2B
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `c101631b` no-ff, clean; bundles rebuilt. `npx tsc --noEmit` 0. Full `bun test` **4802 / 0 / 276**
+against 4794/0/276 — the worker's +8 exactly. The three reader pins and the merge-survivor pin are
+accepted as landed.
+
+**The gate was rewritten by the integrator before acceptance.** The worker followed the ticket's word
+list literally and the result was a 91-entry allowlist keyed on (file, line): 66 of the entries were
+`verify` (a LIVE class), `narrow`/`ground` (English), and every line of `schema.ts`'s migration history —
+a maintenance sink that would have gone stale on ticket 14's first teaching edit, and the opposite of the
+user's "不要引入复杂的机制". The ticket's regex was my mistake, not the worker's. The gate now:
+matches the EIGHT retired stored words only (`override narrows extends consume grounds indexes verifies
+refutes`), whole-word; exempts `src/db/schema.ts` as a file (the migration history, with a test that the
+exemption still earns its place); allowlists **10** occurrences keyed on (file, EXACT literal) with five
+reasons (English "verifies" ×5, tokenizer self-test ×2, topic stopword, v12 merge target, frontier
+label). The injection test and the comment-stripper test are kept; a new test pins that `verify`,
+`narrow the scope`, `ground truth`, `extend the window` are NOT hits and `write override edges` IS.
+
+My probes:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | a real teaching file gains `"an override edge here"` | RED — the gate's main test |
+| I2 | `timeline.ts` loader reads `row.tailTag/headTag` instead of the resolved lanes | RED ×3 — the three new blank/blank pins (digest, adjacency, lane page) |
+
+Restored by `cp`, md5 verified. Flagged by the worker and agreed: the three reader fixtures use the
+derived/blank scenario only, because an endpoint's own stored side cannot be `invalid` for a lane it is
+scanned as a candidate member of; the resolver-level `invalid` pin (ticket 02) covers that outcome.
