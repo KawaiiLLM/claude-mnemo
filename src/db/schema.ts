@@ -15,11 +15,11 @@ import {
   MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL,
   MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE,
   MAIN_AGENT_EDGES_CUTOVER_WRITER,
-  readMainAgentEdgesCutoverState,
+  MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT,
   type CutoverEdgeDisposition,
   type MainAgentEdgesCutoverOutcome,
   type MainAgentEdgesCutoverReceipt,
-  type MainAgentEdgesRollbackOutcome,
+  type TurnTagsNormalisationReceipt,
 } from "./main-agent-edges-cutover";
 import {
   NOTE_SETTLEMENT_LEASE_MS,
@@ -65,6 +65,7 @@ import { runSegmentOneTagMigration } from "./segment-one-tag-migration";
 import { rebuildSearchIndex, reindexAllSegments } from "./search";
 import { recomputeSegmentFacets, repairStaleSegmentFacets, writeMembershipTags } from "./segments";
 import { loadSegmentTagIndex } from "./turn-tag-gate";
+import { readTurnTags } from "./turn-tags";
 import {
   isRelationClass,
   type RelationClass,
@@ -4887,8 +4888,9 @@ const TURNS_TAGS_INVARIANT_TRIGGER_NAMES = [
 ] as const;
 
 /**
- * Rebuild `turns` with `tags` either ENFORCED (`NOT NULL DEFAULT '[]'` plus the
- * two triggers — the cutover) or RELAXED (nullable, no trigger — the rollback).
+ * Rebuild `turns` with the tags invariant ENFORCED: `NOT NULL DEFAULT '[]'`
+ * plus the two triggers. (A `relax` mode stood beside it for the rollback tool
+ * and went with it — ticket 12; there is one shape now, so there is no mode.)
  * Same create/copy/drop/rename shape as `retireTurnCitesRecordedColumn`, same
  * canonical column list, same conditional-column carry and the same
  * unexpected-column guard, so a column this codebase does not know about is
@@ -4898,7 +4900,7 @@ const TURNS_TAGS_INVARIANT_TRIGGER_NAMES = [
  * The `type` CHECK text is copied verbatim: `turnsTypeColumnIsStale` probes
  * for it, and a rebuild that paraphrased it would re-arm that migration.
  */
-function rebuildTurnsForTagsInvariant(db: Database, mode: "enforce" | "relax"): void {
+function rebuildTurnsForTagsInvariant(db: Database): void {
   const carriedColumns = presentConditionalTurnsColumns(db);
   const carriedColumnDdl = carriedColumns.map((column) => `          ${column.ddl},`).join("\n");
   const carriedColumnNames = carriedColumns.map((column) => column.name).join(", ");
@@ -4916,9 +4918,9 @@ function rebuildTurnsForTagsInvariant(db: Database, mode: "enforce" | "relax"): 
     db,
     [...canonicalColumns, ...carriedColumns.map((c) => c.name)],
     ["cites_recorded", "election_tier"],
-    `rebuildTurnsForTagsInvariant(${mode})`,
+    "rebuildTurnsForTagsInvariant",
   );
-  const tagsColumnDdl = mode === "enforce" ? "tags TEXT NOT NULL DEFAULT '[]'" : "tags TEXT";
+  const tagsColumnDdl = "tags TEXT NOT NULL DEFAULT '[]'";
   const columnList = `
           id, session_id, prompt_number, content_prompt_id, was_interrupted,
           was_rolled_back, status, user_prompt, assistant_response,
@@ -4994,9 +4996,7 @@ ${carriedColumnDdl}
   // From the SHARED constants, never a second copy of their bodies.
   db.exec(MEMORY_EDGES_PRUNE_DELETED_TURN_DDL);
   db.exec(SEGMENT_FACET_STALE_TRIGGERS_DDL);
-  if (mode === "enforce") {
-    db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
-  }
+  db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
 }
 
 /** Re-create every archived trigger on `turns` that the rebuild's own shared constants did not already put back. */
@@ -5039,7 +5039,7 @@ function ensureTurnsTagsInvariant(db: Database): void {
     try {
       runWriteTransaction(db, () => {
         db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run();
-        rebuildTurnsForTagsInvariant(db, "enforce");
+        rebuildTurnsForTagsInvariant(db);
       });
     } finally {
       db.exec("PRAGMA foreign_keys = ON;");
@@ -5047,6 +5047,132 @@ function ensureTurnsTagsInvariant(db: Database): void {
     return;
   }
   db.exec(TURNS_TAGS_INVARIANT_TRIGGERS_DDL);
+}
+
+/**
+ * TRANSFORM 1 OF THE CUTOVER (main-agent-edges spec D9), LIFTED OUT AND RUN
+ * FIRST (ticket 12, P1-1/P2-B).
+ *
+ * `turns.tags` is a JSON array of strings — NULL means "no tags", anything
+ * else malformed means nothing at all. `readTurnTags` (db/turn-tags.ts) is THE
+ * parser and it THROWS on a malformed value, deliberately, so a defect is
+ * found where it was written. That leaves one question: who normalises the
+ * legacy bytes, and when.
+ *
+ * It cannot be the D9 one-shot, which is where it used to live. That one-shot
+ * is FENCED on the settlement claim set and runs LAST, after
+ * `cutoverNamedTaskMembershipTags` — which reads `turns.tags` and writes
+ * through `writeMembershipTags`, i.e. through the strict parser. A database
+ * with one malformed row therefore threw in the membership cutover before the
+ * normalisation it needed could run, and while the fence held every
+ * `loadEndpointLaneFacts` lane read threw with it. The migration that fixes
+ * the value has to run BEFORE any migration or reader that parses it, and on
+ * every open, fenced or not. So it runs here, once, receipted.
+ *
+ * The rule is D9's, unchanged: NULL -> `[]`, invalid or non-array -> `[]`,
+ * non-string members dropped. The old bytes and the `segment_members` rows of
+ * every turn it touches go into the cutover's own archive tables (that is what
+ * those tables are for) and each touched turn gets a `tags` stamp under the
+ * migration writer, so a writer holding a pre-normalisation read grant learns
+ * its value moved. What this step does NOT do is the DDL half — the NOT NULL
+ * column and the two triggers; those are a `turns` rebuild and stay in the
+ * one-shot, where the rest of the rebuild is.
+ *
+ * Receipt-guarded, so it is exactly one sweep per database and a re-open is a
+ * no-op even though the underlying UPDATEs are idempotent.
+ */
+export function normaliseTurnTagsInvariant(
+  db: Database,
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): void {
+  if (!hasTable(db, "turns") || !hasColumn(db, "turns", "tags")) {
+    return;
+  }
+  if (hasMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT)) {
+    return;
+  }
+  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
+
+  const normalisedTurns = runWriteTransaction(db, (): ReadonlySet<number> => {
+    if (hasMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT)) {
+      return new Set<number>();
+    }
+    const idsOf = (where: string): number[] =>
+      db
+        .query<{ id: number }, []>(`SELECT id FROM turns WHERE ${where}`)
+        .all()
+        .map((row) => row.id);
+    const nullTurns = idsOf("tags IS NULL");
+    const nonArrayTurns = idsOf(
+      "tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')",
+    );
+    const nonStringTurns = db
+      .query<{ id: number }, []>(
+        `SELECT id FROM turns t
+          WHERE tags IS NOT NULL AND json_valid(tags) AND json_type(tags) = 'array'
+            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE type <> 'text')`,
+      )
+      .all()
+      .map((row) => row.id);
+    const touched = new Set([...nullTurns, ...nonArrayTurns, ...nonStringTurns]);
+
+    const archiveTags = db.query<unknown, [number]>(
+      `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE} (turn_id, tags)
+       SELECT id, tags FROM turns WHERE id = ?`,
+    );
+    const archiveMembership = hasTable(db, "segment_members")
+      ? db.query<unknown, [number]>(
+          `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE}
+             (segment_id, turn_id, created_at_epoch)
+           SELECT segment_id, turn_id, created_at_epoch FROM segment_members WHERE turn_id = ?`,
+        )
+      : null;
+    for (const turnId of touched) {
+      archiveTags.run(turnId);
+      archiveMembership?.run(turnId);
+    }
+    archiveTurnStamps(db, touched, ["tags"]);
+
+    db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run();
+    db.query(
+      `UPDATE turns SET tags = '[]'
+        WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`,
+    ).run();
+    db.query(
+      `UPDATE turns
+          SET tags = (SELECT json_group_array(value) FROM json_each(turns.tags) WHERE type = 'text')
+        WHERE json_valid(tags) AND json_type(tags) = 'array'
+          AND EXISTS (SELECT 1 FROM json_each(turns.tags) WHERE type <> 'text')`,
+    ).run();
+
+    for (const turnId of [...touched].sort((a, b) => a - b)) {
+      stampField(db, "turn", turnId, "tags", MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
+    }
+
+    // Counted from the id sets read BEFORE the updates, never from
+    // `run().changes`: `turns` carries the segment-facet stale triggers, whose
+    // own UPDATEs land in the same change count, so a member turn was reported
+    // as two rewrites and a non-member as one. That inflation shipped with
+    // ticket 01's transform 1 and is fixed here (ticket 12) — these three
+    // numbers now sum over the same rows the archive holds.
+    const receipt: TurnTagsNormalisationReceipt = {
+      nullToEmpty: nullTurns.length,
+      nonArrayToEmpty: nonArrayTurns.length,
+      nonStringMembersDropped: nonStringTurns.length,
+      turnsChanged: touched.size,
+    };
+    writeMigrationReceipt(db, MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT, nowEpoch, receipt);
+    return touched;
+  });
+
+  // Derived state, rebuilt rather than receipted (spec D9): the facets the
+  // tags update marked stale, and the FTS rows of the turns it rewrote.
+  if (normalisedTurns.size > 0) {
+    repairStaleSegmentFacets(db);
+    for (const turnId of normalisedTurns) {
+      reindexTurnFromDb(db, turnId);
+    }
+  }
 }
 
 interface CutoverEdgeRow {
@@ -5111,11 +5237,25 @@ function cutoverRowToMemoryEdge(row: CutoverEdgeRow): MemoryEdge {
  * across the folded rows (identical duplicates are one declaration, not an
  * ambiguity; a declaration no endpoint lane supports is not a candidate).
  *
- * THE CLEARS (3, 4) and THE DELETE (5) then apply per side of every survivor,
- * single-row pairs included, in the spec's order: a declaration not among the
- * endpoint's lanes is cleared as invalid; a declaration on an endpoint in
- * fewer than two lanes is cleared as redundant; a blank side on an endpoint in
- * two or more lanes is unattributable and the edge is deleted.
+ * THE CLEARS (3, 4) then apply per side of every survivor, single-row pairs
+ * included, in the spec's order: a declaration not among the endpoint's lanes
+ * is cleared as invalid; a declaration on an endpoint in fewer than two lanes
+ * is cleared as redundant.
+ *
+ * TRANSFORM 5 DELETED NOTHING AND NOW EXISTS AS NO CODE (ruled, S15069/T2466).
+ * It used to delete a survivor whose side came out blank on a multi-lane
+ * endpoint — "unattributable". A blank side already MEANS unattributable: the
+ * readers render such an edge `ambiguous` from the side alone, so deleting the
+ * row bought no reader anything and cost the corpus 176 real relation facts on
+ * the clone. The edge is KEPT with the side blank; there is no
+ * `deleted-ambiguous` disposition and no `ambiguousDeleted` count.
+ *
+ * `foldedPairs` counts pairs whose ROW POPULATION collapsed — more than one
+ * row before, one after — over the raw rows, wordless included (ticket 12, P3).
+ * The by-class / by-sides split below stays over the CLASS-BEARING rows, which
+ * is the only population in which "the rows differ in class" is a question, so
+ * the two do not sum to `foldedPairs` when a wordless row is what made the
+ * pair a duplicate.
  */
 export function planMainAgentEdgesCutover(
   rows: readonly CutoverEdgeRow[],
@@ -5133,7 +5273,6 @@ export function planMainAgentEdgesCutover(
     | "coveragePromoted"
     | "redundantCleared"
     | "invalidCleared"
-    | "ambiguousDeleted"
     | "wordlessDeleted"
   >;
 } {
@@ -5147,18 +5286,24 @@ export function planMainAgentEdgesCutover(
     coveragePromoted: 0,
     redundantCleared: 0,
     invalidCleared: 0,
-    ambiguousDeleted: 0,
     wordlessDeleted: 0,
   };
 
   const byPair = new Map<string, CutoverEdgeRow[]>();
+  // Rows per pair over the RAW population, wordless rows included. `byPair`
+  // below holds only the class-bearing rows, and counting `foldedPairs` off
+  // that map is what made a wordless + class pair report 0 (ticket 12, P3):
+  // the pair went from two rows to one, which is a fold whatever the loser
+  // carried.
+  const rawRowsPerPair = new Map<string, number>();
   for (const row of rows) {
+    const key = `${row.citingKind}:${row.citingId}>${row.citedKind}:${row.citedId}`;
+    rawRowsPerPair.set(key, (rawRowsPerPair.get(key) ?? 0) + 1);
     if (!isRelationClass(row.relationClass)) {
       dispositions.set(row.id, "deleted-wordless");
       counts.wordlessDeleted += 1;
       continue;
     }
-    const key = `${row.citingKind}:${row.citingId}>${row.citedKind}:${row.citedId}`;
     const bucket = byPair.get(key);
     if (bucket) {
       bucket.push(row);
@@ -5170,16 +5315,20 @@ export function planMainAgentEdgesCutover(
   const lanesOf = (turnId: number): readonly string[] => facts.get(turnId)?.lanes ?? [];
   const survivors: CutoverSurvivor[] = [];
 
-  for (const group of byPair.values()) {
+  for (const [pairKey, group] of byPair) {
     const winner = selectLogicalEdgeRow(group.map(cutoverRowToMemoryEdge))!;
     const winnerRow = group.find((row) => row.id === winner.id)!;
+    // The pair held more than one row and ends with exactly this one.
+    const collapsed = (rawRowsPerPair.get(pairKey) ?? 1) > 1;
+    if (collapsed) {
+      counts.foldedPairs += 1;
+    }
     let relationCoverage = winnerRow.relationCoverage as RelationCoverageValue;
     let tailTag = winnerRow.tailTag;
     let headTag = winnerRow.headTag;
     let rewritten = false;
 
     if (group.length > 1) {
-      counts.foldedPairs += 1;
       counts.foldedRowsDeleted += group.length - 1;
       const classes = new Set(group.map((row) => `${row.relationClass}/${row.relationCoverage}`));
       if (classes.size > 1) {
@@ -5242,17 +5391,8 @@ export function planMainAgentEdgesCutover(
     tailTag = clearSide(tailTag, winnerRow.citingId);
     headTag = clearSide(headTag, winnerRow.citedId);
 
-    // Transform 5: a blank side on an endpoint in two or more lanes cannot be
-    // attributed by anyone. Deleted, receipted, counted (T2421).
-    const tailAmbiguous = tailTag === "" && lanesOf(winnerRow.citingId).length >= 2;
-    const headAmbiguous = headTag === "" && lanesOf(winnerRow.citedId).length >= 2;
-    if (tailAmbiguous || headAmbiguous) {
-      dispositions.set(winner.id, "deleted-ambiguous");
-      counts.ambiguousDeleted += 1;
-      stampedCiters.add(winnerRow.citingId);
-      continue;
-    }
-
+    // No transform 5. A blank side on a multi-lane endpoint is KEPT and reads
+    // `ambiguous`; see this function's header (ruled, S15069/T2466).
     dispositions.set(winner.id, rewritten ? "rewritten" : "kept");
     if (rewritten || group.length > 1) {
       stampedCiters.add(winnerRow.citingId);
@@ -5449,76 +5589,23 @@ export function runMainAgentEdgesCutover(
         }
       }
 
-      // ---- a rolled-back run's archive is consumed; this run's replaces it ----
-      for (const table of [
-        MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
-        MAIN_AGENT_EDGES_CUTOVER_SEQUENCE_ARCHIVE,
-      ]) {
-        db.query(`DELETE FROM ${table}`).run();
-      }
-      db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(
-        MAIN_AGENT_EDGES_CUTOVER_RECEIPT,
-      );
+      // The archive is NEVER wiped here. It used to be, so that a rolled-back
+      // run's receipt could be replaced by the next run's; with the rollback
+      // tool deleted (ticket 12) no database can re-enter the pre-cutover
+      // shape, `memoryEdgesPredatesCutover` above is the only gate, and a wipe
+      // would now destroy the tags archive the normalisation wrote EARLIER
+      // THIS OPEN.
 
       // ---- receipts: DDL and sequences, before anything is rebuilt --------
       archiveTableDdl(db, "memory_edges");
       archiveTableDdl(db, "turns");
 
-      // ---- transform 1: the tags invariant, by RAW update ------------------
-      const nullTurns = db
-        .query<{ id: number }, []>("SELECT id FROM turns WHERE tags IS NULL")
-        .all()
-        .map((row) => row.id);
-      const nonArrayTurns = db
-        .query<{ id: number }, []>(
-          `SELECT id FROM turns
-            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`,
-        )
-        .all()
-        .map((row) => row.id);
-      const nonStringTurns = db
-        .query<{ id: number }, []>(
-          `SELECT id FROM turns t
-            WHERE tags IS NOT NULL AND json_valid(tags) AND json_type(tags) = 'array'
-              AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE type <> 'text')`,
-        )
-        .all()
-        .map((row) => row.id);
-      const normalisedTurns = new Set([...nullTurns, ...nonArrayTurns, ...nonStringTurns]);
-      const archiveTags = db.query<unknown, [number]>(
-        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE} (turn_id, tags)
-         SELECT id, tags FROM turns WHERE id = ?`,
-      );
-      const archiveMembership = db.query<unknown, [number]>(
-        `INSERT OR REPLACE INTO ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE}
-           (segment_id, turn_id, created_at_epoch)
-         SELECT segment_id, turn_id, created_at_epoch FROM segment_members WHERE turn_id = ?`,
-      );
-      for (const turnId of normalisedTurns) {
-        archiveTags.run(turnId);
-        archiveMembership.run(turnId);
-      }
-      const nullToEmpty = db.query("UPDATE turns SET tags = '[]' WHERE tags IS NULL").run().changes;
-      const nonArrayToEmpty = db
-        .query(
-          `UPDATE turns SET tags = '[]'
-            WHERE tags IS NOT NULL AND (NOT json_valid(tags) OR json_type(tags) <> 'array')`,
-        )
-        .run().changes;
-      const nonStringMembersDropped = db
-        .query(
-          `UPDATE turns
-              SET tags = (SELECT json_group_array(value) FROM json_each(turns.tags) WHERE type = 'text')
-            WHERE json_valid(tags) AND json_type(tags) = 'array'
-              AND EXISTS (SELECT 1 FROM json_each(turns.tags) WHERE type <> 'text')`,
-        )
-        .run().changes;
+      // Transform 1 is NOT here: `normaliseTurnTagsInvariant` ran it earlier
+      // this open, unfenced, with its own receipt and archive (ticket 12).
+      // Only its DDL half — the NOT NULL column and the triggers — is left,
+      // and that happens with the rest of the `turns` rebuild below.
 
-      // ---- transforms 2–5: the plan ---------------------------------------
+      // ---- transforms 2–4: the plan ---------------------------------------
       const rows = db
         .query<CutoverEdgeRow, []>(
           `SELECT id, citing_kind AS citingKind, citing_id AS citingId,
@@ -5559,14 +5646,12 @@ export function runMainAgentEdgesCutover(
         );
       }
       archiveTurnStamps(db, plan.stampedCiters, ["relations"]);
-      archiveTurnStamps(db, normalisedTurns, ["tags"]);
 
-      // ---- stamps (R10-10): every citer whose row was folded/cleared/deleted, every normalised turn ----
+      // ---- stamps (R10-10): every citer whose row was folded/cleared/deleted ----
+      // The `tags` stamps of the normalised turns were written by
+      // `normaliseTurnTagsInvariant`, into this same archive.
       for (const citerId of [...plan.stampedCiters].sort((a, b) => a - b)) {
         stampTurnRelationsRevision(db, citerId, MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
-      }
-      for (const turnId of [...normalisedTurns].sort((a, b) => a - b)) {
-        stampField(db, "turn", turnId, "tags", MAIN_AGENT_EDGES_CUTOVER_WRITER, nowEpoch);
       }
 
       // ---- transform 6: rebuild memory_edges on the pair key, without the word ----
@@ -5636,7 +5721,11 @@ export function runMainAgentEdgesCutover(
       const sideIndexRows = countMemoryEdgeSideTagRows(db);
 
       // ---- transform 1's DDL half: turns with the tags invariant ----------
-      rebuildTurnsForTagsInvariant(db, "enforce");
+      // The VALUES were normalised earlier this open by
+      // `normaliseTurnTagsInvariant` (ticket 12); what is left for the cutover
+      // is the column shape and the triggers that make the invariant a
+      // database fact rather than a swept state.
+      rebuildTurnsForTagsInvariant(db);
       reexecArchivedTurnsTriggers(db);
       restoreArchivedSequence(db, "turns");
 
@@ -5652,12 +5741,6 @@ export function runMainAgentEdgesCutover(
       // ---- the completion marker, LAST ------------------------------------
       const writeGateSequence = snapshotWriteGateSequence(db);
       const receipt: MainAgentEdgesCutoverReceipt = {
-        tagsNormalised: {
-          nullToEmpty,
-          nonArrayToEmpty,
-          nonStringMembersDropped,
-          turnsChanged: normalisedTurns.size,
-        },
         ...plan.counts,
         rowsBefore,
         rowsAfter,
@@ -5671,208 +5754,15 @@ export function runMainAgentEdgesCutover(
       writeMigrationReceipt(db, MAIN_AGENT_EDGES_CUTOVER_RECEIPT, nowEpoch, receipt);
       db.query<unknown, [number, number]>(
         `INSERT INTO ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
-           (id, status, applied_at_epoch, write_gate_sequence, rolled_back_at_epoch)
-         VALUES (1, 'complete', ?, ?, NULL)
+           (id, status, applied_at_epoch, write_gate_sequence)
+         VALUES (1, 'complete', ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-           status = 'complete', applied_at_epoch = excluded.applied_at_epoch,
-           write_gate_sequence = excluded.write_gate_sequence, rolled_back_at_epoch = NULL`,
+           applied_at_epoch = excluded.applied_at_epoch,
+           write_gate_sequence = excluded.write_gate_sequence`,
       ).run(nowEpoch, writeGateSequence);
 
       return { ran: "cut-over", receipt };
     });
-  } finally {
-    db.exec("PRAGMA foreign_keys = ON;");
-    // Derived state, rebuilt rather than receipted (spec D9): the facets the
-    // tags update marked stale, and the FTS rows of the normalised turns.
-    if (!memoryEdgesPredatesCutover(db)) {
-      repairStaleSegmentFacets(db);
-      for (const row of db
-        .query<{ turnId: number }, []>(
-          `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
-        )
-        .all()) {
-        reindexTurnFromDb(db, row.turnId);
-      }
-    }
-  }
-}
-
-/**
- * THE ROLLBACK TOOL (spec D9): put the pre-cutover state back from the
- * receipt, byte for byte, inside the rollback boundary — and REFUSE outside
- * it. OFFLINE ONLY: run it with the worker stopped and no hook or MCP process
- * open; nothing here can verify that, so the caller owns it.
- *
- * Refuses when: the cutover has not run; it was already rolled back; any
- * `relations`/`tags` stamp carries a sequence above the recorded boundary, or
- * any `memory_edges` row has an id above the archived maximum — either means
- * a receipt-owned domain (relation rows, `turns.tags`, `segment_members`) was
- * written since, and restoring old rows would overwrite that write.
- *
- * Restores: `memory_edges` from the archived DDL and rows (ids kept), its
- * archived indexes and `sqlite_sequence`; `turns` rebuilt with the RELAXED
- * tags column, the archived `tags` values (NULL included) put back, the
- * archived triggers re-created; `segment_members` and the write-gate stamps
- * of the archived turns, absence restored as absence. Rebuilds: the side
- * index, the stale facets, the FTS rows of the archived turns. Then flips the
- * marker to `rolled_back`; the next open runs the cutover again over a fresh
- * archive.
- */
-export function rollbackMainAgentEdgesCutover(
-  db: Database,
-  nowEpoch: number = Math.floor(Date.now() / 1000),
-): MainAgentEdgesRollbackOutcome {
-  db.exec(MAIN_AGENT_EDGES_CUTOVER_TABLES_DDL);
-  const state = readMainAgentEdgesCutoverState(db);
-  if (state?.status === "rolled_back") {
-    return { ok: false, refusal: { reason: "already-rolled-back" } };
-  }
-  if (state === null || memoryEdgesPredatesCutover(db)) {
-    return { ok: false, refusal: { reason: "not-cut-over" } };
-  }
-  const stampsAfterBoundary =
-    db
-      .query<{ n: number }, [number]>(
-        `SELECT COUNT(*) AS n FROM write_gate_stamps
-          WHERE entity_type = 'turn' AND field IN ('relations', 'tags') AND write_sequence > ?`,
-      )
-      .get(state.writeGateSequence)?.n ?? 0;
-  const archivedMaxId =
-    db
-      .query<{ n: number | null }, []>(
-        `SELECT MAX(id) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`,
-      )
-      .get()?.n ?? 0;
-  const edgeRowsAfterBoundary =
-    db
-      .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM memory_edges WHERE id > ?")
-      .get(archivedMaxId)?.n ?? 0;
-  if (stampsAfterBoundary > 0 || edgeRowsAfterBoundary > 0) {
-    return {
-      ok: false,
-      refusal: { reason: "written-since", stampsAfterBoundary, edgeRowsAfterBoundary },
-    };
-  }
-
-  db.exec("PRAGMA foreign_keys = OFF;");
-  try {
-    const outcome = runWriteTransaction(db, (): MainAgentEdgesRollbackOutcome => {
-      // ---- memory_edges: the archived DDL, rows and indexes ---------------
-      const tableDdl = db
-        .query<{ sql: string }, []>(
-          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
-            WHERE kind = 'table' AND name = 'memory_edges'`,
-        )
-        .get();
-      if (!tableDdl) {
-        throw new Error("main-agent-edges rollback: the archived memory_edges DDL is missing");
-      }
-      db.exec("DROP TABLE memory_edges");
-      db.exec(tableDdl.sql);
-      const edgesRestored = db
-        .query(
-          `INSERT INTO memory_edges
-             (id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-              tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
-           SELECT id, citing_kind, citing_id, cited_kind, cited_id, relation, provenance,
-                  tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch
-             FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY id`,
-        )
-        .run().changes;
-      for (const index of db
-        .query<{ sql: string }, []>(
-          `SELECT sql FROM ${MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE}
-            WHERE kind = 'index' AND tbl_name = 'memory_edges' AND sql IS NOT NULL`,
-        )
-        .all()) {
-        db.exec(index.sql);
-      }
-      restoreArchivedSequence(db, "memory_edges");
-      rebuildMemoryEdgeSideTagsIndexCore(db);
-
-      // ---- turns: relaxed column, archived tags, membership, stamps ---------
-      rebuildTurnsForTagsInvariant(db, "relax");
-      reexecArchivedTurnsTriggers(db);
-      restoreArchivedSequence(db, "turns");
-      const archivedTurns = db
-        .query<{ turnId: number; tags: string | null }, []>(
-          `SELECT turn_id AS turnId, tags FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
-        )
-        .all();
-      const restoreTags = db.query<unknown, [string | null, number]>(
-        "UPDATE turns SET tags = ? WHERE id = ?",
-      );
-      const clearMembership = db.query<unknown, [number]>(
-        "DELETE FROM segment_members WHERE turn_id = ?",
-      );
-      const restoreMembership = db.query<unknown, [number]>(
-        `INSERT OR REPLACE INTO segment_members (segment_id, turn_id, created_at_epoch)
-         SELECT segment_id, turn_id, created_at_epoch
-           FROM ${MAIN_AGENT_EDGES_CUTOVER_MEMBERSHIP_ARCHIVE} WHERE turn_id = ?`,
-      );
-      for (const turn of archivedTurns) {
-        restoreTags.run(turn.tags, turn.turnId);
-        clearMembership.run(turn.turnId);
-        restoreMembership.run(turn.turnId);
-      }
-      const deleteStamp = db.query<unknown, [string, number, string]>(
-        "DELETE FROM write_gate_stamps WHERE entity_type = ? AND entity_id = ? AND field = ?",
-      );
-      const restoreStamp = db.query<unknown, [string, number, string, string, number, number]>(
-        `INSERT INTO write_gate_stamps
-           (entity_type, entity_id, field, writer, write_sequence, written_at_epoch)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      );
-      for (const stamp of db
-        .query<
-          {
-            entityType: string;
-            entityId: number;
-            field: string;
-            writer: string | null;
-            writeSequence: number | null;
-            writtenAtEpoch: number | null;
-          },
-          []
-        >(
-          `SELECT entity_type AS entityType, entity_id AS entityId, field, writer,
-                  write_sequence AS writeSequence, written_at_epoch AS writtenAtEpoch
-             FROM ${MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE}`,
-        )
-        .all()) {
-        deleteStamp.run(stamp.entityType, stamp.entityId, stamp.field);
-        if (stamp.writer !== null) {
-          restoreStamp.run(
-            stamp.entityType, stamp.entityId, stamp.field, stamp.writer,
-            stamp.writeSequence!, stamp.writtenAtEpoch!,
-          );
-        }
-      }
-
-      const violations = db
-        .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
-        .all();
-      if (violations.length > 0) {
-        throw new Error(
-          `main-agent-edges rollback left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`,
-        );
-      }
-
-      db.query<unknown, [number]>(
-        `UPDATE ${MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE}
-            SET status = 'rolled_back', rolled_back_at_epoch = ? WHERE id = 1`,
-      ).run(nowEpoch);
-      return { ok: true, edgesRestored, turnsRestored: archivedTurns.length };
-    });
-    repairStaleSegmentFacets(db);
-    for (const row of db
-      .query<{ turnId: number }, []>(
-        `SELECT turn_id AS turnId FROM ${MAIN_AGENT_EDGES_CUTOVER_TURN_TAGS_ARCHIVE}`,
-      )
-      .all()) {
-      reindexTurnFromDb(db, row.turnId);
-    }
-    return outcome;
   } finally {
     db.exec("PRAGMA foreign_keys = ON;");
   }
@@ -5953,6 +5843,22 @@ export function initializeSchema(db: Database): void {
   // Its own seed reads `note_settlement_jobs`, whose final shape
   // `ensureNoteSettlementJobsRetrySchema` above has already settled.
   ensureTurnEraGrantColumn(db);
+  // main-agent-edges ticket 12 (spec D9 transform 1): THE FIRST MIGRATION THAT
+  // TOUCHES `turns.tags`, and strictly before every migration below that reads
+  // or writes it — `retireTopicRegistry`, `runLaneRegistryMigration`'s M3,
+  // `cutoverNamedTaskMembershipTags` and the D9 one-shot itself. It used to be
+  // the one-shot's transform 1, which is FENCED and runs LAST, so a database
+  // holding one malformed tags value threw in the membership cutover (which
+  // reads through the strict parser) before the normalisation it needed could
+  // run — and threw in every lane read for as long as the fence held. Here it
+  // runs on the very first open whatever the fence says.
+  //
+  // Not literally first in this function: it archives into the cutover's
+  // tables and then rebuilds the derived state its UPDATEs invalidate, so it
+  // needs `ensureSearchIndexSchema` (FTS) and `ensureSegmentDerivedFacets`
+  // above. Every `turns` rebuild above it copies `tags` verbatim, so nothing
+  // between there and here can reintroduce a malformed value.
+  normaliseTurnTagsInvariant(db);
   // Ticket 15 (topic registry retirement): folds each segment's topic name
   // into its members' own tags (or, for a zero-member segment, directly into
   // the segment's own stored tags) before `topics`/`segments.topic_id`
@@ -6194,15 +6100,12 @@ function cutoverNamedTaskMembershipTags(
         continue;
       }
 
-      let turnTags: string[];
-      try {
-        const parsed = JSON.parse(row.turnTags ?? "[]") as unknown;
-        turnTags = Array.isArray(parsed)
-          ? parsed.filter((value): value is string => typeof value === "string")
-          : [];
-      } catch {
-        turnTags = [];
-      }
+      // THE strict parser, not a second lenient one (ticket 12). A lenient
+      // parse here read a malformed value as "no tags", then wrote through
+      // `writeMembershipTags`, whose own read of the same column THROWS — so
+      // the row ended up either half-written or fatal. `normaliseTurnTagsInvariant`
+      // has already run this open; there is nothing malformed left to parse.
+      const turnTags = readTurnTags(row.turnTags);
 
       // Already tagged — untouched by design (spec D5), not counted as a
       // candidate at all.

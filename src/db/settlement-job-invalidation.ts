@@ -268,7 +268,11 @@ export function invalidateOverlappingSettlementJobs(
  * `stage`, `transition_seq` and `stage1_metrics` are added additively by
  * `ensureNoteSettlementStageSchema`; a database that has not reached it holds
  * no staged job at all, so the status/generation half of the reset is the
- * whole of it there.
+ * whole of it there. The no-stage arm of the SELECT is `NULL AS stage`, ONE
+ * alias — it shipped as `NULL AS stage AS stage`, a syntax error that made
+ * this function unrunnable on exactly the databases the arm exists for
+ * (ticket 12, P2-A); `tests/db/settlement-job-invalidation.test.ts` runs it
+ * against a table with no `stage` column so the arm is executed, not assumed.
  */
 export function resetNoteSettlementJobToStageOne(
   db: Database,
@@ -281,7 +285,7 @@ export function resetNoteSettlementJobToStageOne(
       { id: number; status: string; stage: string | null; claimGeneration: number },
       [number]
     >(
-      `SELECT id, status, ${hasStageColumns ? "stage" : "NULL AS stage"} AS stage,
+      `SELECT id, status, ${hasStageColumns ? "stage" : "NULL"} AS stage,
               claim_generation AS claimGeneration
          FROM note_settlement_jobs WHERE id = ?`,
     )

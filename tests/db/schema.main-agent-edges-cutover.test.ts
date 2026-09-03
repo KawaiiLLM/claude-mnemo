@@ -6,10 +6,11 @@ import { insertLane } from "../../src/db/lanes";
 import {
   MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE,
   MAIN_AGENT_EDGES_CUTOVER_RECEIPT,
-  MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE,
   MAIN_AGENT_EDGES_CUTOVER_WRITER,
+  MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT,
   readMainAgentEdgesCutoverState,
   type MainAgentEdgesCutoverReceipt,
+  type TurnTagsNormalisationReceipt,
 } from "../../src/db/main-agent-edges-cutover";
 import {
   getOutgoingEdges,
@@ -22,13 +23,13 @@ import { claimNextNoteSettlementJob } from "../../src/db/note-settlement";
 import { ensureNoteSettlementSnapshotTables } from "../../src/db/note-settlement-snapshots";
 import {
   initializeSchema,
+  normaliseTurnTagsInvariant,
   planMainAgentEdgesCutover,
-  rollbackMainAgentEdgesCutover,
   runMainAgentEdgesCutover,
 } from "../../src/db/schema";
 import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
-import { getFieldStamp, stampField } from "../../src/db/write-gate";
+import { getFieldStamp } from "../../src/db/write-gate";
 import {
   downgradeToPreCutoverShape,
   seedPreCutoverEdge,
@@ -39,8 +40,12 @@ import { wordEdgeClass } from "../support/edge-row-fixtures";
  * MAIN-AGENT-EDGES TICKET 01 — THE CUTOVER (spec D9, RULED T2419 + T2421).
  *
  * One receipt-guarded one-shot, one write transaction: the durable claim
- * fence -> the receipts -> transforms 1–6 -> foreign-key check -> side-index
- * verification -> the completion marker LAST. Every fixture here is built on
+ * fence -> the receipts -> transforms 2–4 and 6 -> foreign-key check ->
+ * side-index verification -> the completion marker LAST. Transform 1 (the
+ * tags values) runs BEFORE all of it and outside the fence, in
+ * `normaliseTurnTagsInvariant` (ticket 12); transform 5 does not exist —
+ * an ambiguous side is KEPT, not deleted (ruled S15069/T2466). Every fixture
+ * here is built on
  * `downgradeToPreCutoverShape`: `initializeSchema` now leaves a database in
  * the FINAL shape, so a test that wants the legacy stock the cutover exists to
  * fold, clear and delete has to put the old shape back and seed it by hand.
@@ -111,7 +116,25 @@ describe("main-agent-edges cutover (spec D9)", () => {
       )
       .get(edgeId)?.disposition;
 
-  const cutover = () => runMainAgentEdgesCutover(db, NOW, NOW_MS);
+  /**
+   * The migration ORDER `initializeSchema` runs, made explicit: the tags
+   * normalisation first (unfenced, its own receipt), the one-shot after.
+   * Calling the one-shot alone would leave a malformed value for the `turns`
+   * rebuild to choke on — which is the whole point of the order.
+   */
+  const cutover = () => {
+    normaliseTurnTagsInvariant(db, NOW);
+    return runMainAgentEdgesCutover(db, NOW, NOW_MS);
+  };
+
+  const tagsReceipt = (): TurnTagsNormalisationReceipt =>
+    JSON.parse(
+      db
+        .query<{ payload: string }, [string]>(
+          "SELECT payload FROM migration_receipts WHERE name = ?",
+        )
+        .get(MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT)!.payload,
+    ) as TurnTagsNormalisationReceipt;
 
   let nextWindow = 1;
   const addJob = (status: string, stage: string, claimedAtEpoch: number | null, attempts = 0) =>
@@ -292,7 +315,7 @@ describe("main-agent-edges cutover (spec D9)", () => {
 
   // ------------------------------------------------------------ transform 1
 
-  test("TRANSFORM 1: NULL -> [], a non-array -> [], non-string members dropped; each counted, each turn stamped, old bytes archived", () => {
+  test("TRANSFORM 1 (BEFORE the one-shot, unfenced): NULL -> [], a non-array -> [], non-string members dropped; each counted, each turn stamped, old bytes archived", () => {
     const nullTurn = addTurn(null);
     const objectTurn = addTurn(["the-task"]);
     setRawTags(objectTurn, '{"a":1}');
@@ -303,8 +326,7 @@ describe("main-agent-edges cutover (spec D9)", () => {
     const cleanTurn = addTurn(["the-task"]);
 
     expect(cutover().ran).toBe("cut-over");
-    const r = receipt();
-    expect(r.tagsNormalised).toEqual({
+    expect(tagsReceipt()).toEqual({
       nullToEmpty: 1,
       nonArrayToEmpty: 2,
       nonStringMembersDropped: 1,
@@ -399,11 +421,10 @@ describe("main-agent-edges cutover (spec D9)", () => {
     expect(dispositionOf(partialRow)).toBe("rewritten");
     expect(dispositionOf(useRow)).toBe("folded");
     expect(dispositionOf(fullRow)).toBe("folded");
-    expect(r.ambiguousDeleted).toBe(0);
     expect(getFieldStamp(db, "turn", citing, "relations")?.writer).toBe(MAIN_AGENT_EDGES_CUTOVER_WRITER);
   });
 
-  test("TRANSFORM 2 (fold): two DIFFERENT valid declarations on one side are an ambiguity, not a choice — the side folds to '' and, on a two-lane endpoint, the pair is deleted", () => {
+  test("TRANSFORM 2 (fold): two DIFFERENT valid declarations on one side are an ambiguity, not a choice — the side folds to '' and the edge is KEPT with it blank", () => {
     const citing = addTurn(["the-task", "alpha", "beta"]);
     const cited = addTurn(["the-task", "alpha"]);
     addSegmentMembers(db, segmentId, [citing, cited], 10);
@@ -411,10 +432,15 @@ describe("main-agent-edges cutover (spec D9)", () => {
     const second = seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "consume", relationClass: "use", tailTag: "beta", headTag: "" });
 
     expect(cutover().ran).toBe("cut-over");
-    expect(edgeRows()).toEqual([]);
-    expect(dispositionOf(first)).toBe("deleted-ambiguous");
+    // Ruled S15069/T2466: a blank side on a multi-lane endpoint already MEANS
+    // ambiguous to every reader, so the row survives with the side blank.
+    // Nothing is deleted for ambiguity and there is no count for it.
+    expect(edgeRows().map((row) => [row.id, row.tailTag, row.headTag])).toEqual([
+      [first, "", ""],
+    ]);
+    expect(dispositionOf(first)).toBe("rewritten");
     expect(dispositionOf(second)).toBe("folded");
-    expect(receipt().ambiguousDeleted).toBe(1);
+    expect(receipt().rowsAfter).toBe(1);
   });
 
   test("TRANSFORM 2 (fold): identical duplicate declarations are ONE declaration; the survivor keeps its id, provenance and creation time", () => {
@@ -446,9 +472,9 @@ describe("main-agent-edges cutover (spec D9)", () => {
     expect(receipt().foldedPairs).toBe(1);
   });
 
-  // ------------------------------------------------------------ transforms 3–5
+  // ------------------------------------------------------------ transforms 3–4
 
-  test("TRANSFORMS 3/4/5: a redundant declaration is cleared, an invalid one is cleared, an unattributable side deletes the edge, untouched edges are kept and NOT stamped", () => {
+  test("TRANSFORMS 3/4: a redundant declaration is cleared, an invalid one is cleared, an unattributable side leaves the edge STANDING with the side blank, untouched edges are kept and NOT stamped", () => {
     const uniqueA = addTurn(["the-task", "alpha"]);
     const uniqueB = addTurn(["the-task", "alpha"]);
     const twoLaned = addTurn(["the-task", "alpha", "beta"]);
@@ -459,7 +485,7 @@ describe("main-agent-edges cutover (spec D9)", () => {
     const redundant = seedPreCutoverEdge(db, { citingId: uniqueA, citedId: uniqueB, relation: "extends", relationClass: "use", tailTag: "alpha", headTag: "alpha" });
     // invalid: a declaration the endpoint does not carry.
     const invalid = seedPreCutoverEdge(db, { citingId: uniqueB, citedId: uniqueA, relation: "verifies", relationClass: "verify", tailTag: "beta", headTag: "" });
-    // ambiguous: blank tail on a two-lane endpoint.
+    // ambiguous: blank tail on a two-lane endpoint. KEPT (S15069/T2466).
     const ambiguous = seedPreCutoverEdge(db, { citingId: twoLaned, citedId: uniqueA, relation: "extends", relationClass: "use" });
     // fine: a declaration on the two-lane endpoint, blank on the unique one.
     const declared = seedPreCutoverEdge(db, { citingId: uniqueA, citedId: twoLaned, relation: "override", relationClass: "correct", relationCoverage: "full", tailTag: "", headTag: "beta" });
@@ -470,26 +496,29 @@ describe("main-agent-edges cutover (spec D9)", () => {
     const r = receipt();
     expect(r.redundantCleared).toBe(2);
     expect(r.invalidCleared).toBe(1);
-    expect(r.ambiguousDeleted).toBe(1);
     expect(r.rowsBefore).toBe(5);
-    expect(r.rowsAfter).toBe(4);
+    // Nothing is deleted for an unattributable side: 5 in, 5 out.
+    expect(r.rowsAfter).toBe(5);
     expect(edgeRows().map((row) => [row.id, row.tailTag, row.headTag])).toEqual([
       [redundant, "", ""],
       [invalid, "", ""],
+      [ambiguous, "", ""],
       [declared, "", "beta"],
       [kept, "", ""],
     ]);
     expect(dispositionOf(redundant)).toBe("rewritten");
     expect(dispositionOf(invalid)).toBe("rewritten");
-    expect(dispositionOf(ambiguous)).toBe("deleted-ambiguous");
+    expect(dispositionOf(ambiguous)).toBe("kept");
     expect(dispositionOf(declared)).toBe("kept");
     expect(dispositionOf(kept)).toBe("kept");
     // R10-10: every citer whose row was cleared or deleted is stamped; the
     // untouched citer of `declared`/`kept` (uniqueA writes `declared`, but
     // uniqueA also owns `redundant`) — check the one citer with nothing touched.
     expect(getFieldStamp(db, "turn", uniqueA, "relations")?.writer).toBe(MAIN_AGENT_EDGES_CUTOVER_WRITER);
-    expect(getFieldStamp(db, "turn", twoLaned, "relations")?.writer).toBe(MAIN_AGENT_EDGES_CUTOVER_WRITER);
-    expect(r.citersStamped).toBe(3);
+    // `twoLaned`'s only row was neither folded nor rewritten — its side was
+    // already blank and stays blank, so nothing about its relation set moved.
+    expect(getFieldStamp(db, "turn", twoLaned, "relations")).toBeNull();
+    expect(r.citersStamped).toBe(2);
     // The side index is exactly the surviving declarations.
     expect(
       db.query<{ edgeRowId: number; side: string; tag: string }, []>("SELECT edge_row_id AS edgeRowId, side, tag FROM memory_edge_side_tags").all(),
@@ -537,7 +566,11 @@ describe("main-agent-edges cutover (spec D9)", () => {
     expect(readMainAgentEdgesCutoverState(db)).toBeNull();
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM memory_edges").get()!.n).toBe(2);
     expect(db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`).get()!.n).toBe(0);
-    expect(db.query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?").get(nullTurn)!.tags).toBeNull();
+    // The tags normalisation is its OWN transaction and its own step, and it
+    // committed before the one-shot ever started (ticket 12) — so it is NOT
+    // taken down with the one-shot, and must not be: it is what the fenced
+    // deferral window needs even when the one-shot never runs at all.
+    expect(db.query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?").get(nullTurn)!.tags).toBe("[]");
     expect(
       db.query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM migration_receipts WHERE name = ?").get(MAIN_AGENT_EDGES_CUTOVER_RECEIPT)!.n,
     ).toBe(0);
@@ -545,88 +578,80 @@ describe("main-agent-edges cutover (spec D9)", () => {
 
   // ------------------------------------------------------------ the receipt
 
-  test("ROLLBACK restores every receipted domain byte for byte inside the boundary — rows, tags (NULL included), stamps (absence included), sequences — and the next open cuts over again", () => {
+  test("THE ARCHIVE IS THE RECEIPT: after the one-shot every pre-cutover row is in it byte for byte, with the DDL that held it — there is no rollback tool", () => {
     const citing = addTurn(["the-task", "alpha", "beta"]);
     const cited = addTurn(["the-task", "alpha"]);
     addSegmentMembers(db, segmentId, [citing, cited], 10);
     const nullTurn = addTurn(null);
-    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "extends", relationClass: "use", tailTag: "alpha", headTag: "alpha" });
-    seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "override", relationClass: "correct", relationCoverage: "full" });
-    seedPreCutoverEdge(db, { citingId: cited, citedId: citing, relation: null, provenance: "judged" });
-    // A pre-existing stamp on one citer, none on the other: both shapes restore.
-    stampField(db, "turn", citing, "relations", "someone", 50);
-    db.query("DELETE FROM sqlite_sequence WHERE name = 'memory_edges'").run();
-    db.query("INSERT INTO sqlite_sequence (name, seq) VALUES ('memory_edges', 900)").run();
+    const folded = seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "extends", relationClass: "use", tailTag: "alpha", headTag: "alpha", createdAtEpoch: 400, provenance: "judged" });
+    const loser = seedPreCutoverEdge(db, { citingId: citing, citedId: cited, relation: "override", relationClass: "correct", relationCoverage: "full", tailTag: "beta", headTag: "alpha", createdAtEpoch: 500 });
+    const wordless = seedPreCutoverEdge(db, { citingId: cited, citedId: citing, relation: null, provenance: "judged" });
+    const preTags = db
+      .query<{ id: number; tags: string | null }, []>("SELECT id, tags FROM turns ORDER BY id")
+      .all();
+    const preDdl = db
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_edges'",
+      )
+      .get()!.sql;
 
-    const dump = () => ({
-      edges: db.query("SELECT * FROM memory_edges ORDER BY id").all(),
-      tags: db.query("SELECT id, tags FROM turns ORDER BY id").all(),
-      members: db.query("SELECT * FROM segment_members ORDER BY segment_id, turn_id").all(),
-      stamps: db
-        .query("SELECT * FROM write_gate_stamps WHERE entity_type = 'turn' AND field IN ('relations', 'tags') ORDER BY entity_id, field")
+    expect(cutover().ran).toBe("cut-over");
+
+    // (1) every old row, all columns, with its disposition.
+    expect(
+      db
+        .query<
+          { id: number; relation: string | null; tailTag: string; headTag: string; relationClass: string; relationCoverage: string; provenance: string; createdAtEpoch: number; disposition: string },
+          []
+        >(
+          `SELECT id, relation, tail_tag AS tailTag, head_tag AS headTag,
+                  relation_class AS relationClass, relation_coverage AS relationCoverage,
+                  provenance, created_at_epoch AS createdAtEpoch, disposition
+             FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE} ORDER BY id`,
+        )
         .all(),
-      sequences: db.query("SELECT name, seq FROM sqlite_sequence WHERE name IN ('turns', 'memory_edges') ORDER BY name").all(),
-    });
-    const before = dump();
-
-    expect(cutover().ran).toBe("cut-over");
-    expect(readMainAgentEdgesCutoverState(db)?.status).toBe("complete");
-    expect(dump()).not.toEqual(before);
-
-    const outcome = rollbackMainAgentEdgesCutover(db, NOW + 1);
-    expect(outcome).toEqual({ ok: true, edgesRestored: 3, turnsRestored: 1 });
-    expect(memoryEdgesPredatesCutover(db)).toBe(true);
-    expect(readMainAgentEdgesCutoverState(db)?.status).toBe("rolled_back");
-    expect(dump()).toEqual(before);
-    // The side index is REBUILT from the restored rows, never receipted (spec D9).
-    expect(db.query("SELECT edge_row_id AS e, side, tag FROM memory_edge_side_tags ORDER BY e, side").all()).toEqual([
-      { e: 1, side: "head", tag: "alpha" },
-      { e: 1, side: "tail", tag: "alpha" },
+    ).toEqual([
+      { id: folded, relation: "extends", tailTag: "alpha", headTag: "alpha", relationClass: "use", relationCoverage: "", provenance: "judged", createdAtEpoch: 400, disposition: "folded" },
+      { id: loser, relation: "override", tailTag: "beta", headTag: "alpha", relationClass: "correct", relationCoverage: "full", provenance: "asserted", createdAtEpoch: 500, disposition: "rewritten" },
+      { id: wordless, relation: null, tailTag: "", headTag: "", relationClass: "", relationCoverage: "", provenance: "judged", createdAtEpoch: 400, disposition: "deleted-wordless" },
     ]);
-    expect(db.query<{ tags: string | null }, [number]>("SELECT tags FROM turns WHERE id = ?").get(nullTurn)!.tags).toBeNull();
-    expect(rollbackMainAgentEdgesCutover(db, NOW + 2)).toEqual({ ok: false, refusal: { reason: "already-rolled-back" } });
+    expect(db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_EDGE_ARCHIVE}`).get()!.n).toBe(3);
 
-    // The next open runs the cutover again over a fresh archive.
-    initializeSchema(db);
-    expect(memoryEdgesPredatesCutover(db)).toBe(false);
-    expect(readMainAgentEdgesCutoverState(db)?.status).toBe("complete");
-    expect(db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM ${MAIN_AGENT_EDGES_CUTOVER_STAMP_ARCHIVE}`).get()!.n).toBe(2);
-  });
+    // (2) the old `turns.tags` bytes of every turn the normalisation touched,
+    //     NULL kept as NULL.
+    expect(
+      db
+        .query<{ turnId: number; tags: string | null }, []>(
+          "SELECT turn_id AS turnId, tags FROM main_agent_edges_cutover_turn_tags_archive ORDER BY turn_id",
+        )
+        .all(),
+    ).toEqual([{ turnId: nullTurn, tags: null }]);
+    expect(preTags.find((row) => row.id === nullTurn)!.tags).toBeNull();
 
-  test("ROLLBACK refuses a database the cutover has not reached", () => {
-    expect(rollbackMainAgentEdgesCutover(db, NOW)).toEqual({ ok: false, refusal: { reason: "not-cut-over" } });
-  });
+    // (3) the DDL that held those rows, verbatim from `sqlite_master`.
+    expect(
+      db
+        .query<{ sql: string }, []>(
+          `SELECT sql FROM main_agent_edges_cutover_ddl_archive
+            WHERE kind = 'table' AND name = 'memory_edges'`,
+        )
+        .get()!.sql,
+    ).toBe(preDdl);
 
-  test("ROLLBACK refusal, three shapes: relations stamp, tags stamp, edge row beyond the archive", () => {
-    const a = addTurn(["the-task"]);
-    const b = addTurn(["the-task"]);
-    const c = addTurn(["the-task"]);
-    seedPreCutoverEdge(db, { citingId: a, citedId: b, relation: "extends", relationClass: "use" });
-    expect(cutover().ran).toBe("cut-over");
-
-    // (1) a later relation write through the real write path stamps beyond the boundary.
-    const written = writeMemoryEdges(
-      db,
-      [{ citing: { kind: "turn", id: b }, cited: { kind: "turn", id: c }, relationClass: "use", provenance: "asserted" }],
-      NOW + 5,
-    );
-    expect(written.rejected).toEqual([]);
-    const refusal = rollbackMainAgentEdgesCutover(db, NOW + 6);
-    expect(refusal.ok).toBe(false);
-    expect(refusal.ok === false && refusal.refusal.reason).toBe("written-since");
-    expect(refusal.ok === false && refusal.refusal.reason === "written-since" && refusal.refusal.edgeRowsAfterBoundary).toBe(1);
-    expect(memoryEdgesPredatesCutover(db)).toBe(false);
-
-    // (2) remove that row; a tags stamp alone still refuses.
-    db.query("DELETE FROM memory_edges WHERE citing_id = ?").run(b);
-    stampField(db, "turn", c, "tags", "someone", NOW + 7);
-    const tagsRefusal = rollbackMainAgentEdgesCutover(db, NOW + 8);
-    expect(tagsRefusal.ok === false && tagsRefusal.refusal.reason === "written-since" && tagsRefusal.refusal.stampsAfterBoundary).toBe(1);
+    // (4) the marker says `complete` and nothing else can be said: the
+    //     rollback tool is DELETED (ruled S15069/T2464), so there is no
+    //     `rolled_back` state and no `written-since` question to ask. A
+    //     recovery is a hand-written one-shot over exactly these three tables.
+    expect(readMainAgentEdgesCutoverState(db)).toEqual({
+      status: "complete",
+      appliedAtEpoch: NOW,
+      writeGateSequence: expect.any(Number),
+    });
   });
 
   // ------------------------------------------------------------ the plan, pure
 
-  test("planMainAgentEdgesCutover names the fold population by its predicate: pairs with more than one class-bearing row, split into class-differing and sides-only", () => {
+  test("planMainAgentEdgesCutover names the fold population by its predicate: EVERY pair whose rows collapsed, wordless losers included, split (over the class rows) into class-differing and sides-only", () => {
     const facts = new Map([
       [1, { segmentId: 1, lanes: ["alpha", "beta"] }],
       [2, { segmentId: 1, lanes: ["alpha", "beta"] }],
@@ -646,23 +671,35 @@ describe("main-agent-edges cutover (spec D9)", () => {
         row(4, 2, 1, "use", "", "alpha", "beta"),
         // pair 1>3: single row, wordless
         row(5, 1, 3, "", "", "", ""),
-        // pair 3>1: single row, head ambiguous
+        // pair 3>1: single row, head blank on a two-lane endpoint -> KEPT
         row(6, 3, 1, "use", "", "", ""),
+        // pair 2>3: ONE WORDLESS + ONE CLASS ROW. Two rows in, one out — a
+        // pair the fold touched, and the count that used to report 0 for it
+        // (ticket 12, P3). It is in neither split: "the rows differ in class"
+        // is not a question you can ask of a row that carries none.
+        row(7, 2, 3, "", "", "", ""),
+        row(8, 2, 3, "use", "", "", ""),
       ],
       facts,
     );
-    expect(plan.counts.foldedPairs).toBe(2);
+    expect(plan.counts.foldedPairs).toBe(3);
     expect(plan.counts.foldedPairsByClass).toBe(1);
     expect(plan.counts.foldedPairsBySidesOnly).toBe(1);
     expect(plan.counts.redundantCleared).toBe(0);
     expect(plan.counts.invalidCleared).toBe(0);
+    // Only the class-bearing losers; row 7 is counted once, as wordless.
     expect(plan.counts.foldedRowsDeleted).toBe(2);
-    expect(plan.counts.wordlessDeleted).toBe(1);
-    expect(plan.counts.ambiguousDeleted).toBe(1);
+    expect(plan.counts.wordlessDeleted).toBe(2);
+    // Nothing is deleted for an unattributable side (S15069/T2466): rows 6 and
+    // 8 both survive with their blank sides.
     expect(plan.survivors.map((s) => [s.id, s.relationClass, s.tailTag, s.headTag])).toEqual([
       [2, "verify", "alpha", "alpha"],
       [3, "use", "alpha", "beta"],
+      [6, "use", "", ""],
+      [8, "use", "", ""],
     ]);
-    expect([...plan.stampedCiters].sort()).toEqual([1, 2, 3]);
+    expect(plan.dispositions.get(7)).toBe("deleted-wordless");
+    expect(plan.dispositions.get(8)).toBe("kept");
+    expect([...plan.stampedCiters].sort()).toEqual([1, 2]);
   });
 });
