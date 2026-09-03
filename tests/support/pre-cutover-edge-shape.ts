@@ -4,6 +4,7 @@ import {
   MAIN_AGENT_EDGES_CUTOVER_DDL_ARCHIVE,
   MAIN_AGENT_EDGES_CUTOVER_RECEIPT,
   MAIN_AGENT_EDGES_CUTOVER_STATE_TABLE,
+  MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT,
 } from "../../src/db/main-agent-edges-cutover";
 
 /**
@@ -152,9 +153,17 @@ export function downgradeToPreCutoverShape(db: Database): void {
  * table is re-created from its own stored text, so nothing but the invariant
  * is removed.
  *
+ * The tags-normalisation receipt goes with the shape (ticket 12): a database
+ * put back where malformed values are legal OWES that migration again, and
+ * leaving the receipt would make the next `initializeSchema` skip the one step
+ * this downgrade exists to exercise.
+ *
  * Idempotent: a table already carrying a nullable `tags` is left untouched.
  */
 export function downgradeTurnsTagsToPreCutover(db: Database): void {
+  db.query<unknown, [string]>("DELETE FROM migration_receipts WHERE name = ?").run(
+    MAIN_AGENT_EDGES_TURN_TAGS_RECEIPT,
+  );
   const tagsColumn = db
     .query<{ name: string; notnull: number }, []>("PRAGMA table_info(turns)")
     .all()

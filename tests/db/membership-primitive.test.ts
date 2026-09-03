@@ -647,14 +647,14 @@ describe("the membership primitive", () => {
         )
         .map((file) => file.slice(root.length + 1))
         .sort();
-      // `db/segments.ts` holds the primitive and is the only module that may
-      // write these rows AT RUNTIME. `db/schema.ts` joins it as a MIGRATION
-      // writer with the main-agent-edges cutover (ticket 01): transform 1
-      // reconciles the membership of every turn whose tags it normalised, and
-      // the rollback restores those rows from the receipt archive. Neither is
-      // a runtime path, and neither may grow one — a THIRD name here is the
-      // regression this case is for.
-      expect(writers).toEqual(["src/db/schema.ts", "src/db/segments.ts"]);
+      // `db/segments.ts` holds the primitive and is now the ONLY module that
+      // writes these rows at all. `db/schema.ts` stood here as a migration
+      // writer for the main-agent-edges rollback tool, which restored
+      // `segment_members` from the receipt archive; that tool is deleted
+      // (ticket 12) and the name went with it. The tags normalisation READS
+      // `segment_members` into the archive and never writes it back. A second
+      // name here is the regression this case is for.
+      expect(writers).toEqual(["src/db/segments.ts"]);
     });
   });
 });
