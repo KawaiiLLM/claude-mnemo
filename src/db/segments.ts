@@ -1163,6 +1163,25 @@ export interface MembershipWriteRefusal {
   message: string;
 }
 
+/**
+ * Thrown by a caller of `writeMembershipTags` whose OWN mutation already ran
+ * before it saw `.ok === false` (main-agent-edges ticket 13, P1-9). This
+ * primitive itself is refusal-safe on its own writes (see the doc comment
+ * below — every refusal it can produce is decided before its first `UPDATE`),
+ * but a caller that clears a turn's extraction fields, marks it a compact
+ * marker, or otherwise mutates it FIRST and calls this primitive SECOND has
+ * already written something the refusal did not know about. Throwing inside
+ * the SAME `runWriteTransaction` is what makes "a refusal leaves ZERO fields
+ * changed" true for that caller too — the throw unwinds its own UPDATE right
+ * alongside the primitive's un-taken one.
+ */
+export class MembershipWriteRefusedError extends Error {
+  constructor(readonly result: Extract<MembershipWriteResult, { ok: false }>) {
+    super(result.message);
+    this.name = "MembershipWriteRefusedError";
+  }
+}
+
 export type MembershipWriteResult =
   | {
       ok: true;

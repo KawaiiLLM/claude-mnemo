@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { loadEndpointLaneFacts, resolveEdgeSide } from "../../src/db/edge-side-resolution";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -275,6 +276,90 @@ describe("create (lane tier) / delete — settlement's half of the lane registry
       'Landed create: lane "write-gate"',
     );
     expect(listLanesForSegment(db, segmentId).map((lane) => lane.tag)).toEqual(["write-gate"]);
+  });
+
+  // main-agent-edges ticket 13 (P1-6): this facade's own caller of
+  // `insertLane` bypassed the seam entirely — the same finding as
+  // `mcp/remember.ts`'s `create`. User ruling S15069/T2465 (mid-batch): an
+  // ambiguous side is a WARNING ONLY now, so the newly-ambiguous edge is KEPT,
+  // unreceipted — this is settlement's own dispatch, so there IS a live job in
+  // play, and it must not be invalidated over a mere warning either.
+  test("conscripting a turn into a new lane re-resolves EVERY incident side, clearing a stale invalid declaration, and leaves the newly-ambiguous side kept, unreceipted", () => {
+    const segmentId = createSegment(db, { title: "conscription", tags: ["home"], nowEpoch: NOW })
+      .id;
+    expect(evaluate({ action: "create", id: `E${segmentId}`, tag: "alpha" }).ok).toBe(true);
+    const sessionId = seedSession();
+    const t1 = seedTurn(sessionId, 1, { tags: ["home", "alpha", "legacy-word"] });
+    const t2 = seedTurn(sessionId, 2, { tags: ["home", "alpha"] });
+    const t3 = seedTurn(sessionId, 3, { tags: ["home", "alpha"] });
+    addSegmentMembers(db, segmentId, [t1, t2, t3], NOW);
+
+    const written = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t1 },
+          cited: { kind: "turn", id: t2 },
+          ...wordEdgeClass("extends"),
+          provenance: "asserted",
+        },
+      ],
+      NOW,
+    );
+    const edgeId = written.written[0]!.id;
+    const edgeRow = { citingId: t1, citedId: t2, tailTag: "", headTag: "" };
+    expect(
+      resolveEdgeSide(edgeRow, "tail", loadEndpointLaneFacts(db, [t1, t2])).outcome,
+    ).toBe("derived");
+
+    // A SEPARATE, unrelated edge already carries a STALE declaration on t1's
+    // citing side — `stray-lane` is not, and never was, among t1's tags. This
+    // is the LOAD-BEARING half of the probe: minting a lane only ever ADDS a
+    // possible attribution, so it can never by itself make an existing
+    // declaration `redundant` or `invalid` — the earlier edge's `ambiguous`
+    // outcome is a pure read and cannot tell "the seam ran" from "it didn't".
+    // A stray invalid declaration getting cleared as a SIDE EFFECT of the
+    // conscription's own re-resolution can: it proves
+    // `normalizeIncidentAttribution` ran over every incident side of t1.
+    const strayWritten = writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: t1 },
+          cited: { kind: "turn", id: t3 },
+          ...wordEdgeClass("extends"),
+          provenance: "asserted",
+          tailTag: "stray-lane",
+        },
+      ],
+      NOW,
+    );
+    const strayEdgeId = strayWritten.written[0]!.id;
+
+    const result = evaluate({ action: "create", id: `E${segmentId}`, tag: "legacy-word" });
+    expect(result.ok).toBe(true);
+
+    const resolved = resolveEdgeSide(edgeRow, "tail", loadEndpointLaneFacts(db, [t1, t2]));
+    expect(resolved.outcome).toBe("ambiguous");
+
+    expect(
+      db.query<{ id: number }, [number]>("SELECT id FROM memory_edges WHERE id = ?").get(edgeId),
+    ).not.toBeNull();
+    const deleteReceipts = db
+      .query<{ n: number }, [number]>(
+        `SELECT COUNT(*) AS n FROM edge_attribution_receipts
+          WHERE edge_row_id = ? AND action = 'delete-edge'`,
+      )
+      .get(edgeId)!.n;
+    expect(deleteReceipts).toBe(0);
+
+    // The stray invalid declaration is gone — the seam ran.
+    const strayTail = db
+      .query<{ tailTag: string }, [number]>(
+        "SELECT tail_tag AS tailTag FROM memory_edges WHERE id = ?",
+      )
+      .get(strayEdgeId)!.tailTag;
+    expect(strayTail).toBe("");
   });
 
   test("a NON-CANONICAL tag is refused naming the exact problem, never normalized", () => {
@@ -680,7 +765,10 @@ describe("renderSettlementMembershipWriteReceipt", () => {
               droppedEdgeId: 11,
               droppedProvenance: "judged",
               droppedCreatedAtEpoch: 90,
-              rule: "provenance",
+              // main-agent-edges ticket 13 (P1-3): the collision rule is
+              // `selectLogicalEdgeRow`'s now — same class, so this receipt's
+              // OWN example ties on the lowest row id, not provenance.
+              rule: "lowest-id",
             },
           ],
           stillCarrying: [],

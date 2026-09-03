@@ -12,6 +12,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment, writeMembershipTags } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getFieldStamp } from "../../src/db/write-gate";
+import { downgradeToPreCutoverShape, seedPreCutoverEdge } from "../support/pre-cutover-edge-shape";
 
 /**
  * THE ONE POST-NORMALISATION SEAM (main-agent-edges spec D2, pinned decision
@@ -139,6 +140,65 @@ describe("normalizeIncidentAttribution", () => {
     const result = normalizeIncidentAttribution(db, [citing], { writer: "lane:retag", nowEpoch: NOW });
     expect(result.clearedDeclarations[0]!.reason).toBe("invalid");
     expect(edgeRow(edgeId)!.tailTag).toBe("");
+  });
+
+  test("a collision the clear causes folds through selectLogicalEdgeRow: correct/full survives a lower-id use sibling (ticket 13, P1-3)", () => {
+    const citing = addTurn(1, ["the-task", "alpha", "beta"]);
+    const cited = addTurn(2, ["the-task", "alpha"]);
+    addSegmentMembers(db, segmentId, [citing, cited], 10);
+
+    // Two rows on ONE pair: pre-cutover stock, seeded past the write path —
+    // main-agent-edges D9's deferral window is the one state this collision
+    // can still occur in (after the cutover a pair holds one row and the
+    // `collidingSibling` lookup this test exercises finds nothing).
+    downgradeToPreCutoverShape(db);
+    // `use`, blank on both sides, seeded FIRST — the LOWER row id.
+    const useRow = seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation: "grounds",
+      relationClass: "use",
+      relationCoverage: "",
+      provenance: "asserted",
+      tailTag: "",
+      headTag: "",
+      createdAtEpoch: 400,
+    });
+    // `correct/full`, declared `alpha`, seeded SECOND — the HIGHER row id.
+    const correctFullRow = seedPreCutoverEdge(db, {
+      citingId: citing,
+      citedId: cited,
+      relation: "override",
+      relationClass: "correct",
+      relationCoverage: "full",
+      provenance: "judged",
+      tailTag: "alpha",
+      headTag: "",
+      createdAtEpoch: 400,
+    });
+    db.query<unknown, [number, string, string]>(
+      `INSERT OR IGNORE INTO memory_edge_side_tags (edge_row_id, side, tag) VALUES (?, ?, ?)`,
+    ).run(correctFullRow, "tail", "alpha");
+
+    // `beta` goes: the citing endpoint is uniquely laned now, so `alpha`'s
+    // declaration on the `correct/full` row becomes redundant — clearing it
+    // lands BOTH rows on the same (pair, '', '') key, which is the collision.
+    setTags(citing, ["the-task", "alpha"]);
+    const result = normalizeIncidentAttribution(db, [citing], { writer: "lane:clear", nowEpoch: NOW });
+
+    // `correct/full` survives even though it has the HIGHER row id —
+    // specificity outranks id order. The retired rule always deleted the row
+    // whose declaration was being cleared (`correctFullRow` here) and kept
+    // whichever sibling happened to already hold the collided shape.
+    expect(result.deletedEdges).toEqual([
+      { edgeId: useRow, citingId: citing, citedId: cited, side: "tail" },
+    ]);
+    expect(result.clearedDeclarations).toEqual([
+      { edgeId: correctFullRow, side: "tail", clearedTag: "alpha", reason: "redundant" },
+    ]);
+    expect(edgeRow(correctFullRow)).toEqual({ tailTag: "", headTag: "" });
+    expect(edgeRow(useRow)).toBeNull();
+    expect(sideIndexRows(correctFullRow)).toEqual([]);
   });
 
   test("a LIVE declaration on a genuinely ambiguous endpoint is left alone — that is what a stored side is for", () => {

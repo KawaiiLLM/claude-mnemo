@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { clearLane, insertLane, mergeLaneTag, renameLane } from "../../src/db/lanes";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
 import {
   addSegmentMembers,
@@ -18,6 +19,7 @@ import {
   getSegmentsForTurn,
   mergeSegments,
   MembershipFrozenOwnerError,
+  MembershipWriteRefusedError,
   setSegmentTags,
   writeMembershipTags,
 } from "../../src/db/segments";
@@ -25,6 +27,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { resetTurnExtractionFields, updateTurnById } from "../../src/db/turns";
 import { getFieldStamp } from "../../src/db/write-gate";
 import { rememberTool } from "../../src/mcp/remember";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 /**
  * ONE MEMBERSHIP PRIMITIVE (settlement-read-once spec D4 + D5, ticket 02).
@@ -336,6 +339,56 @@ describe("the membership primitive", () => {
       expect(storedTags(turnId)).toEqual(["compact:x"]);
       expect(membershipOf(turnId)).toEqual([frozen]);
       expect(getSegmentMemberTurnIds(db, segment.id)).toEqual([]);
+    });
+
+    // main-agent-edges ticket 13 (P1-9): before this ticket the turn's own
+    // `UPDATE` ran first, unconditionally — a lane-stranding refusal left the
+    // extraction fields cleared beside tags and membership the veto had just
+    // said must not move. Both must now be ONE transaction: a refusal throws
+    // and leaves every field byte-identical to what it was on entry.
+    test("`resetTurnExtractionFields` refuses ATOMICALLY when the reset would strand a declared lane — every field left byte-identical", () => {
+      const segment = createSegment(db, { title: "task", tags: ["the-task"], nowEpoch: 100 });
+      insertLane(db, segment.id, "lane-a", 100);
+      const cited = addTurn(2, ["the-task"]);
+      const turnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns
+             (session_id, prompt_number, status, assistant_response, title, content,
+              insight, type, tags, created_at_epoch)
+           VALUES (?, 1, 'provisional', 'r', 'Old title', 'Old content', 'Old insight',
+                   '["feature"]', '["the-task","lane-a"]', 5000)
+           RETURNING id`,
+        )
+        .get(sessionId)!.id;
+      addSegmentMembers(db, segment.id, [turnId], 100);
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: turnId },
+            cited: { kind: "turn", id: cited },
+            ...wordEdgeClass("extends"),
+            provenance: "asserted",
+            tailTag: "lane-a",
+          },
+        ],
+        120,
+      );
+
+      const before = db.query("SELECT * FROM turns WHERE id = ?").get(turnId);
+      const edgesBefore = db.query("SELECT * FROM memory_edges ORDER BY id").all();
+
+      // The reset strips every freeform tag, including `lane-a` — landing the
+      // turn in NO task at all, which has not declared `lane-a` either, so the
+      // edge's citing side would be stranded.
+      expect(() => resetTurnExtractionFields(db, turnId, 300)).toThrow(
+        MembershipWriteRefusedError,
+      );
+
+      expect(db.query("SELECT * FROM turns WHERE id = ?").get(turnId)).toEqual(before);
+      expect(db.query("SELECT * FROM memory_edges ORDER BY id").all()).toEqual(edgesBefore);
+      expect(storedTags(turnId)).toEqual(["the-task", "lane-a"]);
+      expect(membershipOf(turnId)).toEqual([segment.id]);
     });
 
     test("task-tier `clear` is `forced-detach`: it removes even a frozen row", () => {

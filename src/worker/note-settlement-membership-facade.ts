@@ -8,11 +8,14 @@ import {
   getLane,
   insertLane,
   mergeLaneTag,
+  turnIdsCarryingTagInSegment,
   type LaneMergeReceipt,
 } from "../db/lanes";
+import { normalizeIncidentAttribution } from "../db/normalize-incident-attribution";
 import { parseBareAddressReference } from "../db/references";
 import { getSegment } from "../db/segments";
 import { findTagNamespaceHolder, formatTagNamespaceRefusal } from "../db/tag-namespace";
+import { LANE_CREATE_WRITER } from "../db/write-gate";
 
 /**
  * The settlement LANE facade (lane-model-v12 spec D3d, ticket 15).
@@ -470,6 +473,20 @@ function evaluateLaneVerb(
     // concurrent declare, which the caller's write transaction serializes
     // against; re-reading the row keeps the receipt honest either way.
     const laneId = lane?.id ?? getLane(db, segmentId, tag)?.id ?? null;
+    if (lane !== null) {
+      // THE SEAM, in the SAME transaction (main-agent-edges ticket 13, P1-6):
+      // see `mcp/remember.ts`'s own `create` for the full reasoning — this is
+      // settlement's other caller of `insertLane`, and the finding named both.
+      // `onAmbiguous` stays pinned to `"keep"`: user ruling S15069/T2465 made
+      // an ambiguous side a warning only, with no repair authority, so this
+      // never deletes an edge or invalidates a job over a side it merely made
+      // ambiguous.
+      normalizeIncidentAttribution(db, turnIdsCarryingTagInSegment(db, tag, segmentId), {
+        writer: LANE_CREATE_WRITER,
+        nowEpoch,
+        onAmbiguous: () => "keep",
+      });
+    }
     return {
       ok: true,
       outcome: { lane: { action, segmentId, tag, laneId } },

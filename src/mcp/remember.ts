@@ -50,11 +50,13 @@ import {
   listLanesForSegment,
   mergeLaneTag,
   renameLane,
+  turnIdsCarryingTagInSegment,
   type LaneClearOutcome,
   type LaneMergeReceipt,
   type LaneRecord,
   type RenameLaneOutcome,
 } from "../db/lanes";
+import { normalizeIncidentAttribution } from "../db/normalize-incident-attribution";
 import {
   findTagNamespaceHolder,
   formatTagNamespaceRefusal,
@@ -63,6 +65,7 @@ import {
 import { countTurnsSince, touchSessionRememberActivity } from "../db/sessions";
 import {
   checkFieldGate,
+  LANE_CREATE_WRITER,
   sessionWriterId,
   stampField,
   type FieldGateOptions,
@@ -789,6 +792,19 @@ function handleCreateLane(
     if (!lane) {
       return { kind: "duplicate", lane: getLane(db, segmentId, tag)! };
     }
+    // THE SEAM, in the SAME transaction as `insertLane` (main-agent-edges
+    // ticket 13, P1-6): a turn already carrying `tag` becomes a member of this
+    // lane the instant it exists, and an endpoint that was `derived` through
+    // exactly one lane a statement ago may now resolve `ambiguous` — nothing
+    // normalised that until now. `onAmbiguous` is pinned to `"keep"`: user
+    // ruling S15069/T2465 made an ambiguous side a WARNING ONLY, with no
+    // repair authority, so lane creation never deletes an edge or invalidates
+    // a settlement job over a side it merely made ambiguous.
+    normalizeIncidentAttribution(db, turnIdsCarryingTagInSegment(db, tag, segmentId), {
+      writer: LANE_CREATE_WRITER,
+      nowEpoch,
+      onAmbiguous: () => "keep",
+    });
     // THE LIFECYCLE DEBT (lane-impressions spec Rev 8, "Lifecycle debts";
     // ticket 03), in the SAME transaction as the declaration it is about — a
     // lane that came into existence by hand has no impression and no settlement

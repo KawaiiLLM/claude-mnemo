@@ -7,6 +7,7 @@ import { runWriteTransaction } from "./database";
 import { indexTurnToFTS, reindexTurnFromDb } from "./search";
 import {
   deriveTurnSegmentMembership,
+  MembershipWriteRefusedError,
   recomputeSegmentFacetsForTurn,
   writeMembershipTags,
 } from "./segments";
@@ -453,6 +454,16 @@ export function promoteTurnFromNote(
   return updated;
 }
 
+/**
+ * ONE TRANSACTION (main-agent-edges ticket 13, P1-9). The membership write
+ * below can refuse — the lane-stranding veto — and before this ticket the
+ * turn's own `UPDATE` ran first and unconditionally, so a refusal left the
+ * extraction fields cleared beside membership and tags the veto had just said
+ * must not move: a preflight check that was not actually a preflight. Wrapped
+ * here, a refusal throws `MembershipWriteRefusedError` and
+ * `runWriteTransaction` unwinds the WHOLE call — the turn row, its FTS index
+ * and its membership are byte-identical to what they were on entry.
+ */
 export function resetTurnExtractionFields(
   db: Database,
   turnId: number,
@@ -464,45 +475,54 @@ export function resetTurnExtractionFields(
   }
   // Keep colon-namespaced internal reminder tags; drop agent freeform tags.
   const keptTags = existing.tags.filter((tag) => tag.includes(":"));
-  // `tags` LEFT OUT of this statement on purpose (settlement-read-once ticket
-  // 02): the membership primitive below owns that column, so the reset's tag
-  // write is stamped and derived like every other one instead of being a raw
-  // `UPDATE` the gate never sees.
-  db.query(
-    `UPDATE turns
-       SET status = 'active',
-           title = NULL,
-           content = NULL,
-           insight = NULL,
-           type = '[]',
-           updated_at_epoch = ?
-       WHERE id = ?`,
-  ).run(updatedAtEpoch, turnId);
-  // Re-index rather than delete: the extraction fields are gone, but the
-  // prompt and response this turn was captured with are still the record.
-  reindexTurnFromDb(db, turnId);
-  // This write clears `type` and strips the freeform tags, so a segment holding
-  // this turn was deriving from values that no longer exist (ticket 15). Same
-  // gate as `updateTurnById`: a reset of a turn that already held neither
-  // changes no input.
   const resetTagsMoved = JSON.stringify(existing.tags) !== stringifyArray(keptTags);
-  // THE PRIMITIVE, `normal` (settlement-read-once spec D4). The note that
-  // carried the task tag is being reset, so the membership derived from it
-  // goes with it — but a FROZEN row survives: before this ticket the
-  // derivation deleted every membership row it found when the tags named no
-  // task, so resetting one turn of an unnamed task destroyed legacy ownership
-  // nothing could put back. Called unconditionally, not under
-  // `resetTagsMoved`: the primitive itself decides whether anything moved,
-  // and a turn whose stored membership disagrees with its stored tags is
-  // exactly what a reset should reconcile.
-  writeMembershipTags(db, {
-    operation: "normal",
-    writes: [{ turnId, tags: keptTags }],
-    nowEpoch: updatedAtEpoch,
+
+  runWriteTransaction(db, () => {
+    // THE PRIMITIVE, `normal` (settlement-read-once spec D4), FIRST — its own
+    // refusal (the lane-stranding veto) is checked over the whole batch before
+    // its first `UPDATE`, so a refusal here has written nothing at all yet, and
+    // the turn's own fields below are still untouched for the throw to unwind.
+    // A FROZEN row survives: before this ticket the derivation deleted every
+    // membership row it found when the tags named no task, so resetting one
+    // turn of an unnamed task destroyed legacy ownership nothing could put
+    // back. Called unconditionally, not under `resetTagsMoved`: the primitive
+    // itself decides whether anything moved, and a turn whose stored
+    // membership disagrees with its stored tags is exactly what a reset should
+    // reconcile.
+    const membership = writeMembershipTags(db, {
+      operation: "normal",
+      writes: [{ turnId, tags: keptTags }],
+      nowEpoch: updatedAtEpoch,
+    });
+    if (!membership.ok) {
+      throw new MembershipWriteRefusedError(membership);
+    }
+
+    // `tags` LEFT OUT of this statement on purpose (settlement-read-once
+    // ticket 02): the membership primitive above owns that column, so the
+    // reset's tag write is stamped and derived like every other one instead
+    // of being a raw `UPDATE` the gate never sees.
+    db.query(
+      `UPDATE turns
+         SET status = 'active',
+             title = NULL,
+             content = NULL,
+             insight = NULL,
+             type = '[]',
+             updated_at_epoch = ?
+         WHERE id = ?`,
+    ).run(updatedAtEpoch, turnId);
+    // Re-index rather than delete: the extraction fields are gone, but the
+    // prompt and response this turn was captured with are still the record.
+    reindexTurnFromDb(db, turnId);
+    // This write clears `type` and strips the freeform tags, so a segment
+    // holding this turn was deriving from values that no longer exist (ticket
+    // 15). Same gate as `updateTurnById`: a reset of a turn that already held
+    // neither changes no input.
+    if (existing.type.length > 0 || resetTagsMoved) {
+      recomputeSegmentFacetsForTurn(db, turnId);
+    }
   });
-  if (existing.type.length > 0 || resetTagsMoved) {
-    recomputeSegmentFacetsForTurn(db, turnId);
-  }
 }
 
 /**
