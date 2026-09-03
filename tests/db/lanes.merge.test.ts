@@ -164,6 +164,8 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     cited: number,
     options: {
       relation?: string;
+      relationClass?: "correct" | "verify" | "use";
+      relationCoverage?: "full" | "partial" | "";
       provenance?: "asserted" | "judged";
       tailTag?: string;
       headTag?: string;
@@ -181,7 +183,8 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
       citingId: citing,
       citedId: cited,
       relation: options.relation ?? "extends",
-      relationClass: "use",
+      relationClass: options.relationClass ?? "use",
+      relationCoverage: options.relationCoverage ?? "",
       provenance: options.provenance ?? "asserted",
       tailTag,
       headTag,
@@ -333,11 +336,17 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
   // Collisions
   // -------------------------------------------------------------------------
 
-  test("two edges landing on ONE identity key fold through the established rule: asserted survives, judged goes", () => {
+  test("two edges of the SAME class landing on ONE identity key fold through selectLogicalEdgeRow: the LOWEST id survives, provenance and age decide nothing", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
     // Two rows on ONE pair: pre-cutover stock, seeded past the write path —
     // see `legacyEdge`. A collision cannot exist in any other shape now.
+    //
+    // main-agent-edges ticket 13 (P1-3): this collision used to fold through a
+    // LOCAL provenance/age comparator that could drop a `correct/full` row to
+    // keep a `use` one. The survivor is `selectLogicalEdgeRow`'s row now — the
+    // SAME rule the write path and the cutover's own fold use — and with both
+    // rows at the SAME class, its only tie-break is the lowest row id.
     const viaA = legacyEdge(t2, t1, {
       tailTag: "lane-a",
       headTag: "lane-a",
@@ -355,21 +364,22 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
 
     expect(receipt.collisions).toHaveLength(1);
     const collision = receipt.collisions[0]!;
-    // The ASSERTED row survives even though it is the LATER one — provenance
-    // outranks age, which is exactly what "asserted 的审计元数据存活" means.
-    expect(collision.keptEdgeId).toBe(viaB);
-    expect(collision.droppedEdgeId).toBe(viaA);
-    expect(collision.rule).toBe("provenance");
-    expect(collision.keptProvenance).toBe("asserted");
-    expect(collision.droppedProvenance).toBe("judged");
-    expect(edgeSides(viaA)).toBeNull();
-    expect(attributedSides(viaB)).toEqual({ tail: "lane-b", head: "lane-b" });
+    // `viaA` has the LOWER row id (seeded first) — it survives regardless of
+    // its `judged` provenance and earlier `createdAtEpoch`, both of which the
+    // OLD rule would have used to keep `viaB` instead.
+    expect(collision.keptEdgeId).toBe(viaA);
+    expect(collision.droppedEdgeId).toBe(viaB);
+    expect(collision.rule).toBe("lowest-id");
+    expect(collision.keptProvenance).toBe("judged");
+    expect(collision.droppedProvenance).toBe("asserted");
+    expect(edgeSides(viaB)).toBeNull();
+    expect(attributedSides(viaA)).toEqual({ tail: "lane-b", head: "lane-b" });
     // The casualty's side-index rows go with it — a lookup row pointing at a
     // deleted edge would attribute a lane through a row nobody can read.
-    expect(sideIndexRows().every((row) => row.edgeRowId !== viaA)).toBe(true);
+    expect(sideIndexRows().every((row) => row.edgeRowId !== viaB)).toBe(true);
   });
 
-  test("EQUAL provenance keeps the EARLIER row, and the receipt says which clause decided", () => {
+  test("EQUAL class keeps the LOWEST id, and the receipt says which clause decided", () => {
     const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
     const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
     const earlier = legacyEdge(t2, t1, {
@@ -388,9 +398,47 @@ describe("mergeLaneTag — one lane folded into another (ticket 15)", () => {
     const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
 
     expect(receipt.collisions).toHaveLength(1);
+    // `earlier` was seeded first, so it also carries the lower row id — same
+    // outcome the retired age-based rule gave, for a different reason now.
     expect(receipt.collisions[0]!.keptEdgeId).toBe(earlier);
     expect(receipt.collisions[0]!.droppedEdgeId).toBe(later);
-    expect(receipt.collisions[0]!.rule).toBe("earlier");
+    expect(receipt.collisions[0]!.rule).toBe("lowest-id");
+  });
+
+  test("the MORE SPECIFIC class survives even at a HIGHER row id — specificity outranks id order", () => {
+    const t1 = seedTurn(1, { tags: ["home", "lane-a", "lane-b"] });
+    const t2 = seedTurn(2, { tags: ["home", "lane-a", "lane-b"] });
+    // `use`, seeded FIRST — the lower id.
+    const useRow = legacyEdge(t2, t1, {
+      tailTag: "lane-a",
+      headTag: "lane-a",
+      relationClass: "use",
+      provenance: "asserted",
+      createdAtEpoch: NOW - 100,
+    });
+    // `correct/full`, seeded SECOND — the higher id, and the more specific
+    // class. Under the retired rule this would have lost on age; under
+    // `selectLogicalEdgeRow` it wins outright, because coverage/specificity is
+    // ranked BEFORE row id.
+    const correctFullRow = legacyEdge(t2, t1, {
+      tailTag: "lane-b",
+      headTag: "lane-b",
+      relationClass: "correct",
+      relationCoverage: "full",
+      provenance: "judged",
+      createdAtEpoch: NOW,
+    });
+
+    const receipt = mergeLaneTag(db, segmentId, "lane-a", "lane-b", NOW);
+
+    expect(receipt.collisions).toHaveLength(1);
+    const collision = receipt.collisions[0]!;
+    expect(collision.keptEdgeId).toBe(correctFullRow);
+    expect(collision.droppedEdgeId).toBe(useRow);
+    expect(collision.rule).toBe("specificity");
+    expect(collision.relationClass).toBe("correct");
+    expect(edgeSides(useRow)).toBeNull();
+    expect(attributedSides(correctFullRow)).toEqual({ tail: "lane-b", head: "lane-b" });
   });
 
   // INVERTED by main-agent-edges ticket 01. The merge's identity key used to

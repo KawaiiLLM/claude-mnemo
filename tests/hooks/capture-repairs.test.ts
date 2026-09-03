@@ -5,12 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
+import { insertLane } from "../../src/db/lanes";
+import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { createObservation } from "../../src/db/observations";
 import { getOrphanTurns } from "../../src/db/orphan-turns";
 import {
   addSegmentMembers,
   createSegment,
   getSegmentMemberTurnIds,
+  MembershipWriteRefusedError,
   writeMembershipTags,
 } from "../../src/db/segments";
 import { initializeSchema } from "../../src/db/schema";
@@ -29,6 +32,7 @@ import { runHookCommand } from "../../src/hooks/hook-command";
 import { scanTranscriptIncrementally } from "../../src/hooks/transcript-scan";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import type { HookHandler, NormalizedHookInput } from "../../src/hooks/types";
+import { wordEdgeClass } from "../support/edge-row-fixtures";
 
 const PROJECT = "/Users/zhaoqixuan/Projects/claude-mnemo";
 const CONTENT_SESSION_ID = "session-capture";
@@ -421,6 +425,57 @@ describe("capture repairs", () => {
       expect(getSegmentMemberTurnIds(db, named)).toEqual([]);
       // …and the frozen row survives, because no tag write could put it back.
       expect(getSegmentMemberTurnIds(db, frozen)).toEqual([turnId]);
+    });
+
+    // main-agent-edges ticket 13 (P1-9): before this ticket the turn's own
+    // `UPDATE` (marking it a compact marker, clearing every extraction field)
+    // ran first and unconditionally, and `writeMembershipTags`'s `.ok` was
+    // never read — a lane-stranding refusal left the turn half-converted
+    // beside membership and a declaration the veto had just said must not
+    // move. The membership write now runs FIRST and throws before anything
+    // else in the conversion has written a byte.
+    test("refuses ATOMICALLY when the conversion's tag rewrite would strand a declared lane — no field of the turn or its edges changes", () => {
+      const { turnId, path } = seedOccupiedTurn();
+      const task = createSegment(db, { title: "task", tags: ["a-task"], nowEpoch: 700 }).id;
+      insertLane(db, task, "lane-a", 700);
+      expect(
+        writeMembershipTags(db, {
+          operation: "normal",
+          writes: [{ turnId, tags: ["a-task", "lane-a"] }],
+          nowEpoch: 700,
+        }).ok,
+      ).toBe(true);
+      const neighbour = insertTurn({
+        promptNumber: 2,
+        userPrompt: "cited",
+        status: "extracted",
+      });
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: turnId },
+            cited: { kind: "turn", id: neighbour },
+            ...wordEdgeClass("extends"),
+            provenance: "asserted",
+            tailTag: "lane-a",
+          },
+        ],
+        750,
+      );
+
+      const before = getTurnById(db, turnId);
+      const edgesBefore = db.query("SELECT * FROM memory_edges ORDER BY id").all();
+
+      // The conversion's own tag rewrite (`compactMetadataTags`) replaces the
+      // WHOLE tag set with two `compact:` words, stripping both `a-task` and
+      // `lane-a` — landing the turn in no task at all, which has not declared
+      // `lane-a`, so the edge's citing side would be stranded.
+      expect(() => repair(path)).toThrow(MembershipWriteRefusedError);
+
+      expect(getTurnById(db, turnId)).toEqual(before);
+      expect(db.query("SELECT * FROM memory_edges ORDER BY id").all()).toEqual(edgesBefore);
+      expect(getSegmentMemberTurnIds(db, task)).toEqual([turnId]);
     });
 
     test("prunes the converted turn's outgoing citations and keeps incoming ones", () => {

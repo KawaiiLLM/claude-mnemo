@@ -436,17 +436,28 @@ export const RELATION_CLASS_SPECIFICITY: Record<RelationClass, number> = {
  * Wordless rows (`relationClass === ''`, deferral window only) are excluded:
  * they are not edges (this module's header), and a relation write drops the
  * one it displaces rather than promoting it.
+ *
+ * GENERIC over anything that carries `id` plus a `relationClass` column
+ * (main-agent-edges ticket 13, P1-3) — every collision site that has to
+ * decide a survivor calls THIS function rather than growing its own
+ * provenance/time comparator, and each reads a different row shape off raw
+ * SQL (`MemoryEdge`, `lanes.ts`'s `LaneMergeEdgeRow`, `normalize-incident-
+ * attribution.ts`'s `IncidentEdgeRow`) — most of them typed `relationClass:
+ * string` rather than the narrower `RelationClassValue`, which is why the
+ * bound below is the field this function actually reads rather than
+ * `RelationClassBearingRow`: coverage plays no part in the rank (the module
+ * header above explains why), so nothing here needs it.
  */
-export function selectLogicalEdgeRow(rows: readonly MemoryEdge[]): MemoryEdge | null {
-  let best: MemoryEdge | null = null;
+export function selectLogicalEdgeRow<T extends { id: number; relationClass: string }>(
+  rows: readonly T[],
+): T | null {
+  let best: T | null = null;
   let bestRank = -1;
   for (const row of rows) {
     if (!isRelationClass(row.relationClass)) {
       continue;
     }
-    const materialized = edgeRelationClass(row);
-    const rank =
-      materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    const rank = RELATION_CLASS_SPECIFICITY[row.relationClass];
     if (best === null || rank > bestRank || (rank === bestRank && row.id < best.id)) {
       best = row;
       bestRank = rank;

@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { reindexTurnFromDb } from "../db/search";
-import { writeMembershipTags } from "../db/segments";
+import { MembershipWriteRefusedError, writeMembershipTags } from "../db/segments";
 import { getMaxPromptNumber } from "../db/turns";
 import {
   COMPACT_REPAIR_WRITER,
@@ -199,6 +199,15 @@ function compactMetadataTags(claim: CompactBoundaryClaim): string[] {
  * `[T<n>]` out of `content`. The read path has been an unconditional union of
  * the edge table and that parse since ticket 06, so the flag had no reader
  * left; the column itself is now retired.)
+ *
+ * THE MEMBERSHIP WRITE RUNS FIRST (main-agent-edges ticket 13, P1-9). Before
+ * this ticket the turn's own `UPDATE` ran unconditionally and the primitive's
+ * `.ok` was never read, so a lane-stranding refusal left the turn marked
+ * `/compact` with its extraction fields cleared beside membership and tags the
+ * veto had just said must not move. The caller owns the surrounding
+ * transaction (`applyCaptureRepair`'s own doc comment), so a refusal here
+ * throws `MembershipWriteRefusedError` before anything else in this function
+ * has written a byte, and the whole batch — not just this turn — unwinds.
  */
 function convertOccupiedTurnToMarker(
   db: Database,
@@ -206,6 +215,23 @@ function convertOccupiedTurnToMarker(
   claim: CompactBoundaryClaim,
   nowEpoch: number,
 ): void {
+  // THE TAGS WRITE GOES THROUGH THE MEMBERSHIP PRIMITIVE (settlement-read-once
+  // spec D4), `normal`. This repair used to replace the turn's tags with two
+  // `compact:` words inside the statement below and DERIVE NOTHING — leaving
+  // the old `segment_members` rows standing beside tags that no longer carry
+  // the task: the double truth in miniature. The derive now runs, so a
+  // converted turn leaves the task its tag no longer names; a FROZEN row (an
+  // unnamed task's legacy ownership) is preserved, because no tag put it there
+  // and none can put it back.
+  const membership = writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: compactMetadataTags(claim) }],
+    nowEpoch,
+  });
+  if (!membership.ok) {
+    throw new MembershipWriteRefusedError(membership);
+  }
+
   db.query<unknown, [string, number, number]>(
     `UPDATE turns
      SET type = '["compact"]',
@@ -229,20 +255,6 @@ function convertOccupiedTurnToMarker(
     nowEpoch,
     turnId,
   );
-
-  // THE TAGS WRITE GOES THROUGH THE MEMBERSHIP PRIMITIVE (settlement-read-once
-  // spec D4), `normal`. This repair used to replace the turn's tags with two
-  // `compact:` words inside the statement above and DERIVE NOTHING — leaving
-  // the old `segment_members` rows standing beside tags that no longer carry
-  // the task: the double truth in miniature. The derive now runs, so a
-  // converted turn leaves the task its tag no longer names; a FROZEN row (an
-  // unnamed task's legacy ownership) is preserved, because no tag put it there
-  // and none can put it back.
-  writeMembershipTags(db, {
-    operation: "normal",
-    writes: [{ turnId, tags: compactMetadataTags(claim) }],
-    nowEpoch,
-  });
 
   // Outgoing only. Rows citing this turn (`cited_id = ?`) are other turns'
   // provenance, not this row's, and survive.

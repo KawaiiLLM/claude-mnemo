@@ -73,6 +73,7 @@ import {
   type EndpointLaneFacts,
   UNDECLARED_SIDE_TAG,
 } from "./edge-side-resolution";
+import { selectLogicalEdgeRow } from "./memory-edges";
 import { recordPreSideResolutions } from "./note-settlement-pre-resolutions";
 import { invalidateOverlappingSettlementJobs } from "./settlement-job-invalidation";
 import { stampTurnRelationsRevision } from "./write-gate";
@@ -267,8 +268,20 @@ export function normalizeIncidentAttribution(
   // edge, so the loser is deleted into the receipt exactly as the cutover's
   // own fold does it. After the cutover a pair holds one row and this finds
   // nothing.
-  const collidingSibling = db.query<{ id: number }, [string, string, number]>(
-    `SELECT other.id AS id
+  //
+  // WHICH ONE IS THE LOSER (main-agent-edges ticket 13, P1-3): `me` — the row
+  // this loop is currently clearing — is NOT automatically it. The survivor is
+  // `selectLogicalEdgeRow`'s row over the pair, exactly the rule the write path
+  // and the cutover's own fold use, so a `correct/full` row can never be
+  // dropped in favour of a `use` sibling merely because the sibling already
+  // has the lowest id.
+  const collidingSibling = db.query<
+    { id: number; relationClass: string; relationCoverage: string },
+    [string, string, number]
+  >(
+    `SELECT other.id AS id,
+            other.relation_class AS relationClass,
+            other.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN memory_edges other
          ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
@@ -333,28 +346,59 @@ export function normalizeIncidentAttribution(
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
         const nextHead = side === "head" ? UNDECLARED_SIDE_TAG : live.headTag;
-        if (collidingSibling.get(nextTail, nextHead, row.id) !== null) {
-          // The two rows fold: this one goes, receipted, and the surviving
-          // sibling already carries the cleared shape.
-          dropAllSideIndexRows.run(row.id);
-          deleteEdge.run(row.id);
+        const sibling = collidingSibling.get(nextTail, nextHead, row.id);
+        if (sibling !== null) {
+          // The two rows fold. main-agent-edges ticket 13 (P1-3): the
+          // survivor is `selectLogicalEdgeRow`'s row over the pair — the SAME
+          // rule the write path and the cutover's own fold use — never
+          // whichever row happens to be `me` in this loop.
+          const winner = selectLogicalEdgeRow([
+            { id: row.id, relationClass: row.relationClass },
+            sibling,
+          ])!;
+          if (winner.id === sibling.id) {
+            // The sibling survives: this row goes, receipted, and the
+            // surviving sibling already carries the cleared shape.
+            dropAllSideIndexRows.run(row.id);
+            deleteEdge.run(row.id);
+            insertReceipt.run(
+              row.id,
+              "delete-edge",
+              side,
+              row.citingId,
+              row.citedId,
+              row.relationClass,
+              row.relationCoverage,
+              row.tailTag,
+              row.headTag,
+              ctx.writer,
+              ctx.nowEpoch,
+            );
+            deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+            stampedCiterIds.add(row.citingId);
+            deleted = true;
+            continue;
+          }
+          // This row survives instead: its own clear proceeds below, and the
+          // sibling — which already carries the exact shape this row is about
+          // to take — is the one that goes.
+          dropAllSideIndexRows.run(sibling.id);
+          deleteEdge.run(sibling.id);
           insertReceipt.run(
-            row.id,
+            sibling.id,
             "delete-edge",
             side,
             row.citingId,
             row.citedId,
-            row.relationClass,
-            row.relationCoverage,
-            row.tailTag,
-            row.headTag,
+            sibling.relationClass,
+            sibling.relationCoverage,
+            nextTail,
+            nextHead,
             ctx.writer,
             ctx.nowEpoch,
           );
-          deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+          deletedEdges.push({ edgeId: sibling.id, citingId: row.citingId, citedId: row.citedId, side });
           stampedCiterIds.add(row.citingId);
-          deleted = true;
-          continue;
         }
         clearSide[side].run(row.id);
         dropSideIndexRow.run(row.id, side);

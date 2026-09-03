@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { loadEndpointLaneFacts, resolveEdgeSide } from "../../src/db/edge-side-resolution";
 import { getLane, insertLane, listLanesForSegment } from "../../src/db/lanes";
 import { deriveSideTags, getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
@@ -766,6 +767,101 @@ describe("remember tool (ticket 02)", () => {
         const segmentId = createViaTool("declare fresh word");
         const text = resultText(declareLane(segmentId, "brand-new"));
         expect(text).toContain("No existing turn carries that word.");
+      });
+
+      // main-agent-edges ticket 13 (P1-6): minting a lane conscripts every
+      // turn that already carries the word — an endpoint that was `derived`
+      // through exactly one lane a statement ago may resolve `ambiguous` the
+      // instant the second lane exists, and nothing normalised that before
+      // this ticket. User ruling S15069/T2465 (mid-batch): an ambiguous side
+      // is a WARNING ONLY now, so the edge is KEPT — no deletion, and (this
+      // being the main-agent path) no settlement job exists to invalidate.
+      test("conscripting a turn into a new lane re-resolves EVERY incident side, clearing a stale invalid declaration, and leaves the newly-ambiguous side kept, unreceipted", () => {
+        const segmentId = createViaTool("declare conscription ambiguous", "home");
+        const t1 = seedTurn(1, 100);
+        const t2 = seedTurn(2, 101);
+        declareLane(segmentId, "alpha");
+        // Both members via the segment's own tag; `alpha` is t1's ONLY lane so
+        // far, and t1 already carries `legacy-word` before that word is a lane
+        // at all — an ordinary free-form tag until `declareLane` below mints it.
+        updateTurnById(db, t1, {
+          tags: ["home", "alpha", "legacy-word"],
+          updatedAtEpoch: 110,
+        });
+        updateTurnById(db, t2, { tags: ["home", "alpha"], updatedAtEpoch: 110 });
+
+        const written = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t1 },
+              cited: { kind: "turn", id: t2 },
+              ...wordEdgeClass("extends"),
+              provenance: "asserted",
+            },
+          ],
+          120,
+        );
+        const edgeId = written.written[0]!.id;
+        const edgeRow = { citingId: t1, citedId: t2, tailTag: "", headTag: "" };
+        expect(
+          resolveEdgeSide(edgeRow, "tail", loadEndpointLaneFacts(db, [t1, t2])).outcome,
+        ).toBe("derived");
+
+        // A SEPARATE, unrelated edge already carries a STALE declaration on
+        // t1's citing side — `stray-lane` is not, and never was, among t1's
+        // tags (a legacy/malformed row, seeded past the write path's own
+        // validation the same way the seam's own unit tests do). This is the
+        // LOAD-BEARING half of the probe: minting a lane and conscripting t1
+        // never removes cardinality or invalidates a tag by itself (a new
+        // lane only ever ADDS a possible attribution), so the earlier edge's
+        // `ambiguous` outcome alone cannot distinguish "the seam ran" from
+        // "it didn't" — resolution is a pure read. A stray invalid
+        // declaration getting cleared as a SIDE EFFECT of the conscription's
+        // own re-resolution can: it proves `normalizeIncidentAttribution` ran
+        // over every incident side of t1, not merely the new lane's own edge.
+        const t3 = seedTurn(3, 102);
+        updateTurnById(db, t3, { tags: ["home", "alpha"], updatedAtEpoch: 110 });
+        const strayWritten = writeMemoryEdges(
+          db,
+          [
+            {
+              citing: { kind: "turn", id: t1 },
+              cited: { kind: "turn", id: t3 },
+              ...wordEdgeClass("extends"),
+              provenance: "asserted",
+              tailTag: "stray-lane",
+            },
+          ],
+          120,
+        );
+        const strayEdgeId = strayWritten.written[0]!.id;
+
+        const text = resultText(declareLane(segmentId, "legacy-word"));
+        expect(text).toContain("Created lane");
+
+        const resolved = resolveEdgeSide(edgeRow, "tail", loadEndpointLaneFacts(db, [t1, t2]));
+        expect(resolved.outcome).toBe("ambiguous");
+
+        const stillThere = db
+          .query<{ id: number }, [number]>("SELECT id FROM memory_edges WHERE id = ?")
+          .get(edgeId);
+        expect(stillThere).not.toBeNull();
+        const deleteReceipts = db
+          .query<{ n: number }, [number]>(
+            `SELECT COUNT(*) AS n FROM edge_attribution_receipts
+              WHERE edge_row_id = ? AND action = 'delete-edge'`,
+          )
+          .get(edgeId)!.n;
+        expect(deleteReceipts).toBe(0);
+
+        // The stray invalid declaration is gone — the seam ran.
+        const strayTail = db
+          .query<{ tailTag: string }, [number]>(
+            "SELECT tail_tag AS tailTag FROM memory_edges WHERE id = ?",
+          )
+          .get(strayEdgeId)!.tailTag;
+        expect(strayTail).toBe("");
       });
 
       test("refuses a namespace-prefixed tag — that namespace is the hooks'", () => {

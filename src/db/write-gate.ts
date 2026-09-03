@@ -1010,6 +1010,13 @@ export const RELATIONS_GATE_FIELD = "relations";
  */
 export const LANE_MERGE_WRITER = "lane:merge";
 export const LANE_CLEAR_WRITER = "lane:clear";
+/**
+ * main-agent-edges ticket 13 (P1-6): minting a lane conscripts every turn
+ * that already carries the word — an attribution change like any other lane
+ * verb's — so its post-normalisation pass stamps under its own id rather
+ * than the caller's, for the same reason `LANE_MERGE_WRITER` gives.
+ */
+export const LANE_CREATE_WRITER = "lane:create";
 export const COMPACT_REPAIR_WRITER = "compact:repair";
 /**
  * The one writer id no TypeScript path ever stamps: `memory_edges_prune_deleted_turn`

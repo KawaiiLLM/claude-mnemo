@@ -5,7 +5,9 @@ import { foldLaneImpressionIntoSurvivor } from "./impressions";
 import { normalizeIncidentAttribution } from "./normalize-incident-attribution";
 import {
   isEdgeProvenance,
+  RELATION_CLASS_SPECIFICITY,
   rankEdgeProvenance,
+  selectLogicalEdgeRow,
   UNSETTLED_SIDE_TAG,
   type CitingNode,
   type CitingNodeKind,
@@ -17,6 +19,7 @@ import {
   writeMembershipTags,
   type MembershipTagWrite,
 } from "./segments";
+import { isRelationClass } from "../shared/relation-class";
 import {
   findTagNamespaceHolder,
   TagNamespaceCollisionError,
@@ -241,6 +244,31 @@ export function countTurnsCarryingTag(
   return { total, inSegment };
 }
 
+/**
+ * The IDS half of `countTurnsCarryingTag`'s `inSegment` count (main-agent-edges
+ * ticket 13, P1-6): a fresh lane's word may already sit in some member turn's
+ * `tags` — conscripted the moment the lane exists — and each such endpoint's
+ * incident edge sides may have just stopped being `derived` and started being
+ * `ambiguous`. `insertLane`'s two callers need the ROWS, not just the count,
+ * to re-resolve what they touched.
+ */
+export function turnIdsCarryingTagInSegment(
+  db: Database,
+  tag: string,
+  segmentId: number,
+): number[] {
+  return db
+    .query<{ id: number }, [string, number]>(
+      `SELECT t.id AS id FROM turns t
+         JOIN segment_members sm ON sm.turn_id = t.id
+        WHERE EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+          AND sm.segment_id = ?
+        ORDER BY t.id ASC`,
+    )
+    .all(tag, segmentId)
+    .map((row) => row.id);
+}
+
 export function isCanonicalLaneTag(raw: string): boolean {
   return checkCanonicalLaneTag(raw).ok;
 }
@@ -405,6 +433,20 @@ export function countLaneMemberTurnsInSegment(
  */
 export class LaneMergeInvariantError extends Error {}
 
+/**
+ * Which clause of `selectLogicalEdgeRow`'s rule decided a collision's
+ * survivor (main-agent-edges ticket 13, P1-3) — for the receipt, never the
+ * decision itself. `"specificity"`: the ranks differed, so the more specific
+ * class won outright. `"lowest-id"`: the ranks tied, so the earlier row (the
+ * total-order backstop) won. Deliberately its OWN type rather than
+ * `LaneModelV12MergeRule` (`"provenance" | "earlier"`) — that type still
+ * names the OLD provenance/age comparator the v12 vocabulary-merge migration
+ * (`runLaneModelV12VocabularyMerge`, below) keeps using for its own,
+ * unrelated one-time collision; the two rules are not the same rule wearing
+ * two names.
+ */
+export type LogicalEdgeCollisionRule = "specificity" | "lowest-id";
+
 /** One identity-key collision the side rewrite created, recorded from BOTH sides. */
 export interface LaneMergeCollision {
   citingAddress: string;
@@ -420,7 +462,7 @@ export interface LaneMergeCollision {
   droppedEdgeId: number;
   droppedProvenance: string;
   droppedCreatedAtEpoch: number;
-  rule: LaneModelV12MergeRule;
+  rule: LogicalEdgeCollisionRule;
 }
 
 export interface LaneMergeReceipt {
@@ -528,10 +570,22 @@ interface LaneMergeEdgeRow {
   citedKind: string;
   citedId: number;
   relationClass: string;
+  relationCoverage: string;
   provenance: string;
   tailTag: string;
   headTag: string;
   createdAtEpoch: number;
+}
+
+/**
+ * `selectLogicalEdgeRow`'s own rank, read off a raw `relation_class` column
+ * that a caller has NOT already narrowed to `RelationClassValue` — the shape
+ * every collision site here reads off SQL. A wordless row (deferral window
+ * only) ranks lowest, same as `selectLogicalEdgeRow` treats it: it is never
+ * the reason two rows collided, so it never explains why one survived.
+ */
+function logicalEdgeSpecificityRank(relationClass: string): number {
+  return isRelationClass(relationClass) ? RELATION_CLASS_SPECIFICITY[relationClass] : -1;
 }
 
 /**
@@ -573,16 +627,18 @@ interface LaneMergeEdgeRow {
  * the segment owning THAT side's own endpoint. An edge crossing from this
  * segment into another has exactly one side rewritten.
  *
- * COLLISIONS GO THROUGH THE ESTABLISHED RULE. An edge identity is
- * `(citing, cited, relation, tail_tag, head_tag)`, so folding two tags into one
- * can land two rows on one key — an `extends` from T1 to T2 tagged `a→a` and
- * another tagged `b→b` are two rows today and one key after. They fold through
- * `sortLaneModelV12MergeGroup` (asserted metadata survives; equal rank keeps
- * the earlier row), the SAME comparator the v12 migrations use, and the count
- * lands in the receipt. Casualties are DELETED BEFORE any survivor is
- * rewritten, M-B's own ordering: a survivor's new key belongs to its own group
- * and every other member of that group is already gone, so no `UPDATE` can
- * transiently collide and the UNIQUE constraint never has to be suspended.
+ * COLLISIONS GO THROUGH THE ESTABLISHED RULE — `selectLogicalEdgeRow`
+ * (main-agent-edges D5, ticket 13), the SAME function the write path and the
+ * cutover's own fold use, not a provenance/age comparator local to this verb.
+ * An edge identity is `(citing, cited, relation, tail_tag, head_tag)` in the
+ * deferral window, so folding two tags into one can land two rows on one key
+ * — an `extends` from T1 to T2 tagged `a→a` and another tagged `b→b` are two
+ * rows today and one key after. They fold on the pair's most specific class,
+ * then the lowest row id; the count lands in the receipt. Casualties are
+ * DELETED BEFORE any survivor is rewritten, M-B's own ordering: a survivor's
+ * new key belongs to its own group and every other member of that group is
+ * already gone, so no `UPDATE` can transiently collide and the UNIQUE
+ * constraint never has to be suspended.
  *
  * THE TAG WRITE RE-DERIVES MEMBERSHIP, and that is not defensive padding.
  * `deriveTurnSegmentMembership` (db/segments.ts) is what keeps `tags` and
@@ -692,7 +748,7 @@ export function mergeLaneTag(
       `SELECT id,
               citing_kind AS citingKind, citing_id AS citingId,
               cited_kind AS citedKind, cited_id AS citedId,
-              relation_class AS relationClass, provenance,
+              relation_class AS relationClass, relation_coverage AS relationCoverage, provenance,
               tail_tag AS tailTag, head_tag AS headTag,
               created_at_epoch AS createdAtEpoch
          FROM memory_edges
@@ -783,37 +839,48 @@ export function mergeLaneTag(
       survivors.push(bucket[0]!);
       continue;
     }
-    const ordered = sortLaneModelV12MergeGroup(
-      bucket.map((entry) => ({
+    // main-agent-edges ticket 13 (P1-3): the survivor is `selectLogicalEdgeRow`'s
+    // row — the SAME rule the write path and the cutover's own fold use — never
+    // a fresh provenance/age comparator that could drop a `correct/full` row to
+    // keep a `use` one merely because the `use` row is `asserted` or later.
+    const candidates = bucket
+      .map((entry) => ({
         id: entry.row.id,
-        provenance: entry.row.provenance,
-        createdAtEpoch: entry.row.createdAtEpoch,
+        relationClass: entry.row.relationClass,
+        relationCoverage: entry.row.relationCoverage,
         entry,
-      })),
-    );
-    const kept = ordered[0]!;
-    survivors.push(kept.entry);
-    for (const dropped of ordered.slice(1)) {
+      }))
+      .sort((a, b) => a.id - b.id);
+    const winner = selectLogicalEdgeRow(candidates)!;
+    const kept = winner.entry;
+    const keptRank = logicalEdgeSpecificityRank(winner.relationClass);
+    survivors.push(kept);
+    for (const candidate of candidates) {
+      if (candidate === winner) {
+        continue;
+      }
+      const dropped = candidate.entry;
+      const droppedRank = logicalEdgeSpecificityRank(candidate.relationClass);
       collisions.push({
-        citingAddress: resolveEdgeNodeAddress(db, kept.entry.row.citingKind, kept.entry.row.citingId),
-        citedAddress: resolveEdgeNodeAddress(db, kept.entry.row.citedKind, kept.entry.row.citedId),
-        relationClass: kept.entry.row.relationClass,
-        tailTag: kept.entry.tailTag,
-        headTag: kept.entry.headTag,
-        keptEdgeId: kept.id,
-        keptProvenance: kept.provenance,
-        keptCreatedAtEpoch: kept.createdAtEpoch,
-        droppedEdgeId: dropped.id,
-        droppedProvenance: dropped.provenance,
-        droppedCreatedAtEpoch: dropped.createdAtEpoch,
-        rule: laneModelV12MergeRule(kept, dropped),
+        citingAddress: resolveEdgeNodeAddress(db, kept.row.citingKind, kept.row.citingId),
+        citedAddress: resolveEdgeNodeAddress(db, kept.row.citedKind, kept.row.citedId),
+        relationClass: kept.row.relationClass,
+        tailTag: kept.tailTag,
+        headTag: kept.headTag,
+        keptEdgeId: kept.row.id,
+        keptProvenance: kept.row.provenance,
+        keptCreatedAtEpoch: kept.row.createdAtEpoch,
+        droppedEdgeId: dropped.row.id,
+        droppedProvenance: dropped.row.provenance,
+        droppedCreatedAtEpoch: dropped.row.createdAtEpoch,
+        rule: keptRank === droppedRank ? "lowest-id" : "specificity",
       });
       // Explicit rather than trusting `ON DELETE CASCADE`: the index row is a
       // derived lookup, and a merge that left one behind would point a reader
       // at a lane through an edge that no longer exists.
-      dropSideTagRows.run(dropped.id);
-      deleteEdge.run(dropped.id);
-      noteCitingTurn(dropped.entry.row);
+      dropSideTagRows.run(dropped.row.id);
+      deleteEdge.run(dropped.row.id);
+      noteCitingTurn(dropped.row);
     }
   }
 
