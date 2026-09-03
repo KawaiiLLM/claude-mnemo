@@ -18,7 +18,7 @@
 - [ ] ONE survivor rule: both collision sites call `selectLogicalEdgeRow` (import it; no local rule) and the loser is deleted with the existing receipt. A test on each path seeds `correct/full` (higher id) vs `use` (lower id) and asserts the `correct/full` row survives; the revert probe (provenance/time rule restored; delete-current restored) names the red test.
 - [ ] Lane creation runs `normalizeIncidentAttribution` for every turn that already carries the word, inside the same transaction as `insertLane`, with the live-job branch — one seam (P2). Test: a unique-lane endpoint with a blank side becomes ambiguous on lane creation and the edge is disposed by the seam's rule (receipt), not left `derived` in a stale reading.
 - [ ] `persistNoteSettlementClaimScope` runs inside one transaction and takes `claimGeneration`; it refuses (no-op + return false) when the job's current generation differs. Both dispatch shapes pass their generation. Test: a stale generation cannot overwrite; readers never observe an empty scope mid-replace.
-- [ ] `writeMembershipTags` is called BEFORE any other mutation in both callers and its `.ok` is honoured: on refusal, nothing else changes and the refusal is surfaced (return value or thrown, matching the caller's contract). Tests for both.
+- [ ] The membership judgment and the caller's own turn mutation run in ONE transaction, and a refusal leaves ZERO fields changed — not a preflight followed by a separate write. `writeMembershipTags`'s `.ok` is honoured and the refusal surfaced (return value or thrown, matching the caller's contract). Tests for both callers assert every field unchanged after a lane-stranding refusal.
 
 ## What to prove
 
