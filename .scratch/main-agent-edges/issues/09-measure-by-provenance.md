@@ -4,7 +4,7 @@
 
 **Blocked by:** 01–08.
 
-**Status:** ready-for-agent (after all)
+**Status:** DEFERRED — not dispatched. The harness measurement spends live settlement dollars; per the user's standing ruling (S15069/T2391: land the reversible change and observe production) and the "继续" at T2458, the batch ships without it and provenance/E6/E4/cost are read off production runs after release. Re-open only if production observation cannot answer the D8 questions.
 
 ## Constraints
 
