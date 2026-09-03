@@ -198,11 +198,12 @@ function renderTaskRoster(context: NoteSettlementContext): string {
  *   why the plain session range is named here as its fallback.
  *
  *   PLACE EVERY EDGE AT WRITE, in step 6. Job 171 wrote 66 `note` calls with
- *   bare addresses; its first `lane_check` returned 39 E6 errors and the run
+ *   bare addresses; its first `lane_check` returned 39 E6 findings and the run
  *   spent ~45 seconds and ~80 tool calls retracting and re-adding every one of
- *   them with `tailTag`/`headTag`. The gate is correct — E6 is an ERROR by
- *   spec — and the writer was simply never told that an edge is PLACED at
- *   write rather than repaired after.
+ *   them with `tailTag`/`headTag`. The gate was correct then — E6 was an
+ *   ERROR by spec at the time (main-agent-edges ticket 14 later demoted it to
+ *   a warning that refuses nothing) — and the writer was simply never told
+ *   that an edge is PLACED at write rather than repaired after.
  *
  * Ticket 09 is the precedent for the scope: a few sentences each, at the point
  * the duty is introduced, nothing else reworded.
@@ -478,9 +479,11 @@ export function renderNoteSettlementUnifiedPrompt(
     "a type emptied AFTER your transition is the NEXT window's topic-pass debt.",
     "`lane_check` still SHOWS you every E3, under the warnings, as a finding",
     "this run cannot repair.",
-    "Do not chase it and do not retype a turn to silence it. E4 and E6 anchored",
-    "on that same turn ARE yours — both are relation grammar, both are repaired",
-    "by a `declare` entry or a retraction, and both block your `commit`.",
+    "Do not chase it and do not retype a turn to silence it. E4 anchored on",
+    "that same turn IS yours — relation grammar, repaired by a `declare`",
+    "entry or a retraction, and it blocks your `commit`. E6 anchored there is",
+    "a WARNING you MAY declare — where the material you are already holding",
+    "says which lane — and MAY leave otherwise; it blocks nothing.",
     "",
     // SETTLEMENT-GATE-TAXONOMY TICKET 04 (user ruling [S15069/T2274]).
     "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING — a severed",

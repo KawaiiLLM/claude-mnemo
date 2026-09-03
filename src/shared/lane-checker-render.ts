@@ -42,24 +42,29 @@ import { estimateTokens } from "../utils/token-estimate";
  *     (requirement 2). CLI-only, per the spec's own "digraph rendering is
  *     human/CLI-only; agents receive the numeric reports."
  *
- * ## The error/warning split (tag-mandate tickets 03/04, narrowed by v12 ticket 11)
+ * ## The error/warning split (tag-mandate tickets 03/04, narrowed by v12
+ * ticket 11 and by main-agent-edges ticket 14b)
  *
- * Both surfaces lead with an ERRORS block — the GRAMMAR FINDINGS, E3/E4/E6,
- * each naming its ANCHOR turn — visually separated from everything
- * below it, which is the WARNING side (connectivity, coupling, bypass
- * candidates, time-order, attribution, and the stock facts no report admits).
- * Not every member of that block blocks: E6 is a warning by CLASS
- * (`LaneWarningClass` — an ambiguous side is legal, ruling S15069/T2465-T2466)
- * and E3 by AUTHORITY (`worker/note-settlement-finding-class.ts`), and the
- * settlement render splits the block by asking that one rule per instance
- * rather than by reading this header.
+ * `renderLaneCheckerReports` leads with an ERRORS block — the GRAMMAR
+ * FINDINGS `commit` actually refuses over, E3/E4 — each naming its ANCHOR
+ * turn — visually separated from everything below it, the WARNING side
+ * (connectivity, coupling, bypass candidates, time-order, attribution, E6,
+ * and the stock facts no report admits). E6 is a warning by CLASS
+ * (`LaneWarningClass` — an ambiguous side is legal, ruling S15069/T2465-T2466):
+ * it prints one line per instance under the WARNINGS header, never under
+ * ERRORS. E3 is narrowed FURTHER, by AUTHORITY
+ * (`worker/note-settlement-finding-class.ts`), but only on the settlement
+ * render (`renderLaneCheckerReportsPaged`), which asks that one rule per
+ * instance rather than reading this header — `renderLaneCheckerReports`
+ * itself keeps every E3 under ERRORS.
  *
- * E6 (an AMBIGUOUS side) prints in BOTH blocks' subjects and that is
- * deliberate: the ERRORS block lists it per row, and D9's unattributed-cluster
- * warning below counts the both-sides-empty subset of the same rows as a
- * cluster. The attribution section says so in its own heading, so a reader
- * meeting one edge twice is told why rather than left to suspect a double
- * count. See `shared/lane-checker.ts`'s header for the split.
+ * E6 (an AMBIGUOUS side) prints in BOTH the WARNINGS grammar-finding lines
+ * and D9's unattributed-cluster subject, and that is deliberate: the per-row
+ * line lists it once each, and D9's warning below counts the both-sides-empty
+ * subset of the same rows as a cluster. The attribution section says so in
+ * its own heading, so a reader meeting one edge twice is told why rather than
+ * left to suspect a double count. See `shared/lane-checker.ts`'s header for
+ * the split.
  *
  * There is no standalone "## Vocabulary conformance" section: the TYPE half of
  * that fact block is error class E3 and prints in the ERRORS block, and the
@@ -548,18 +553,24 @@ export function renderLaneCheckerReports(
 ): string {
   const sections: string[] = [];
 
+  // MAIN-AGENT-EDGES TICKET 14b: E6 is a WARNING class (`LaneWarningClass`,
+  // ruling S15069/T2465-T2466) — it belongs under WARNINGS, never ERRORS.
+  // E3/E4 (`LaneErrorClass`) are unchanged, exactly where they were.
+  const blockingErrors = result.errors.filter((error) => error.class !== "E6");
+  const ambiguousSides = result.errors.filter((error) => error.class === "E6");
+
   sections.push(ERRORS_SECTION_HEADER);
   // UNCAPPED (finding P2-8): this is the render the settlement `lane_check`
   // returns, and the commit gate judges the same list — every instance the
   // gate can refuse on must be visible here. `cappedCountSuffix` therefore
   // always yields "" on this surface; it is kept so the two renders share
   // one count-line shape.
-  const shownErrors = errorInstanceLines(result.errors, anchorAddresses);
-  if (result.errors.length === 0) {
+  const shownErrors = errorInstanceLines(blockingErrors, anchorAddresses);
+  if (blockingErrors.length === 0) {
     sections.push("(none)");
   } else {
     sections.push(
-      result.errors.length + " error(s)" + cappedCountSuffix(result.errors.length, shownErrors.length),
+      blockingErrors.length + " error(s)" + cappedCountSuffix(blockingErrors.length, shownErrors.length),
     );
     sections.push(...shownErrors);
   }
@@ -567,6 +578,18 @@ export function renderLaneCheckerReports(
   sections.push("");
   sections.push(WARNINGS_SECTION_HEADER);
   sections.push(LANE_CHECK_WARNING_NOTICE);
+  // E6 reuses this SAME warnings block — no third section — one line per
+  // instance, exactly like the ERRORS block above, so a reader sees every
+  // ambiguous side without mistaking it for a repair queue commit judges.
+  if (ambiguousSides.length > 0) {
+    const shownAmbiguous = errorInstanceLines(ambiguousSides, anchorAddresses);
+    sections.push(
+      ambiguousSides.length +
+        " ambiguous side(s) (E6) -- warning; declare it or leave it, never blocks commit" +
+        cappedCountSuffix(ambiguousSides.length, shownAmbiguous.length),
+    );
+    sections.push(...shownAmbiguous);
+  }
 
   sections.push("");
   sections.push("## Report 1 -- lane statistics");

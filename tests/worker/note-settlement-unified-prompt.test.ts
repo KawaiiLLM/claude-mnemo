@@ -375,12 +375,29 @@ describe("main-agent-edges ticket 06 — PHASE 2 is the shared edge pass, and th
       "reconcile pre-existing bare drafts",
       "pre-existing bare drafts reconciled per pair",
       "by retracting or re-placing the edge",
+      // MAIN-AGENT-EDGES TICKET 14b (E6 warning closure): E6 no longer
+      // blocks the unified run's commit, so the sentence that said E4 and
+      // E6 "both block your `commit`" is retired.
+      "E4 and E6 anchored",
+      "both are relation grammar, both are repaired",
+      "and both block your `commit`",
     ]) {
       expect({ retired, present: text.includes(retired) }).toEqual({ retired, present: false });
     }
-    // What replaced the E4/E6 repair sentence.
-    expect(text).toContain("both are repaired");
-    expect(text).toContain("by a `declare` entry or a retraction, and both block your `commit`");
+    // What replaced the E4/E6 repair sentence: only E4 blocks; E6 is a
+    // warning the run may declare and may leave.
+    expect(text).toContain(
+      "E4 anchored on",
+    );
+    expect(text).toContain(
+      "that same turn IS yours — relation grammar, repaired by a `declare`",
+    );
+    expect(text).toContain("entry or a retraction, and it blocks your `commit`");
+    expect(text).toContain("E6 anchored there is");
+    expect(text).toContain(
+      "a WARNING you MAY declare — where the material you are already holding",
+    );
+    expect(text).toContain("says which lane — and MAY leave otherwise; it blocks nothing.");
   });
 });
 

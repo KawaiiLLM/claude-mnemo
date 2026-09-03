@@ -362,9 +362,10 @@ export const SETTLEMENT_NOTE_TOOL_DESCRIPTION =
   "refused naming the missing bit, and a `verify` or `use` carrying one is " +
   "refused too — only `correct` has a coverage bit. " +
   "A BLANK SIDE IS LEGAL wherever the endpoint sits in ONE lane or in none — " +
-  "the side derives, and nothing is owed. It is error E6 only where the " +
-  "endpoint sits in SEVERAL lanes and no side is declared, and commit refuses " +
-  "while one remains in your writable set: `declare` it, or retract the row. " +
+  "the side derives, and nothing is owed. It is warning E6 where the " +
+  "endpoint sits in SEVERAL lanes and no side is declared — you may " +
+  "`declare` it where the material you are already holding says which lane; " +
+  "it never refuses commit. " +
   "`declare` entries — `{turn, class?, tailTag?, headTag?}`, `turn` the CITED " +
   "end's address — patch the pair's ONE row in place. Each side named is " +
   "checked against ITS OWN endpoint, in this order: the tag must be canonical " +
@@ -707,7 +708,7 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "counts this same call already reports exactly. Name whichever of these " +
   "actually applied: where this window forced a guess; a relation you " +
   "wanted and the three classes could not express; a commit-gate refusal " +
-  "(E4/E6) you had to route around; a turn you could not read, and " +
+  "(E4) you had to route around; a turn you could not read, and " +
   "why. A refusal — gate or parameter — never stashes `report`; resend it " +
   "on your retry. " +
   SETTLEMENT_COMMIT_IMPRESSION_DUTY_DESCRIPTION;
