@@ -48,24 +48,17 @@ import {
  * spectrum from `commit` in exactly the dimension that matters — it publishes
  * nothing.
  *
- * ## The hard input contract this module exists to honour
+ * ## The input contract that USED to be here (main-agent-edges ticket 14)
  *
- * `snapshots.removedLanes` cannot be derived after the projection lands: the
- * final projection has already written the post-removal `tags` by the time the
- * transition runs, so what was taken away exists nowhere to be read back
- * (ticket 04's own words). An empty array means "no debts", never "unknown" —
- * miss one lane word and the removed-side-citer closure silently under-builds,
- * leaving an edge pointing at a lane its endpoint has left with nobody
- * authorized to repair it.
- *
- * So this module does NOT ask the model what it removed. It snapshots every
- * writable turn's `tags` BEFORE the run starts and diffs against the stored
- * value at `finalize` time. The diff is mechanical, it cannot be forgotten,
- * and it cannot be lied about. It deliberately OVER-reports rather than under:
- * every removed non-`topic:` word is offered, whether or not it was a declared
- * lane, because `head_tag` only ever holds lane tags anyway — a word that was
- * never a lane matches no edge and produces no debt, while a word wrongly
- * filtered out would produce a debt nobody discharges.
+ * `snapshots.removedLanes` — every `(turn, lane word)` the final projection
+ * took away — was collected by snapshotting each writable turn's `tags` before
+ * the run and diffing at `finalize` time, because the projection has already
+ * written the post-removal `tags` by then and what was taken away exists
+ * nowhere to be read back. Its ONE reader was the removed-side-citer closure,
+ * which admitted the citing turn of an edge whose head side named the removed
+ * lane so that turn could repair the side. Ruling S15069/T2465-T2466 abolished
+ * that repair channel, so the closure, the debt list, the pre-run tag snapshot
+ * and the diff are all gone: nothing downstream asks what a projection removed.
  */
 
 // ---------------------------------------------------------------------------
@@ -390,8 +383,6 @@ function turnAddressFor(db: Database, turnId: number): string {
 // ---------------------------------------------------------------------------
 
 export interface StageOneProjection {
-  /** Every `(turn, lane word)` pair the projection took away, under replacement semantics. */
-  removedLanes: { turnId: number; laneTag: string }[];
   /** The ordered `(task, lane)` worklist, ascending by turn then by tag. */
   worklist: NoteSettlementWorklistLane[];
   /**
@@ -421,10 +412,8 @@ export interface StageOneProjection {
  */
 export function collectStageOneProjection(
   db: Database,
-  priorTagsByTurn: ReadonlyMap<number, readonly string[]>,
   writableTurnIds: ReadonlySet<number>,
 ): StageOneProjection {
-  const removedLanes: { turnId: number; laneTag: string }[] = [];
   const worklist: NoteSettlementWorklistLane[] = [];
   const homedTurnIds: number[] = [];
   const seenLane = new Set<string>();
@@ -433,15 +422,6 @@ export function collectStageOneProjection(
   for (const turnId of [...writableTurnIds].sort((a, b) => a - b)) {
     const turn = getTurnById(db, turnId);
     const nextTags = new Set(turn?.tags ?? []);
-
-    for (const tag of priorTagsByTurn.get(turnId) ?? []) {
-      // `topic:` words are never lane words and their removal has its own
-      // (refused) path through the tag gate, so they can never appear here.
-      if (tag.startsWith("topic:") || nextTags.has(tag)) {
-        continue;
-      }
-      removedLanes.push({ turnId, laneTag: tag });
-    }
 
     if (!turn) {
       continue;
@@ -475,7 +455,7 @@ export function collectStageOneProjection(
     }
   }
 
-  return { removedLanes, worklist, homedTurnIds };
+  return { worklist, homedTurnIds };
 }
 
 /**

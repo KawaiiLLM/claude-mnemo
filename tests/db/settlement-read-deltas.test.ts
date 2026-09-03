@@ -7,6 +7,7 @@ import { getOutgoingEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
+  resetNoteSettlementJobToStageOne,
   transitionNoteSettlementJobToEdges,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
@@ -19,7 +20,6 @@ import {
 } from "../../src/db/note-settlement-snapshots";
 import { initializeSchema } from "../../src/db/schema";
 import { addSegmentMembers, createSegment, writeMembershipTags } from "../../src/db/segments";
-import { clearSettlementJobTransitionScratch } from "../../src/db/settlement-job-invalidation";
 import { upsertSession } from "../../src/db/sessions";
 import { claimWriterId } from "../../src/db/write-gate";
 import { recallMemory } from "../../src/mcp/recall";
@@ -42,16 +42,23 @@ import {
  * `finalize` computes, inside the transition transaction and AFTER every
  * stage-1 write:
  *
- *   finalWritableIds  = frozenWritableIds ∪ derivedDebtCiters
- *   writableDelta     = finalWritableIds − initialWritableIds        (relations only)
- *   declarationEndpointIds = endpoints(live outgoing rows whose citer ∈ finalWritableIds)
+ *   declarationEndpointIds = endpoints(live outgoing rows whose citer ∈ writableIds)
  *   contextDelta      = (⋃ laneMembers(post-write) ∪ declarationEndpointIds)
- *                       − initialWritableIds − writableDelta          (one hop)
+ *                       − initialWritableIds                          (one hop)
  *
- * The four cases the ticket names are the four tests of the first describe;
- * the second pins that the deltas are a pure function of PERSISTED rows (a
- * retry prints what the transition printed) and that the two renderers print
- * them from that one snapshot.
+ * MAIN-AGENT-EDGES TICKET 14 removed the twin. `writableDelta` was
+ * `finalWritableIds − initialWritableIds`, the citers the two side-citer
+ * closures admitted for RELATIONS ONLY so they could repair a side stage 1 made
+ * unattributable; ruling S15069/T2465-T2466 abolished that repair channel, so
+ * `finalWritableIds = initialWritableIds` and the difference is empty by
+ * construction. The tests that pinned the delta's membership and its
+ * relations-only authority are REPLACED below by their opposite: no citer is
+ * admitted, and no line is printed for one.
+ *
+ * The remaining cases are the tests of the first describe; the second pins that
+ * the delta is a pure function of PERSISTED rows (a retry prints what the
+ * transition printed) and that the two renderers print it from that one
+ * snapshot.
  */
 
 const NOW = 1_800_000_000;
@@ -92,7 +99,6 @@ describe("the finalize read deltas — set differences against what stage 1 read
       writes: [{ turnId, tags }],
       writer: "settlement",
       nowEpoch: NOW,
-      settlementJobId: job.id,
     });
 
   const address = (turnId: number): string => {
@@ -161,7 +167,6 @@ describe("the finalize read deltas — set differences against what stage 1 read
         lookback: [fixture.lb],
         closure: [],
         worklist: [{ segmentId, laneTag: "alpha" }],
-        removedLanes: [{ turnId: fixture.w2, laneTag: "gamma" }],
         eraCutoffEpoch: null,
       },
     });
@@ -205,13 +210,14 @@ describe("the finalize read deltas — set differences against what stage 1 read
       [fixture.w1, fixture.w2, fixture.lb].sort((a, b) => a - b),
     );
     for (const id of [fixture.w1, fixture.w2, fixture.lb]) {
-      expect(scope.readDeltas.writableDelta).not.toContain(id);
       expect(scope.readDeltas.contextDelta).not.toContain(id);
     }
-    // And the two deltas are disjoint from each other.
-    for (const id of scope.readDeltas.writableDelta) {
-      expect(scope.readDeltas.contextDelta).not.toContain(id);
-    }
+    // TICKET 14: `writableDelta` is gone, not empty — the shape carries one
+    // list, so a reader cannot ask for the retired one at all.
+    expect(Object.keys(scope.readDeltas).sort()).toEqual([
+      "contextDelta",
+      "initialWritableIds",
+    ]);
   });
 
   test("a lane member added by stage 1 and a remote cited endpoint each appear in contextDelta once, and print once", () => {
@@ -229,9 +235,10 @@ describe("the finalize read deltas — set differences against what stage 1 read
     // A turn that qualifies BOTH ways — lane member and cited endpoint — is
     // one address, not two.
     expect(count(scope.readDeltas.contextDelta, fixture.both)).toBe(1);
-    // ONE HOP through a writable-delta citer: `derived` is writable, so the
-    // turn ITS edge points at is context; nothing beyond that is followed.
-    expect(count(scope.readDeltas.contextDelta, fixture.far)).toBe(1);
+    // ONE HOP is measured from the FINAL writable set, which is now exactly the
+    // initial one: `derived` is no longer admitted (ticket 14), so `far` — the
+    // turn only ITS edge points at — is no longer context either.
+    expect(count(scope.readDeltas.contextDelta, fixture.far)).toBe(0);
     expect(new Set(scope.readDeltas.contextDelta).size).toBe(scope.readDeltas.contextDelta.length);
 
     // Printed once each, on the finalize data result and on the resume
@@ -246,31 +253,28 @@ describe("the finalize read deltas — set differences against what stage 1 read
       transitioned.transitionSeq,
       holder.current,
     );
-    const contextLine = text.split("\n").find((line) => line.startsWith("context delta"))!;
-    expect(contextLine).toContain(
-      `(${scope.readDeltas.contextDelta.length}): ` +
-        scope.readDeltas.contextDelta.map(address).join(", "),
-    );
-    // Each context address occurs exactly once across the three SET lines —
-    // it is in neither of the other two, and it is not repeated inside its
-    // own. (The worklist's per-lane member roster below those lines names
-    // `member` and `both` again by design: that roster says which lane a
-    // turn is a vertex of, the delta says what to read.)
-    const setLines = text
-      .split("\n")
-      .filter(
-        (line) =>
-          line.startsWith("frozen writable set") ||
-          line.startsWith("writable delta") ||
-          line.startsWith("context delta"),
-      )
-      .join("\n");
-    for (const id of [fixture.member, fixture.remote, fixture.both, fixture.far]) {
-      expect(setLines.split(`${address(id)}`).length - 1).toBe(1);
+    const lines = text.split("\n");
+    const contextHeaderIndex = lines.findIndex((line) => line.startsWith("context delta"));
+    expect(lines[contextHeaderIndex]).toContain(`(${scope.readDeltas.contextDelta.length}):`);
+    // The addresses are on the FOLLOWING line(s), through the bounded shared
+    // renderer (ticket 14, P2-D) rather than joined onto the header.
+    for (const id of scope.readDeltas.contextDelta) {
+      expect(lines[contextHeaderIndex + 1]).toContain(address(id));
+    }
+    // TICKET 14: there is no `writable delta` line left to print.
+    expect(text).not.toContain("writable delta");
+    // Each context address occurs exactly once across the two SET blocks —
+    // it is not in the frozen set, and it is not repeated inside its own.
+    // (The worklist's per-lane member roster below those lines names `member`
+    // and `both` again by design: that roster says which lane a turn is a
+    // vertex of, the delta says what to read.)
+    const setBlock = lines.slice(1, contextHeaderIndex + 2).join("\n");
+    for (const id of [fixture.member, fixture.remote, fixture.both]) {
+      expect(setBlock.split(`${address(id)}`).length - 1).toBe(1);
     }
     const rendering = buildSettlementWorklistRendering(db, job.id);
     expect(rendering.contextDelta).toEqual(scope.readDeltas.contextDelta.map(address));
-    expect(rendering.writableDelta).toEqual(scope.readDeltas.writableDelta.map(address));
+    expect(rendering).not.toHaveProperty("writableDelta");
   });
 
   test("integrator pin (06): a NON-writable citer's endpoints are not declaration endpoints — the enumeration is over the final writable set only", () => {
@@ -286,10 +290,11 @@ describe("the finalize read deltas — set differences against what stage 1 read
     const scope = readSettlementFrozenScope(db, job.id)!;
     expect(scope.readDeltas.contextDelta).not.toContain(stranger);
     expect(scope.readDeltas.contextDelta).not.toContain(outsider);
-    expect(scope.readDeltas.writableDelta).not.toContain(outsider);
-    // The positive control from the same fixture: the writable-delta citer's
-    // endpoint IS there.
-    expect(scope.readDeltas.contextDelta).toContain(fixture.far);
+    // The positive control from the same fixture: a WINDOW citer's endpoint IS
+    // there. (`far` is not: ticket 14 stopped admitting the citer that reached
+    // it, so it is now on the same footing as `stranger`.)
+    expect(scope.readDeltas.contextDelta).toContain(fixture.remote);
+    expect(scope.readDeltas.contextDelta).not.toContain(fixture.far);
   });
 
   test("a contextDelta member refuses a relation write — it is judgment material, not authority", () => {
@@ -324,27 +329,30 @@ describe("the finalize read deltas — set differences against what stage 1 read
     expect(getOutgoingEdges(db, { kind: "turn", id: fixture.remote })).toHaveLength(0);
   });
 
-  test("a writableDelta member accepts a relation write and refuses a note-field write", () => {
+  /**
+   * REPLACED (main-agent-edges ticket 14). This test pinned that a
+   * `writableDelta` member — a citer admitted by one of the two side-citer
+   * closures — accepted a relation write and refused a note field. Ruling
+   * S15069/T2465-T2466 abolished the admission, so what is pinned now is that
+   * the citer is NOT admitted at all: its relation write is refused for being
+   * outside the window, exactly like any other turn stage 1 never read.
+   */
+  test("a citer stage 1 left owing a side is NOT writable — no relations-only grant survives", () => {
     const fixture = seedGraph();
     stageOneThenTransition(fixture);
     const scope = readSettlementFrozenScope(db, job.id)!;
 
-    // Both citers the projection left owing a side are the writable delta,
-    // and neither carries an ordinary class. HEAD FACT, stated rather than
-    // hidden: both arrive through the DERIVED closure. The removed-side
-    // closure (`removedLanes`) finds nothing any more, because the batch tag
-    // write post-normalises in its own transaction (P2) — the declaration
-    // that named the removed lane is already cleared to `''` by the time the
-    // transition looks for `head_tag = 'gamma'`, and the side reads
-    // `ambiguous`, which is the derived closure's case.
-    expect(scope.readDeltas.writableDelta).toEqual(
-      [fixture.derived, fixture.removed].sort((a, b) => a - b),
-    );
-    expect(scope.debts).toEqual([]);
-    expect([...scope.writableProvenance.get(fixture.removed)!]).toEqual(["derived-side-citer"]);
-    for (const id of scope.readDeltas.writableDelta) {
+    // Both citers the projection left owing a side used to BE the writable
+    // delta. Neither is in the writable set now, and no provenance names them.
+    for (const id of [fixture.derived, fixture.removed]) {
+      expect(scope.writableTurnIds.has(id)).toBe(false);
+      expect(scope.writableProvenance.has(id)).toBe(false);
+    }
+    // Every id that IS writable carries FULL authority — the relations-only
+    // class is gone, so the union has nothing left to subtract.
+    for (const id of scope.writableTurnIds) {
       expect(settlementWritePermissions(scope.writableProvenance.get(id)!)).toEqual({
-        fields: false,
+        fields: true,
         relations: true,
       });
     }
@@ -371,25 +379,12 @@ describe("the finalize read deltas — set differences against what stage 1 read
         use: [address(fixture.remote)],
       }),
     );
-    expect(relation.content[0]!.text).toContain("Landed 1 relation");
+    expect(relation.content[0]!.text).toContain("outside this dispatch's reviewable window");
     expect(
       getOutgoingEdges(db, { kind: "turn", id: fixture.derived }).some(
         (edge) => edge.cited.id === fixture.remote,
       ),
-    ).toBe(true);
-
-    const field = engine.writeNote(
-      settlementTurnWriteInputSchema.parse({
-        turn: address(fixture.derived),
-        title: "a title this pass may not write",
-      }),
-    );
-    expect(field.content[0]!.text).toContain("RELATIONS ONLY");
-    expect(field.content[0]!.text).toContain("`declare`");
-    expect(
-      db.query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM shadow_notes WHERE turn_id = ?")
-        .get(fixture.derived)?.n ?? 0,
-    ).toBe(0);
+    ).toBe(false);
   });
 });
 
@@ -459,7 +454,6 @@ describe("the deltas are a pure function of the persisted snapshot", () => {
     expect(snapshot.declarationEndpointIds).toEqual([cited]);
     expect(snapshot.readDeltas).toEqual({
       initialWritableIds: [w],
-      writableDelta: [],
       contextDelta: [cited],
     });
     expect(readNoteSettlementDeclarationEndpointSnapshot(db, job.id)).toEqual([cited]);
@@ -477,7 +471,14 @@ describe("the deltas are a pure function of the persisted snapshot", () => {
     ).toEqual([cited]);
   });
 
-  test("an invalidation clears snapshot #4 with the other three", () => {
+  /**
+   * TICKET 14: the caller that used to reach `clearSettlementJobTransitionScratch`
+   * — `invalidateOverlappingSettlementJobs` — is deleted, and the helper is now
+   * private to `db/note-settlement.ts` behind the ONE surviving caller, the
+   * cutover fence's `resetNoteSettlementJobToStageOne`. So the clearing is
+   * pinned through that entry point instead of through the deleted one.
+   */
+  test("a stage-one reset clears snapshot #4 with the other three", () => {
     const w = addTurn(1, [TASK, "alpha"]);
     const cited = addTurn(2, [TASK]);
     addSegmentMembers(db, segmentId, [w, cited], 10);
@@ -492,7 +493,7 @@ describe("the deltas are a pure function of the persisted snapshot", () => {
     });
     expect(readNoteSettlementDeclarationEndpointSnapshot(db, job.id)).toEqual([cited]);
 
-    clearSettlementJobTransitionScratch(db, job.id);
+    expect(resetNoteSettlementJobToStageOne(db, job.id, NOW)).not.toBeNull();
     expect(readNoteSettlementDeclarationEndpointSnapshot(db, job.id)).toEqual([]);
     expect(readSettlementFrozenScope(db, job.id)).toBeNull();
   });
@@ -504,14 +505,11 @@ describe("the deltas are a pure function of the persisted snapshot", () => {
     });
     expect(holder.current.readDeltas).toEqual({
       initialWritableIds: [],
-      writableDelta: [],
       contextDelta: [],
     });
     expect(buildSettlementWorklistRendering(db, job.id)).toEqual({
       lanes: [],
-      debts: [],
       homeless: [],
-      writableDelta: [],
       contextDelta: [],
     });
   });

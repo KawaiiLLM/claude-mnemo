@@ -271,13 +271,13 @@ export interface SettlementTurnFacadeContext {
    * frozen `note_settlement_writable_turns` snapshot, read once per request and
    * never re-derived here.
    *
-   * It answers one question this facade could not otherwise ask: a turn admitted
-   * ONLY as a `removed-side-citer` is in the set because THIS job's own stage-1
-   * projection invalidated an edge it cites, and that debt buys relation writes
-   * and nothing else — its note fields belong to whichever window owns them.
-   * `reviewableTurnIds` is a flat set and cannot express that; without this the
-   * citer would arrive holding full authority over a turn no window of this job
-   * ever judged.
+   * It answers one question this facade could not otherwise ask: WHY a turn is
+   * writable, which is what the per-provenance gate below reads instead of
+   * assuming every member of a flat set holds identical authority. Ticket 14
+   * retired the two relations-only classes that made the distinction bite, so
+   * every surviving class carries full authority today; the index stays because
+   * it is the seam a class states its authority through, and a flat set cannot
+   * express one at all.
    *
    * Optional. Absent (a job that never transitioned, or a fixture that models no
    * provenance) means every writable turn carries full authority — exactly the
@@ -1150,16 +1150,13 @@ function evaluateSettlementBatchTagWrite(
     writes: members.map((member) => ({ turnId: member.turn.id, tags: member.nextTags })),
     writer,
     nowEpoch,
-    // THE PRE STATE, RECORDED WHERE IT IS STILL TRUE (main-agent-edges ticket
-    // 04, spec D6). This is stage 1's batch tag write — the projection that
-    // most often puts a SECOND lane on an endpoint and turns every blank side
-    // resting on it from `derived` into `ambiguous`. Naming the job here does
-    // two things at once: the seam records each incident side's PRE resolution
-    // to this job's transition scratch (first-write-wins, so a repeated batch
-    // never overwrites the state the run inherited), and it exempts this job
-    // from its own structural invalidation — the ambiguity a run creates is
-    // answered by its own stage 2, never by restarting it.
-    settlementJobId: context.jobId,
+    // NO JOB IS NAMED HERE (main-agent-edges ticket 14). This is stage 1's
+    // batch tag write — the projection that most often puts a SECOND lane on an
+    // endpoint and turns a blank side resting on it from `derived` into
+    // `ambiguous`. Ticket 04 named the job so the seam could record a PRE
+    // resolution and exempt the run from its own invalidation; ruling
+    // S15069/T2465-T2466 made a newly ambiguous side a no-op, so there is
+    // nothing to record and nothing to be exempt from.
   });
   if (!written.ok) {
     return { ok: false, message: written.message };
@@ -1367,24 +1364,24 @@ export function evaluateSettlementTurnWrite(
     };
   }
 
-  // RELATION-WRITES-ONLY AUTHORITY (staged-settlement spec Rev 5, §Stage-1
-  // final projection: "authorizing relation writes only on that turn — note
-  // fields stay out of reach"). A turn whose ONLY provenance is
-  // `removed-side-citer` joined the writable set because this job's own stage-1
-  // projection removed a lane from a turn it cites, leaving that edge's side
-  // attribution pointing at a lane its endpoint has left. That debt is the
-  // whole of the job's claim on this turn: it may retract or re-place the edge,
-  // and it may not touch a single note field.
+  // THE PER-PROVENANCE FIELD GATE (staged-settlement spec Rev 5, §Stage-1 final
+  // projection: "authorizing relation writes only on that turn — note fields
+  // stay out of reach").
+  //
+  // NO SURVIVING CLASS TRIPS IT (main-agent-edges ticket 14). Its two subjects
+  // were `removed-side-citer` and `derived-side-citer`, both admitted so a citer
+  // could repair a side this run made unattributable, and the ruling
+  // (S15069/T2465-T2466) abolished that repair channel along with the classes.
+  // Every writable turn therefore holds field authority today and this refusal
+  // is unreachable by construction. It is kept as the one place the rule is
+  // ENFORCED rather than restated: `settlementWritePermissions` is where a class
+  // declares its authority, and a gate that had to be re-added to admit the next
+  // one is how the two came apart in the first place.
   //
   // AFTER the range check and BEFORE the tag gate, for the same reason the tag
   // gate sits where it does: "may you write this turn at all" is the earlier
   // question, and "may you write THIS KIND of thing on it" is earlier than any
   // vocabulary judgment about the value.
-  //
-  // The union rule is ticket 04's `settlementWritePermissions`, reached through
-  // `settlementTurnPermissions` — never re-derived here (spec reviewer guardrail
-  // 1). A turn that is BOTH an ordinary member and a removed-side citer takes
-  // the union and keeps full field authority.
   const permissions = settlementTurnPermissions(context.writableProvenance, turn.id);
   if (!permissions.fields) {
     const refusedFields = [

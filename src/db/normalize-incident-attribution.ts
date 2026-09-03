@@ -26,15 +26,13 @@
  *    `derived` when `#beta` goes, never a stale `declared` that a later
  *    reader cannot distinguish from a real disambiguation.
  * 3. What resolves `ambiguous` AFTER 1-2 (endpoint in ≥ 2 lanes, no
- *    declaration survived) cannot be attributed by anyone: no writer said
- *    which lane, and the endpoint no longer answers. `ctx.onAmbiguous`
- *    decides, and its DEFAULT is now the two-step rule of ticket 04:
- *    `invalidateOverlappingSettlementJobs` FIRST — a live settlement run whose
- *    window, writable set, frozen members or claim-time scope reaches the
- *    citer is sent back to stage 1 and the edge is KEPT for its stage 2 to
- *    declare — and the DELETE-and-receipt of ticket 02 only when nobody is
- *    left to ask. For a DONE or abandoned window, or when no job exists at
- *    all, that is the spec's own answer (T2421): subtraction.
+ *    declaration survived) is LEFT EXACTLY AS IT IS. Ruling S15069/T2465-
+ *    T2466: "a side that resolves `ambiguous` is a WARNING, nothing more."
+ *    The edge is kept, nothing is deleted, no settlement job is reset and no
+ *    repair authority is minted. A reader renders the side `ambiguous`, the
+ *    checker reports it as E6, and settlement may declare it when it sees it.
+ *    So this seam has exactly TWO effects — the two clears above — and the
+ *    ambiguous outcome is a no-op with no hook to configure.
  *
  * ## What it never does
  *
@@ -51,16 +49,16 @@
  * Ticket 02 shipped an old/new qualified lane TOUCH pair on this seam, scoped
  * to a settlement job's `lane_run_touches` ledger. It was reachable from
  * nothing: no structural verb ever had a job id to give it, so the whole path
- * ran only under its own unit test. It is DELETED rather than wired up,
- * because the invalidation rule below subsumes what it was for — a structural
- * change inside a live run's reach RESETS that run to stage 1, which rebuilds
- * the worklist from the finished state; a change outside every run's reach is
- * owed to nobody. Subtraction, per the batch's own standing ruling (T2419).
+ * ran only under its own unit test. DELETED rather than wired up, per the
+ * batch's own standing ruling (T2419).
  *
- * What the caller's PRE-STATE is still for: the derived-side closure. It is
- * captured only on the path that consumes it (a settlement job's own tag
- * projection), and `resolveEdgeSide` against it is what says whether a side
- * this run made `ambiguous` used to be decidable.
+ * ## And why there is no PRE-STATE capture either (ticket 14)
+ *
+ * The caller's pre-mutation lane facts were captured here for ONE reader, the
+ * derived-side closure, which existed to hand a newly-ambiguous side a repair
+ * channel. The ruling removed the channel, so the capture, `ctx.settlementJobId`
+ * and `ctx.previousLaneFacts` went with it: this seam no longer needs to know
+ * what a side USED to resolve to, only what it resolves to now.
  */
 
 import type { Database } from "bun:sqlite";
@@ -74,8 +72,6 @@ import {
   UNDECLARED_SIDE_TAG,
 } from "./edge-side-resolution";
 import { selectLogicalEdgeRow } from "./memory-edges";
-import { recordPreSideResolutions } from "./note-settlement-pre-resolutions";
-import { invalidateOverlappingSettlementJobs } from "./settlement-job-invalidation";
 import { stampTurnRelationsRevision } from "./write-gate";
 
 /** One incident edge row, as this seam reads and reports it. */
@@ -91,9 +87,6 @@ export interface IncidentEdgeRow {
   headTag: string;
 }
 
-/** What `ctx.onAmbiguous` may answer for a side nobody can attribute. */
-export type AmbiguousDisposition = "delete" | "keep";
-
 export interface NormalizeIncidentAttributionContext {
   /**
    * The writer id the cleared/deleted citers' relations stamps carry — the
@@ -104,44 +97,6 @@ export interface NormalizeIncidentAttributionContext {
    */
   writer: string;
   nowEpoch: number;
-  /**
-   * The endpoints' lane facts BEFORE the caller's mutation, captured by the
-   * caller with `loadEndpointLaneFacts` before it wrote — the "before" half of
-   * the derived-side closure, which exists nowhere in the database once the
-   * projection has written the new `tags`. Read ONLY when `settlementJobId` is
-   * given; a caller that supplies neither records nothing.
-   */
-  previousLaneFacts?: ReadonlyMap<number, EndpointLaneFacts>;
-  /**
-   * THE SETTLEMENT JOB THIS MUTATION BELONGS TO (main-agent-edges ticket 04).
-   * Two effects, both keyed on it:
-   *
-   *   - every incident side's PRE resolution is recorded to that job's
-   *     transition scratch, first-write-wins (spec D6, R10-7);
-   *   - the job is EXEMPT from its own structural invalidation. A run's own
-   *     tag projection is an attribution change like any other, and a run that
-   *     reset itself the moment its projection made a side ambiguous could
-   *     never finish. Its answer to an ambiguous side is stage 2, which the
-   *     closure arranges — so the side is KEPT.
-   *
-   * Omitted for every verb outside settlement, which is why a lane clear run
-   * from `remember` still deletes what it cannot attribute.
-   */
-  settlementJobId?: number;
-  /**
-   * What to do with a side that resolves `ambiguous` after the two clears.
-   *
-   * DEFAULT (ticket 04, pinned P2's "in front of it"): try
-   * `invalidateOverlappingSettlementJobs` first — if a live job's window,
-   * writable set, frozen members or claim-time scope reaches the citer, that
-   * run is sent back to stage 1 and the edge is KEPT for its stage 2 to
-   * declare. Only when nobody is left to ask does the edge get DELETED and
-   * receipted, which is the same subtraction the cutover performs.
-   *
-   * Supplied, it REPLACES that default entirely — the seam for a caller (or a
-   * test) that wants the bare disposition with no scheduling side effect.
-   */
-  onAmbiguous?: (edge: IncidentEdgeRow, side: EdgeSide) => AmbiguousDisposition;
 }
 
 export interface ClearedDeclaration {
@@ -165,8 +120,6 @@ export interface NormalizeIncidentAttributionResult {
   deletedEdges: readonly DeletedIncidentEdge[];
   /** Citing turns whose relations revision this call stamped — ascending, deduped. */
   stampedCiterIds: readonly number[];
-  /** Settlement jobs this call sent back to stage 1 because a side it made `ambiguous` falls inside their reach. Ascending, deduped. */
-  invalidatedJobIds: readonly number[];
 }
 
 const SIDES: readonly EdgeSide[] = ["tail", "head"];
@@ -186,7 +139,6 @@ export function normalizeIncidentAttribution(
     clearedDeclarations: [],
     deletedEdges: [],
     stampedCiterIds: [],
-    invalidatedJobIds: [],
   };
   if (ids.length === 0) {
     return empty;
@@ -220,39 +172,6 @@ export function normalizeIncidentAttribution(
   }
   const facts = loadEndpointLaneFacts(db, [...endpointIds]);
   const moved = new Set(ids);
-
-  // THE PRE STATE, RECORDED IN THIS TRANSACTION (spec D6, R10-7). The caller's
-  // captured pre-state covers only the endpoints IT moved; every other endpoint
-  // of an incident row has the same facts before and after, so the post-state
-  // is its own pre-state and overlaying the two is exact — and far cheaper than
-  // asking the caller to snapshot a set it never touched.
-  if (ctx.settlementJobId !== undefined) {
-    const preFacts = new Map<number, EndpointLaneFacts>(facts);
-    if (ctx.previousLaneFacts !== undefined) {
-      for (const [turnId, endpointFacts] of ctx.previousLaneFacts) {
-        preFacts.set(turnId, endpointFacts);
-      }
-    }
-    recordPreSideResolutions(db, ctx.settlementJobId, incident, preFacts, ctx.nowEpoch);
-  }
-
-  const invalidatedJobIds = new Set<number>();
-  /**
-   * THE LIVE-JOB BRANCH, IN FRONT OF THE DELETE (pinned P2). See
-   * `NormalizeIncidentAttributionContext.onAmbiguous` for the rule; the
-   * exemption of `settlementJobId` is what stops a settlement run from
-   * resetting itself over its own projection.
-   */
-  const defaultOnAmbiguous = (edge: IncidentEdgeRow): AmbiguousDisposition => {
-    const invalidated = invalidateOverlappingSettlementJobs(db, [edge.citingId], {
-      nowEpoch: ctx.nowEpoch,
-      ...(ctx.settlementJobId !== undefined ? { excludeJobId: ctx.settlementJobId } : {}),
-    });
-    for (const job of invalidated) {
-      invalidatedJobIds.add(job.jobId);
-    }
-    return invalidated.length > 0 || ctx.settlementJobId !== undefined ? "keep" : "delete";
-  };
 
   const clearSide = {
     tail: db.query<unknown, [number]>(`UPDATE memory_edges SET tail_tag = '' WHERE id = ?`),
@@ -312,7 +231,6 @@ export function normalizeIncidentAttribution(
   const clearedDeclarations: ClearedDeclaration[] = [];
   const deletedEdges: DeletedIncidentEdge[] = [];
   const stampedCiterIds = new Set<number>();
-  const onAmbiguous = ctx.onAmbiguous ?? defaultOnAmbiguous;
 
   for (const row of incident) {
     // The row's live view of its own sides, mutated in place as this loop
@@ -424,36 +342,12 @@ export function normalizeIncidentAttribution(
         }
       }
 
-      // Re-resolve after the clear — the outcome that decides the edge's fate.
-      const after = resolveEdgeSide(live, side, facts);
-      if (after.outcome === "ambiguous") {
-        if (onAmbiguous(row, side) === "delete") {
-          dropAllSideIndexRows.run(row.id);
-          deleteEdge.run(row.id);
-          insertReceipt.run(
-            row.id,
-            "delete-edge",
-            side,
-            row.citingId,
-            row.citedId,
-            row.relationClass,
-            row.relationCoverage,
-            row.tailTag,
-            row.headTag,
-            ctx.writer,
-            ctx.nowEpoch,
-          );
-          deletedEdges.push({
-            edgeId: row.id,
-            citingId: row.citingId,
-            citedId: row.citedId,
-            side,
-          });
-          stampedCiterIds.add(row.citingId);
-          deleted = true;
-        }
-        continue;
-      }
+      // AND THAT IS THE WHOLE RULE. A side that resolves `ambiguous` after the
+      // clear — or was already ambiguous and had nothing to clear — is left
+      // exactly as it is (ruling S15069/T2465-T2466). There is deliberately no
+      // re-resolve here and nothing to decide: the edge is kept, the reader
+      // renders the side `ambiguous`, and the checker reports it as the E6
+      // warning it now is.
     }
   }
 
@@ -467,6 +361,5 @@ export function normalizeIncidentAttribution(
     clearedDeclarations,
     deletedEdges,
     stampedCiterIds: [...stampedCiterIds].sort((a, b) => a - b),
-    invalidatedJobIds: [...invalidatedJobIds].sort((a, b) => a - b),
   };
 }

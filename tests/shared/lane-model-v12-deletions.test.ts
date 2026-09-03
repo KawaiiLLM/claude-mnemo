@@ -150,11 +150,15 @@ describe("lane-model-v12 ticket 04 — deleted rules stay deleted", () => {
       expect(read(path), path).not.toContain('"E5"');
     }
     const checker = read("src/shared/lane-checker.ts");
-    // Ticket 20 added E6 (a DRAFT edge) to the union. The literal is spelled
-    // out rather than matched loosely so that reoccupying E5 — the one move
-    // this sentinel exists to catch — still fails here even if some future
-    // class list happens to be the same length.
-    expect(checker).toContain('export type LaneErrorClass = "E3" | "E4" | "E6";');
+    // Main-agent-edges ticket 14 moved E6 out of the ERROR union and into its
+    // own warning class (ruling S15069/T2465-T2466: an ambiguous side is a
+    // warning and refuses nothing). Both literals are spelled out rather than
+    // matched loosely so that reoccupying E5 — the one move this sentinel
+    // exists to catch — still fails here even if some future class list happens
+    // to be the same length, AND so that quietly folding E6 back into the error
+    // union fails here too.
+    expect(checker).toContain('export type LaneErrorClass = "E3" | "E4";');
+    expect(checker).toContain('export type LaneWarningClass = "E6";');
     expect(checker).not.toContain("LaneShapeError");
     expect(checker).not.toContain("computeLaneShapeErrors");
     // The teaching surfaces enumerate the classes as a CLOSED list, so a

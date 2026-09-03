@@ -389,8 +389,8 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     expect(text).toContain("[E3] anchor T10 -- T10 type: [] (empty)");
     expect(text).toContain("[E3] anchor T11 -- T11 type: [bugfix] (outside vocabulary: bugfix)");
     expect(text).toContain(
-      '[E4] anchor T31 -- T31 --correct(partial)--> T30 {a,b}: "b" missing from the cited turn\'s tags; ' +
-        '"b" missing from the citing turn\'s tags',
+      '[E4] anchor T31 -- T31 --correct(partial)--> T30 {a,b}: "b" is not among the cited turn\'s own lanes; ' +
+        '"b" is not among the citing turn\'s own lanes',
     );
     // The errors block LEADS: a reader (and the commit-gate-facing agent)
     // must not have to scroll past the aspirational reports to find must-fix.
@@ -437,15 +437,15 @@ describe("renderLaneCheckerReports -- compact numeric prose, no digraph", () => 
     const text = renderLaneCheckerReports(withDrafts);
     expect(text).toContain("3 error(s)");
     expect(text).toContain(
-      "  [E6] anchor T41 -- T41 --use--> T40: DRAFT edge -- neither side names a lane",
+      "  [E6] anchor T41 -- T41 --use--> T40: AMBIGUOUS side -- neither endpoint answers which lane",
     );
     // The HALF-settled shapes name the open side AND the lane the other side
     // already holds, which is usually the repair value.
     expect(text).toContain(
-      "  [E6] anchor T43 -- T43 --use--> T42: DRAFT edge -- the head side names no lane (the tail side is {ownership})",
+      "  [E6] anchor T43 -- T43 --use--> T42: AMBIGUOUS side -- the head endpoint sits in several lanes (the tail side is {ownership})",
     );
     expect(text).toContain(
-      "  [E6] anchor T45 -- T45 --use--> T44: DRAFT edge -- the tail side names no lane (the head side is {ownership})",
+      "  [E6] anchor T45 -- T45 --use--> T44: AMBIGUOUS side -- the tail endpoint sits in several lanes (the head side is {ownership})",
     );
     // Rank, not just presence: every E6 line sits above the WARNINGS split.
     expect(text.indexOf("[E6]")).toBeLessThan(text.indexOf("## WARNINGS"));

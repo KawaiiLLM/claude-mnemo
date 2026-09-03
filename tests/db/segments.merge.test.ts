@@ -145,7 +145,9 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
     expect(outcome.receipt.declarationsCleared).toBe(1);
     expect(outcome.receipt.edgesDeleted).toBe(0);
     expect(outcome.receipt.citersStamped).toBe(1);
-    expect(outcome.receipt.invalidatedJobIds).toEqual([]);
+    // main-agent-edges ticket 14: `invalidatedJobIds` went with the structural
+    // invalidation itself — a move that makes a side ambiguous resets no job.
+    expect(outcome.receipt).not.toHaveProperty("invalidatedJobIds");
     // The NODE FACT survives the move; only the attribution was rewritten, and
     // the tail still reaches `solo` — by derivation now instead of by storage.
     expect(attributedSides(edgeId)).toEqual({ tail: "solo", head: "solo" });
@@ -176,7 +178,6 @@ describe("mergeSegments — one task folded into another (ticket 08)", () => {
       declarationsCleared: 0,
       edgesDeleted: 0,
       citersStamped: 0,
-      invalidatedJobIds: [],
     });
 
     expect(getSegment(db, from)).toBeNull();

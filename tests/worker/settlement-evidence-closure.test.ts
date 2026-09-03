@@ -2,7 +2,6 @@ import { describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { deriveSideTags, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -59,19 +58,23 @@ interface EvidenceFixture {
 }
 
 /**
- * One segment, TWO declared lanes, two DRAFT edges of the same shape — one
- * written from a lookback turn long ago, one from the window itself. Both are
- * error class E6, both anchor at their CITING turn, and both citing turns are
- * in the writable set. The ONLY thing that separates them is where their
- * prompt number falls.
+ * One segment, THREE declared lanes, two INVALID-DECLARATION edges of the same
+ * shape — one written from a lookback turn long ago, one from the window
+ * itself. Both are error class E4, both anchor at their CITING turn, and both
+ * citing turns are in the writable set. The ONLY thing that separates them is
+ * where their prompt number falls.
  *
- * TWO lanes, not one (main-agent-edges spec D6). E6 is "a blank side whose
- * endpoint has ≥2 lanes" now — a blank side on a uniquely-laned endpoint
- * DERIVES its lane and is not a finding, because there is nothing for a writer
- * to choose between. Every member here therefore carries both `beta` and
- * `gamma`, which is what makes the two draft edges genuinely unattributable
- * and keeps this fixture's subject (WHERE an error anchors, not WHICH errors
- * exist) intact.
+ * MAIN-AGENT-EDGES TICKET 14: the fixture's defect used to be a DRAFT edge
+ * (E6). Ruling S15069/T2465-T2466 made E6 a warning that refuses nothing, so a
+ * fixture built on one could no longer exercise the commit gate at all. E4 —
+ * a stored side naming a lane its own endpoint does not carry — is the one
+ * remaining blocking edge class, and it anchors at the CITING turn exactly as
+ * E6 did, so this fixture's subject (WHERE an error anchors, not WHICH errors
+ * exist) is preserved.
+ *
+ * `delta` is DECLARED in the task and carried by nobody, which is what makes
+ * the stored side invalid rather than merely unknown. Every member carries
+ * `beta` and `gamma`.
  */
 function seedEvidenceFixture(db: Database): EvidenceFixture {
   const sessionDbId = upsertSession(db, {
@@ -118,15 +121,21 @@ function seedEvidenceFixture(db: Database): EvidenceFixture {
   addSegmentMembers(db, segmentId, [evidenceRoot, lookbackCited, lookbackTurn, w1, w2], NOW);
   insertLane(db, segmentId, "beta", NOW);
   insertLane(db, segmentId, "gamma", NOW);
+  insertLane(db, segmentId, "delta", NOW);
 
-  const draft = (citing: number, cited: number) => ({
-    citing: { kind: "turn" as const, id: citing },
-    cited: { kind: "turn" as const, id: cited },
-    relationClass: "use" as const,
-    provenance: "asserted" as const,
-    ...deriveSideTags([]),
-  });
-  writeMemoryEdges(db, [draft(lookbackTurn, lookbackCited), draft(w2, w1)], NOW);
+  // Written past `writeMemoryEdges` on purpose: the write gate refuses a side
+  // naming a lane its endpoint does not carry, and E4 is precisely the rule
+  // re-checked over STOCK — which is what a later tag edit leaves behind.
+  const invalidDeclaration = (citing: number, cited: number): void => {
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'asserted', 'delta', 'beta', 'use', '', ?)`,
+    ).run(citing, cited, NOW);
+  };
+  invalidDeclaration(lookbackTurn, lookbackCited);
+  invalidDeclaration(w2, w1);
 
   enqueueNoteSettlementWindows(
     db,
@@ -165,7 +174,7 @@ function captureToolImpl() {
 }
 
 describe("settlement-gate-taxonomy ticket 02 — an old error on a lookback turn is invisible and non-blocking", () => {
-  test("the commit gate refuses over the window's own draft edge and says nothing about the lookback turn's", () => {
+  test("the commit gate refuses over the window's own invalid declaration and says nothing about the lookback turn's", () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -263,13 +272,13 @@ describe("settlement-gate-taxonomy ticket 02 — an old error on a lookback turn
         windowEnd: 1001,
       });
 
-      // The window's own E6 is shown — so this is not a render that lost its
+      // The window's own E4 is shown — so this is not a render that lost its
       // error section.
-      expect(laneCheckText).toContain("[E6]");
+      expect(laneCheckText).toContain("[E4]");
       expect(laneCheckText).toContain(`S${fixture.sessionDbId}/T1001`);
       expect(laneCheckText).toContain("1 error(s)");
-      // The lookback turn's E6 is not, on either scope.
-      expect(laneCheckText).not.toContain(`S${fixture.sessionDbId}/T900: extends`);
+      // The lookback turn's E4 is not, on either scope.
+      expect(laneCheckText).not.toContain(`anchor S${fixture.sessionDbId}/T900`);
     } finally {
       db?.close();
     }
@@ -303,7 +312,18 @@ describe("settlement-gate-taxonomy ticket 02 — an old error on a lookback turn
  * of AUTHORSHIP rather than of "everything writable is judged after all".
  */
 describe("settlement-gate-taxonomy ticket 04 — a defect this run CREATES on an evidence turn is judged", () => {
-  test("the run's own draft on prompt 899 blocks the commit; the pre-existing one on prompt 900 still does not", async () => {
+  /**
+   * MAIN-AGENT-EDGES TICKET 14 restates the GATE half of this test on the
+   * REPORT surface, because the class an edge-pass run can author with its own
+   * tools is E6 and E6 no longer refuses anything (ruling S15069/T2465-T2466):
+   * a bare address is a legal write, and the ambiguous side it leaves is a
+   * legal row. The mechanism under test — `evaluation.judged`, which admits a
+   * turn outside the judgment window once THIS run has written on it — is
+   * unchanged and still measured, on the finding list rather than on the
+   * refusal. The refusal assertion is kept and re-aimed at the fixture's own
+   * E4, which proves the gate is live rather than silent.
+   */
+  test("the run's own defect on prompt 899 becomes a finding; the pre-existing one on prompt 900 still does not", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -329,9 +349,9 @@ describe("settlement-gate-taxonomy ticket 04 — a defect this run CREATES on an
             (await handlers.get("lane_check")!({})) as { content: Array<{ text: string }> }
           ).content[0]!.text;
 
-          // The run DIRTIES prompt 899 — a bare address is a DRAFT edge, which
-          // is error class E6 by construction, on a turn 101 prompts before
-          // the window.
+          // The run DIRTIES prompt 899 — a bare address leaves an AMBIGUOUS
+          // side (both endpoints sit in two lanes), which is error class E6 by
+          // construction, on a turn 101 prompts before the window.
           await handlers.get("recall")!({
             id: `S${fixture.sessionDbId}/T899`,
             filter: { fields: ["relations"] },
@@ -402,9 +422,14 @@ describe("settlement-gate-taxonomy ticket 04 — a defect this run CREATES on an
       // is the only difference between them.
       expect(afterText).not.toContain(`anchor S${fixture.sessionDbId}/T900`);
 
-      // The gate agrees with the preview, because one rule built both.
+      // The gate agrees with the preview, because one rule built both. It
+      // refuses over the fixture's own E4 inside the window — so the gate is
+      // demonstrably live — and over NEITHER of the two evidence turns: not
+      // the one this run dirtied (E6 blocks nothing) and not the one it did
+      // not author (outside the judgment set).
       expect(commitText).toContain("Commit refused");
-      expect(commitText).toContain(`S${fixture.sessionDbId}/T899`);
+      expect(commitText).toContain(`S${fixture.sessionDbId}/T1001`);
+      expect(commitText).not.toContain(`S${fixture.sessionDbId}/T899`);
       expect(commitText).not.toContain(`S${fixture.sessionDbId}/T900`);
     } finally {
       db?.close();

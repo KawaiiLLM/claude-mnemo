@@ -447,9 +447,49 @@ export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
  */
 const WRITABLE_SET_ADDRESSES_PER_LINE = 10;
 
+/**
+ * THE WORKLIST RENDERING'S BOUND (main-agent-edges ticket 14, peer finding
+ * P2-D). How many addresses ANY one list here prints before it stops and says
+ * how many it stopped at.
+ *
+ * Every list this module renders — a lane's frozen members, a homeless group,
+ * the context delta, the finalize result's frozen writable set — is a set whose
+ * size is a property of the window, not of the design, and a 900-member
+ * production lane put ~30KB of addresses into a prompt whose whole point is to
+ * be small. The bound is per LIST rather than per prompt so no list can starve
+ * another, and the count is always the TRUE one: a reader who needs the rest
+ * asks `lane_check`, which is paged.
+ *
+ * 200 is the same order as the checker's own `MAX_ERROR_RENDER_ENTRIES` (50)
+ * scaled for a list of bare addresses rather than of repair instructions — 20
+ * printed lines at ten per line.
+ */
+export const SETTLEMENT_ADDRESS_LIST_BUDGET = 200;
+
+/**
+ * The shared address-list renderer: ten per line, bounded, overflow NAMED.
+ * Exported because the unified `finalize` result prints the same lists through
+ * the same budget (`note-settlement-sdk-query.ts`) — one mechanism, two hosts,
+ * so a set that is cut in the prompt is cut identically in the data result.
+ */
+export function renderSettlementAddressList(
+  addresses: readonly string[],
+  indent: string,
+): string {
+  return renderAddressList(addresses, indent);
+}
+
 function renderAddressList(addresses: readonly string[], indent: string): string {
   if (addresses.length === 0) {
     return `${indent}(none)`;
+  }
+  if (addresses.length > SETTLEMENT_ADDRESS_LIST_BUDGET) {
+    const shown = addresses.slice(0, SETTLEMENT_ADDRESS_LIST_BUDGET);
+    return (
+      renderAddressList(shown, indent) +
+      `\n${indent}… and ${addresses.length - shown.length} more (${addresses.length} total, ` +
+      "not all shown — `lane_check` pages the full set)"
+    );
   }
   const rows: string[] = [];
   for (
@@ -562,19 +602,6 @@ function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
     lines.push(renderAddressList(lane.memberAddresses, "      "));
   }
   lines.push(
-    `  removed-side debts (${worklist.debts.length}) — an edge whose head side names a lane the ` +
-      "projection took OFF the cited turn; the citing turn is yours for RELATIONS ONLY:",
-  );
-  if (worklist.debts.length === 0) {
-    lines.push("    (none)");
-  }
-  for (const debt of worklist.debts) {
-    lines.push(
-      `    edge #${debt.edgeId}: ${debt.citingAddress} still names the removed lane ` +
-        `"${debt.removedLaneTag}"`,
-    );
-  }
-  lines.push(
     `  homeless dispositions (${worklist.homeless.length}) — turns stage 1 found no legal task ` +
       "container for:",
   );
@@ -585,16 +612,12 @@ function renderStageTwoWorklist(worklist: SettlementWorklistRendering): string {
     lines.push(`    "${group.label}" — ${group.reason}`);
     lines.push(renderAddressList(group.memberAddresses, "      "));
   }
-  // MAIN-AGENT-EDGES TICKET 06: the two READ DELTAS, off the same persisted
-  // snapshot the unified `finalize` result prints them from. On this resume
-  // dispatch the writable delta is ALSO inside the writable set printed
-  // above (it is a subset of it, filed under the lookback group there); it
-  // is named again here so the RELATIONS-ONLY authority is visible at the
-  // point the debts are listed.
-  lines.push(
-    `  writable delta — relations only, not in the initial set (${worklist.writableDelta.length}):`,
-  );
-  lines.push(renderAddressList(worklist.writableDelta, "    "));
+  // MAIN-AGENT-EDGES TICKET 06: the READ DELTA, off the same persisted
+  // snapshot the unified `finalize` result prints it from. Ticket 14 deleted
+  // its twin: the `writable delta` line existed to name the citers the two
+  // side-citer closures admitted for RELATIONS ONLY, and both closures are
+  // gone with the repair channel they served, so the final writable set IS the
+  // initial one and the difference is empty by construction.
   lines.push(
     `  context delta — read-only, one hop, not in the initial set (${worklist.contextDelta.length}):`,
   );
@@ -743,8 +766,8 @@ export function renderNoteSettlementPrompt(
     "its own order, DECLARE the side of every edge whose endpoint sits in",
     "several lanes, FILL the edges the writing side missed, and REVIEW what",
     "stands; then ONE crossing pass over the lanes that genuinely link; then",
-    "the two debts that come with the handover — the writable delta's citers",
-    "discharged, and edges whose endpoints have no task at all retracted with",
+    "the one debt that comes with the handover — edges whose endpoints have no",
+    "task at all, retracted with",
     "cause. This session's own narrative is written here too, at the commit",
     "that ends the job.",
     "",
@@ -892,9 +915,9 @@ export function renderNoteSettlementPrompt(
     "",
     // TICKET 17 (round-3 peer P0-1, addendum folded in by ticket 15 — the
     // fix landed at note-settlement-sdk-query.ts's gate, 5c7bfa1): E3 stopped
-    // blocking the stage-2 terminal commit for EVERY provenance, not only a
-    // removed-side citer held for relations only — stage 2 holds no field
-    // authority anywhere, so a type debt is never this pass's to discharge.
+    // blocking the stage-2 terminal commit for EVERY provenance — stage 2 holds
+    // no field authority anywhere, so a type debt is never this pass's to
+    // discharge.
     // SETTLEMENT-GATE-TAXONOMY TICKET 04: the two surfaces no longer disagree
     // at all — one rule builds both lists — so the paragraph that taught the
     // disagreement, and taught the run to trust the gate over the preview,
@@ -911,9 +934,13 @@ export function renderNoteSettlementPrompt(
     "through its own lookback. `lane_check` still SHOWS you every E3, under",
     "the warnings, as a finding this run cannot repair.",
     "Do not chase it, and do not retype a turn to silence it.",
-    "E4 and E6 anchored on that same turn ARE yours — both are relation",
-    "grammar, both are repaired by a `declare` entry or a retraction, and",
-    "both block your commit.",
+    "An E4 anchored on that same turn IS yours and DOES block your commit: a",
+    "side names a lane its own endpoint turn does not carry, so `declare` a",
+    "lane that endpoint holds, or retract the edge. An E6 is a WARNING and",
+    "blocks nothing: the side is blank on an endpoint that sits in several",
+    "lanes, so nothing derives which one it means. Declare it when the",
+    "material you are already holding says which lane, and leave it when it",
+    "does not — an undeclared ambiguous side is a legal row.",
     "",
     "EVERYTHING UNDER `lane_check`'s WARNINGS HEADER BLOCKS NOTHING — a",
     "severed lane included. Read them, act only where the material you are",

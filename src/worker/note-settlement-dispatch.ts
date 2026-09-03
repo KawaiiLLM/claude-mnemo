@@ -37,7 +37,6 @@ import { buildSettlementWorklistRendering } from "./note-settlement-shape-number
 // — and the types beside it are erased, so nothing of the settlement model
 // reaches this process any more.
 import { installSettlementEdgesScope } from "./note-settlement-edges-scope";
-import { persistNoteSettlementClaimScope } from "../db/settlement-job-invalidation";
 import type {
   NoteSettlementUnifiedQuery,
   NoteSettlementUnifiedQueryResult,
@@ -516,14 +515,12 @@ export function createNoteSettlementDispatch(
     // range check, the commit gate and (ticket 06) the prompt's own
     // declaration all read one value that cannot move mid-run.
     const writableTurnIds = scopeHolder.current.writableTurnIds;
-    // THE CLAIM-TIME SCOPE, WRITTEN DOWN (main-agent-edges ticket 04, R10-7).
-    // Until this call a job's reach over turns was durable only AFTER its
-    // stage-1 transition; a job still on `topics` carried a live-computed set
-    // that existed in this process alone, so a lane verb running anywhere else
-    // could not see it and would delete an edge a running pass was about to
-    // lane. Recorded here, at the one moment the set is both known and
-    // immutable, and read by `invalidateOverlappingSettlementJobs`.
-    persistNoteSettlementClaimScope(db, job.id, writableTurnIds);
+    // NO CLAIM-TIME SCOPE IS PERSISTED (main-agent-edges ticket 14). Ticket 04
+    // wrote this set into `note_settlement_claim_scope` so a lane verb in
+    // another process could see a topics-stage job's reach and invalidate it
+    // rather than delete an edge under it. Ruling S15069/T2465-T2466 deleted
+    // both halves of that: nothing is deleted for ambiguity, so nothing needs
+    // to be invalidated to prevent a deletion, so the table has no reader.
     // Tag-mandate ticket 06: the SAME set, in the address vocabulary the
     // prompt declares and every write call takes. Resolved from
     // `writableTurnIds` itself rather than re-derived from the context, so
@@ -536,16 +533,22 @@ export function createNoteSettlementDispatch(
     // phase-connectivity window read the same classes the gate does.
     const scopeProvenance = scopeHolder.current.scopeProvenance ?? liveScopeProvenance;
 
-    // CANCELLATION, ARMED ON THIS SHAPE TOO (main-agent-edges spec D9's
-    // "arm cancellation for BOTH dispatch shapes"). The unified dispatch has
-    // had a claim monitor since settlement-execution-repair ticket 07; this
-    // one — the cold stage-2 resume — had none, so a structural verb that
-    // invalidated the job by bumping its generation left this run happily
-    // writing against a claim it no longer held until it finished. The monitor
-    // re-reads the durable row on its own schedule, aborts the child (the
-    // production `runQuery` answers the signal with SIGTERM then SIGKILL), and
-    // the loss promise RACES the await so a query that ignores the signal
-    // cannot wedge the drain.
+    // THE CLAIM MONITOR, ON THIS SHAPE TOO. The unified dispatch has had one
+    // since settlement-execution-repair ticket 07; this one — the cold stage-2
+    // resume — had none until main-agent-edges ticket 04 added it.
+    //
+    // IT SURVIVES TICKET 14's SUBTRACTION, and the reason is that structural
+    // invalidation was never its only cause. ORDINARY CLAIM LOSS is: a lease
+    // that expires while this run's query is still going is reaped by
+    // `reclaimExpiredNoteSettlementClaims`, which bumps `claim_generation` and
+    // lets another worker take the job — leaving this run writing against a
+    // claim it no longer holds until it happens to finish. That is the case the
+    // unified shape's monitor was built for in the first place, it is
+    // unaffected by the ruling, and the resume shape is exposed to it exactly
+    // as the unified one is. The monitor re-reads the durable row on its own
+    // schedule, aborts the child (the production `runQuery` answers the signal
+    // with SIGTERM then SIGKILL), and the loss promise RACES the await so a
+    // query that ignores the signal cannot wedge the drain.
     const abortController = new AbortController();
     let lossMessage: string | null = null;
     let lossReject: ((error: Error) => void) | null = null;
@@ -972,11 +975,6 @@ export function createUnifiedNoteSettlementDispatch(
     );
     const writableSet = resolveSettlementWritableSet(db, context, writableTurnIds);
     const scopeProvenance = resolveSettlementScopeProvenance(context, writableTurnIds);
-    // The same claim-time scope record as the resume dispatch above — see its
-    // comment. Both shapes write it, because a structural verb has no way to
-    // ask which shape is running.
-    persistNoteSettlementClaimScope(db, job.id, writableTurnIds);
-
     // TICKET 07: the query's own abort signal, and the busy token this run's
     // work holds against the worker's idleness clock (ticket 08's seam,
     // wired at `worker/server.ts`'s assembly site — see the option's own doc

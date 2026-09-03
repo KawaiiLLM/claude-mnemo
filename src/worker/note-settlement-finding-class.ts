@@ -41,9 +41,10 @@ import type { LaneCheckerError } from "../shared/lane-checker";
  * disagreement.
  *
  * None of the three is vacuous across the union: condition 1 separates the
- * grammar findings from the connectivity ones, condition 2 is live for a
- * fracture (whose representatives may sit anywhere in a lane that spans
- * thousands of prompts), and condition 3 is what demotes E3.
+ * forbidden states from the merely reported ones (the connectivity findings and
+ * E6), condition 2 is live for a fracture (whose representatives may sit
+ * anywhere in a lane that spans thousands of prompts), and condition 3 is what
+ * demotes E3.
  *
  * ONE CONSEQUENCE, MEASURED AND STATED: a FRACTURE fails conditions 1 and 3
  * BOTH, because the spec's own table gives two independent reasons for it
@@ -64,7 +65,7 @@ import type { LaneCheckerError } from "../shared/lane-checker";
 
 /** One thing a settlement surface can report. The class of each is decided by `classifySettlementFinding` and nowhere else. */
 export type SettlementFinding =
-  /** E3/E4/E6 — a state `shared/lane-checker.ts`'s grammar forbids, carrying its own anchor turn. */
+  /** E3/E4/E6 — a grammar finding from `shared/lane-checker.ts`, carrying its own anchor turn. E3 and E4 name forbidden states; E6 is a warning class (`LaneWarningClass`). */
   | { kind: "grammar-error"; error: LaneCheckerError }
   /**
    * One severed-lane fracture: two islands of ONE lane with no edge between
@@ -105,21 +106,32 @@ export interface SettlementFindingContext {
 /**
  * CONDITION 1 — "a hard post-state invariant of THIS STAGE is violated".
  *
- * A grammar finding (E3/E4/E6) names a state the model's own grammar forbids:
- * an edge that names no lane on a side (E6), a side tag absent from that side's
- * own endpoint (E4), a turn type outside the closed vocabulary (E3). Those are
- * legality, not quality.
+ * E3 and E4 name a state the model's own grammar forbids: a side tag absent
+ * from that side's own endpoint (E4), a turn type outside the closed vocabulary
+ * (E3). Those are legality, not quality.
  *
- * A FRACTURE IS NOT. Connectivity is a quality goal — spec: "Connectivity is a
- * quality goal, not a legal post-state" — and a severed lane is a perfectly
- * legal graph. The project already ruled that a fabricated bridge is worse than
- * an honest fracture, so treating a fracture as an invariant violation would
- * make the gate demand the very thing the ruling forbids.
+ * **E6 IS NOT, AND THIS IS WHERE IT IS DEMOTED** (user ruling S15069/T2465-
+ * T2466, main-agent-edges ticket 14): "a side that resolves `ambiguous` is a
+ * WARNING, nothing more." A blank side on a multi-lane endpoint is a LEGAL
+ * post-state — the edge is a fact about two nodes and stays true whether or not
+ * anyone ever picks which of the endpoint's lanes it was written from. It is
+ * demoted on THIS arm rather than on condition 3 because the repair is perfectly
+ * bounded, legal and honest (settlement may `declare` the side, and it should
+ * when it sees one); what changed is that the state it repairs is no longer
+ * forbidden, so the repair is offered and never compelled. The rule's own
+ * header says it: "repairable but not compelled" simply IS a warning.
+ *
+ * A FRACTURE IS NOT an invariant violation either. Connectivity is a quality
+ * goal — spec: "Connectivity is a quality goal, not a legal post-state" — and a
+ * severed lane is a perfectly legal graph. The project already ruled that a
+ * fabricated bridge is worse than an honest fracture, so treating a fracture as
+ * an invariant violation would make the gate demand the very thing the ruling
+ * forbids.
  */
 function violatesStagePostStateInvariant(finding: SettlementFinding): boolean {
   switch (finding.kind) {
     case "grammar-error":
-      return true;
+      return finding.error.class !== "E6";
     case "lane-fracture":
       return false;
   }
@@ -160,14 +172,14 @@ function anchorsInThisRunsJudgment(
  *   - BOUNDED: the anchor must be in this dispatch's writable set at all.
  *     Nothing outside it is a repair this run can attempt, at any price.
  *   - LEGAL: the authority this job holds over that anchor must reach the
- *     repair the class needs. E4/E6 are discharged by retracting the edge or
- *     re-placing its sides, which is RELATION authority — asked of
+ *     repair the class needs. E4 is discharged by declaring a valid lane or
+ *     retracting the edge, which is RELATION authority — asked of
  *     `settlementTurnPermissions` rather than assumed, so a provenance added
  *     tomorrow without relation authority gets the right answer for free.
  *     **E3 IS DEMOTED HERE, and this is the spec's own reason**: its only
  *     repair is writing the turn's `type`, a NOTE FIELD, and the edge pass
  *     holds no such pen on ANY provenance (`STAGE_TWO_TURN_NOTE_FIELDS` refuses
- *     `type` on a window member exactly as on a removed-side citer). Stage 1
+ *     `type` on a window member as on every other class). Stage 1
  *     owns it as a blocker, through its own transition gate; a type emptied
  *     after the transition is the NEXT window's stage-1 debt, reached through
  *     its lookback. This replaces the hand-written "beyond authority" carve-out

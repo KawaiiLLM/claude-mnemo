@@ -173,56 +173,49 @@ describe("snapshot 1 — the writable set with its provenance classes", () => {
     );
   });
 
-  test("a removed-side citer joins the set, and a turn holding BOTH classes takes the union of authorities", () => {
+  /**
+   * THE THREE TESTS THIS REPLACES (main-agent-edges ticket 14) pinned the
+   * removed-side-citer closure: a citer whose head side named a lane the
+   * projection took off the CITED turn joined the writable set with
+   * relations-only authority, and the debt was persisted in
+   * `note_settlement_removed_side_debts`. That closure was one of the two
+   * repair channels ruling S15069/T2465-T2466 abolished, so `removedLanes`, the
+   * debt table and the class itself are gone. What is pinned instead is the
+   * subtraction: the snapshot admits the ordinary classes and NOTHING else, and
+   * the transition input has no `removedLanes` field to hand it.
+   */
+  test("only the three ordinary classes reach the snapshot — a citer of a de-laned turn is not admitted", () => {
     const citedInWindow = seedTurn(10, { tags: [] });
     const outsideCiter = seedTurn(11);
     const insideCiter = seedTurn(12);
     seedTask(["deleted-lane"], [citedInWindow, outsideCiter, insideCiter]);
-    const outsideEdge = edge(outsideCiter, citedInWindow, "extends", "deleted-lane");
-    const insideEdge = edge(insideCiter, citedInWindow, "narrows", "deleted-lane");
+    edge(outsideCiter, citedInWindow, "extends", "deleted-lane");
+    edge(insideCiter, citedInWindow, "narrows", "deleted-lane");
     const job = claimJob(10, 12);
 
     transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW, {
       snapshots: {
-        // `insideCiter` is a window member in its own right; `outsideCiter` is
-        // reachable ONLY through the debt its own edge now carries.
         window: [citedInWindow, insideCiter],
         lookback: [],
         closure: [],
         worklist: [],
-        removedLanes: [{ turnId: citedInWindow, laneTag: "deleted-lane" }],
       },
     });
 
     const writable = readNoteSettlementWritableSnapshot(db, job.id);
-    expect([...(writable.get(outsideCiter) ?? [])]).toEqual(["removed-side-citer"]);
-    expect([...(writable.get(insideCiter) ?? [])].sort()).toEqual([
-      "removed-side-citer",
-      "window",
-    ]);
-
-    // The union, stated once and consumed by the terminal gate's per-provenance
-    // filter: relation-only for the debt alone, full authority the moment an
-    // ordinary class is also present.
-    expect(settlementWritePermissions(writable.get(outsideCiter)!)).toEqual({
-      fields: false,
-      relations: true,
-    });
+    // The outside citer reached the set ONLY through the debt. There is no debt.
+    expect(writable.has(outsideCiter)).toBe(false);
+    expect([...(writable.get(insideCiter) ?? [])]).toEqual(["window"]);
+    expect([...(writable.get(citedInWindow) ?? [])]).toEqual(["window"]);
+    // Every surviving class carries both authorities, so the union has nothing
+    // left to discriminate on.
     expect(settlementWritePermissions(writable.get(insideCiter)!)).toEqual({
       fields: true,
       relations: true,
     });
-
-    const { debts } = readNoteSettlementWorklistSnapshot(db, job.id);
-    expect(debts).toEqual(
-      [
-        { edgeId: outsideEdge, removedLaneTag: "deleted-lane", citingTurnId: outsideCiter },
-        { edgeId: insideEdge, removedLaneTag: "deleted-lane", citingTurnId: insideCiter },
-      ].sort((a, b) => a.edgeId - b.edgeId),
-    );
   });
 
-  test("a removal on a turn that is only a CITING side owes no debt — its own turn was already writable", () => {
+  test("the worklist snapshot carries lanes alone — the debt list travelled with the closure", () => {
     const citing = seedTurn(10);
     const cited = seedTurn(11);
     seedTask(["deleted-lane"], [citing, cited]);
@@ -230,44 +223,12 @@ describe("snapshot 1 — the writable set with its provenance classes", () => {
     const job = claimJob(10, 11);
 
     transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW, {
-      snapshots: {
-        window: [citing, cited],
-        lookback: [],
-        closure: [],
-        worklist: [],
-        // The lane came off the CITING turn. The tail side is stale, but the
-        // turn that owns the repair is in the window already.
-        removedLanes: [{ turnId: citing, laneTag: "deleted-lane" }],
-      },
+      snapshots: { window: [citing, cited], lookback: [], closure: [], worklist: [] },
     });
 
-    expect(readNoteSettlementWorklistSnapshot(db, job.id).debts).toEqual([]);
-    const writable = readNoteSettlementWritableSnapshot(db, job.id);
-    expect([...(writable.get(citing) ?? [])]).toEqual(["window"]);
-  });
-
-  test("a rolled-back citer is never a node, so it is never granted a debt's authority", () => {
-    const cited = seedTurn(10);
-    const deadCiter = seedTurn(11);
-    seedTask(["deleted-lane"], [cited, deadCiter]);
-    edge(deadCiter, cited, "extends", "deleted-lane");
-    db.query<unknown, [number]>("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(
-      deadCiter,
-    );
-    const job = claimJob(10, 11);
-
-    transitionNoteSettlementJobToEdges(db, job.id, job.claimGeneration, NOW, {
-      snapshots: {
-        window: [cited],
-        lookback: [],
-        closure: [],
-        worklist: [],
-        removedLanes: [{ turnId: cited, laneTag: "deleted-lane" }],
-      },
-    });
-
-    expect(readNoteSettlementWorklistSnapshot(db, job.id).debts).toEqual([]);
-    expect(readNoteSettlementWritableSnapshot(db, job.id).has(deadCiter)).toBe(false);
+    const snapshot = readNoteSettlementWorklistSnapshot(db, job.id);
+    expect(snapshot).toEqual({ lanes: [] });
+    expect(snapshot).not.toHaveProperty("debts");
   });
 });
 

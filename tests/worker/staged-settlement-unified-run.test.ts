@@ -853,14 +853,21 @@ describe("the unified run — the impression obligation, end to end", () => {
   });
 });
 
-describe("the unified run — removed-side-citer authority and post-finalize scope integrity", () => {
+describe("the unified run — no side-citer authority is minted, and post-finalize scope integrity", () => {
   /**
-   * `cited` starts carrying lane word `lane-x`; the topic pass's own write
+   * `t1` starts carrying lane word `lane-x`; the topic pass's own write
    * (through the SAME unified `note` handler) replaces its tags without it —
-   * a REAL removal this run's own `finalize` diffs and reports, exactly as
-   * `collectStageOneProjection`'s module header describes. `citer` sits
-   * outside the window/lookback entirely — nothing but the transition's own
-   * removed-side-citer closure puts it in reach.
+   * a REAL removal, which under ticket 04 the transition's removed-side-citer
+   * closure turned into a relations-only grant for `citer`. `citer` sits
+   * outside the window/lookback entirely, so nothing else puts it in reach.
+   *
+   * MAIN-AGENT-EDGES TICKET 14: ruling S15069/T2465-T2466 deleted the closure
+   * and the grant. The test below is the SUBTRACTION, and it replaces one that
+   * COULD NOT FAIL: it asserted the retraction did not match
+   * `/refused|not in your writable set/i`, and the real range refusal says
+   * "outside this dispatch's reviewable window" — so it was already green at
+   * HEAD whether or not the grant existed. The needle here is the refusal's own
+   * words, taken from the refusal the range gate actually emits.
    */
   function seedRemovedSideFixture(): Fixture & { citer: number } {
     const fixture = seedFixture();
@@ -885,7 +892,7 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
     return { ...fixture, citer };
   }
 
-  test("the citer gains relation-only authority through the SAME handler registry once finalize freezes the closure", async () => {
+  test("the citer gains NO authority through the SAME handler registry — finalize freezes no side-citer grant", async () => {
     const fixture = seedRemovedSideFixture();
     try {
       const { toolImpl, handlers } = captureToolImpl();
@@ -918,9 +925,9 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
         {
           messageId: "msg_B",
           calls: [
-            // The citer is OUTSIDE window ∪ lookback ∪ baseline closure —
-            // only the removed-side-citer closure this finalize just froze
-            // puts it in reach, and RELATIONS is the only field it grants.
+            // The citer is OUTSIDE window ∪ lookback ∪ baseline closure. Under
+            // ticket 04 the removed-side closure this finalize froze put it in
+            // reach for relations; nothing does now.
             {
               tool: "note",
               toolUseId: "tu_citer_retract",
@@ -942,7 +949,23 @@ describe("the unified run — removed-side-citer authority and post-finalize sco
       await runQuery(baseRequest(fixture));
 
       expect(results.get("tu_finalize")).toContain("transition");
-      expect(results.get("tu_citer_retract")).not.toMatch(/refused|not in your writable set/i);
+      // THE SUBTRACTION, in the range gate's own words.
+      expect(results.get("tu_citer_retract")).toContain(
+        "outside this dispatch's reviewable window",
+      );
+      // And the frozen snapshot names the two window turns and nothing else:
+      // no fourth provenance class exists to admit a citer at all.
+      expect(
+        fixture.db
+          .query<{ turnId: number; provenance: string }, []>(
+            `SELECT turn_id AS turnId, provenance
+               FROM note_settlement_writable_turns ORDER BY turn_id`,
+          )
+          .all(),
+      ).toEqual([
+        { turnId: fixture.t1, provenance: "window" },
+        { turnId: fixture.t2, provenance: "window" },
+      ]);
     } finally {
       fixture.db.close();
     }

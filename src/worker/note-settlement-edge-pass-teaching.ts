@@ -56,10 +56,10 @@ import {
  *   because the rubric does not carry them.
  *
  *   REVIEW. Retraction addresses the PAIR with the mirror's own class as the
- *   precondition (T2432 P1); `lane_check`; the two handover debts (a
- *   removed-side citer's edge, a homeless turn's edges); then the host's own
- *   impressions, narrative and commit teaching, which this block does not
- *   repeat.
+ *   precondition (T2432 P1); `lane_check`; the ONE handover debt (a homeless
+ *   turn's edges — ticket 14 deleted the other, the side-citer debt, with the
+ *   repair channel it belonged to); then the host's own impressions, narrative
+ *   and commit teaching, which this block does not repeat.
  *
  *   ONE PLACEMENT PER PAIR. A citing turn in two worklist lanes is visited
  *   twice; the pair's sides are decided ONCE over the whole worklist before
@@ -84,16 +84,13 @@ export function renderEdgePassTeaching(): string {
   return [
     "THE EDGE PASS — DECLARE, FILL, REVIEW.",
     "",
-    "READ ONCE. `finalize`'s result prints two address lists beside the frozen",
-    "writable set and the worklist. WRITABLE DELTA: turns that entered your",
-    "writable set at the transition — a citer whose edge stage 1's own tag",
-    "writes left owing a lane side; yours for RELATIONS ONLY, never a note",
-    "field. CONTEXT DELTA: every frozen lane member and every turn a writable",
-    "citer's edge points at that the first read never covered; read-only",
-    "judgment material, ONE HOP — a context turn's own edges are not followed",
-    "further — and a relation write on one is refused. Both lists are set",
-    "differences against what was already read, so an address from the first",
-    "read appears in neither. Read the UNION of the two lists ONCE, in as few",
+    "READ ONCE. `finalize`'s result prints one address list beside the frozen",
+    "writable set and the worklist. CONTEXT DELTA: every frozen lane member and",
+    "every turn a writable citer's edge points at that the first read never",
+    "covered; read-only judgment material, ONE HOP — a context turn's own edges",
+    "are not followed further — and a relation write on one is refused. It is a",
+    "set difference against what was already read, so an address from the first",
+    "read never appears in it. Read it ONCE, in as few",
     "pages as the envelope allows, as a list of turn addresses with",
     `${renderReadCall()} — the same field list and budgets as the first read, so`,
     "`relations` arrives with everything else. After that sweep, READ NOTHING",
@@ -105,11 +102,16 @@ export function renderEdgePassTeaching(): string {
     "DECLARE. A lane side is RESOLVED when read, not stored: declared where a",
     "declaration exists, else DERIVED from the endpoint's single lane, else",
     "none. A side is STORED only where its endpoint sits in SEVERAL lanes, and",
-    "that is the whole of this act: every outgoing edge of a writable citer",
-    "whose side is blank on such an endpoint is E6 until you declare it, and a",
-    "stored side no longer among its endpoint's lanes is E4 until you re-set or",
-    "clear it. A blank side on an endpoint in ONE lane or in NO lane is never a",
-    "finding, and declaring one is refused as derivable. Declare with `note`'s",
+    "that is the whole of this act: an outgoing edge of a writable citer whose",
+    "side is blank on such an endpoint reads AMBIGUOUS and is reported as E6, a",
+    "WARNING that blocks nothing — declare it where the material you are",
+    "already holding says which lane, leave it where it does not, and an edge",
+    "left ambiguous is a legal row nobody will refuse you over. A stored side",
+    "no longer among its endpoint's lanes is E4, and that one DOES block: it is",
+    "a claim its own endpoint contradicts, so `declare` a lane the endpoint",
+    "carries, or retract the edge. A blank side on an endpoint in ONE lane or",
+    "in NO lane is never a finding at all, and declaring one is refused as",
+    "derivable. Declare with `note`'s",
     "`declare` entry on the CITING turn: `{ \"turn\": \"S15069/T7\", \"tailTag\":",
     "\"a\" }` or `{ \"turn\": \"S15069/T7\", \"headTag\": \"b\" }` — `tailTag` the lane",
     "THIS turn's claim belongs to, `headTag` the lane in which the cited",
@@ -142,18 +144,13 @@ export function renderEdgePassTeaching(): string {
     "`retractUse` and the bare address: the PAIR is the address, and the",
     "mirror's own class is the precondition — a pair that now carries a",
     "different class refuses, naming the class it carries, so a stale read",
-    "never deletes a claim it did not see. Then `lane_check`: E6 and E4",
-    "anchored on a citer in your writable set are yours and block `commit`;",
-    "each is repaired by a `declare` entry or a retraction, never by a tags",
-    "write. Then the two handover debts, over the lists `finalize` printed and",
-    "nothing wider:",
-    "   DEBT DISCHARGE. Each entry of the writable delta is a citing turn whose",
-    "   edge stage 1 left owing a lane side — its head names a lane the",
-    "   projection took off the cited turn, or an endpoint of it now sits in",
-    "   several lanes. Your authority over that citing turn is RELATIONS ONLY —",
-    "   its note fields belong to whichever window owns them — so the two legal",
-    "   moves are exactly: declare the side, or retract the row. Every listed",
-    "   debt is discharged before you commit.",
+    "never deletes a claim it did not see. Then `lane_check`: an E4 anchored on",
+    "a citer in your writable set is yours and blocks `commit` — repair it with",
+    "a `declare` entry naming a lane the endpoint carries, or with a",
+    "retraction, never with a tags write. An E6 on the same list is a warning:",
+    "read it, declare what you can honestly declare, and commit either way.",
+    "Then the one handover debt, over the list `finalize` printed and nothing",
+    "wider:",
     "   HOMELESS RETRACTION, with cause. A turn in the homeless list has no",
     "   legal task container, so no lane can ever attribute a side of its",
     "   edges. Retract those rows. The retraction records itself — the deleted",

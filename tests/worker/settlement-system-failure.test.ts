@@ -90,11 +90,16 @@ interface Fixture {
 }
 
 /**
- * A deliberately DIRTY window: `w2 --verify--> w1` with both sides unsettled
- * is a DRAFT edge, which is E6 — a blocking error under the frozen
- * classification rule. Every assertion below that says "no report / no verdict"
- * therefore has something real to suppress: without the guard `lane_check`
- * prints `[E6]` under `## ERRORS` and `commit` refuses over the same anchor.
+ * A deliberately DIRTY window: `w2 --verify--> w1` whose stored TAIL side names
+ * `third-lane`, a lane declared in the task and carried by neither endpoint.
+ * That is E4 — the one blocking edge class under the frozen classification
+ * rule. Every assertion below that says "no report / no verdict" therefore has
+ * something real to suppress: without the guard `lane_check` prints `[E4]`
+ * under `## ERRORS` and `commit` refuses over the same anchor.
+ *
+ * MAIN-AGENT-EDGES TICKET 14: the dirt used to be a DRAFT edge (E6). Ruling
+ * S15069/T2465-T2466 made an ambiguous side a warning that refuses nothing, so
+ * an E6 fixture would have left every "suppressed" assertion here vacuous.
  */
 function seedFixture(db: Database): Fixture {
   const sessionDbId = upsertSession(db, {
@@ -132,32 +137,25 @@ function seedFixture(db: Database): Fixture {
     tags: ["system-failure-task"],
     nowEpoch: NOW,
   }).id;
-  // TWO lanes (main-agent-edges spec D6): E6 is "a blank side whose endpoint
-  // has ≥2 lanes" now, so a fixture whose members sit in ONE lane raises no
-  // draft finding at all and the surfaces under test would have nothing to
-  // refuse over.
   const laneTags = ["system-failure-task", "window-lane", "second-lane"];
   const w1 = insertTurn(7, laneTags);
   const w2 = insertTurn(8, laneTags);
   addSegmentMembers(db, segmentId, [w1, w2], NOW);
   insertLane(db, segmentId, "window-lane", NOW);
   insertLane(db, segmentId, "second-lane", NOW);
+  // Declared and carried by nobody: what makes the stored side below INVALID
+  // rather than merely unknown.
+  insertLane(db, segmentId, "third-lane", NOW);
 
-  writeMemoryEdges(
-    db,
-    [
-      {
-        citing: { kind: "turn", id: w2 },
-        cited: { kind: "turn", id: w1 },
-        ...wordEdgeClass("verifies"),
-        provenance: "asserted",
-        // Both sides unsettled — a DRAFT edge, which is E6 and blocks.
-        tailTag: "",
-        headTag: "",
-      },
-    ],
-    NOW,
-  );
+  // Written past `writeMemoryEdges`: the write gate refuses a side naming a
+  // lane its own endpoint does not carry, and E4 is exactly the rule
+  // re-checked over STOCK, which is what a later tag edit leaves behind.
+  db.query<unknown, [number, number, number]>(
+    `INSERT INTO memory_edges
+       (citing_kind, citing_id, cited_kind, cited_id, provenance,
+        tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+     VALUES ('turn', ?, 'turn', ?, 'asserted', 'third-lane', 'window-lane', 'verify', '', ?)`,
+  ).run(w2, w1, NOW);
 
   enqueueNoteSettlementWindows(
     db,
@@ -256,9 +254,9 @@ const text = (result: unknown): string =>
  */
 function expectFailClosed(rendered: string): void {
   expect(rendered).toContain("SYSTEM / PROJECTION FAILURE");
-  // Not an error list — the fixture's own E6 would otherwise be here.
+  // Not an error list — the fixture's own E4 would otherwise be here.
   expect(rendered).not.toContain("## ERRORS");
-  expect(rendered).not.toContain("[E6]");
+  expect(rendered).not.toContain("[E4]");
   expect(rendered).not.toContain("Commit refused");
   // Not a warning — the channel may never be demoted to one.
   expect(rendered).not.toContain("WARNINGS");
@@ -455,7 +453,7 @@ describe("ticket 05 — case 2: an unconstructible projection", () => {
 
       // The descriptor claims this run is judged on a turn id its authority
       // does not contain. Nothing else about the run changes: the writable set
-      // is still {w1, w2} and the E6 is still inside it.
+      // is still {w1, w2} and the E4 is still inside it.
       const incoherent: SettlementScopeProvenance = {
         window: new Set([...fixture.windowTurnIds, 9_999]),
         baseLookback: new Set(),
@@ -525,7 +523,7 @@ describe("ticket 05 — case 2: an unconstructible projection", () => {
 
       expect(raised).toEqual([]);
       expect(preview).toContain("## ERRORS");
-      expect(preview).toContain("[E6]");
+      expect(preview).toContain("[E4]");
       expect(verdict).toContain("Commit refused");
       expect(preview).not.toContain("SYSTEM / PROJECTION FAILURE");
       expect(verdict).not.toContain("SYSTEM / PROJECTION FAILURE");
@@ -628,6 +626,10 @@ function laneCheckShapedText(targetChars: number): string {
             { length: 8 },
             (_, k) => `S12/T${1000 + index + k}`,
           ).join(",")}`
+        // BYTE SHAPE, not a class claim: the calibration below names a real
+        // observed spill SIZE, so this line's length is load-bearing and is
+        // kept exactly as measured (main-agent-edges ticket 14 left it alone
+        // for that reason, though `[E6]` no longer blocks anything).
         : `  [E6] anchor S12/T${2000 + index} -> S12/T${1500 + index}: a side names no lane`;
     lines.push(line);
     length += line.length + 1;
@@ -729,13 +731,13 @@ describe("ticket 05 — case 4: a result that cannot be expressed inside the pro
       );
 
       // The control: at the real ceiling this window has a real report, with
-      // the fixture's own E6 in it.
+      // the fixture's own E4 in it.
       expect(full).toContain("## ERRORS");
-      expect(full).toContain("[E6]");
+      expect(full).toContain("[E4]");
       expect(countTokens(full)).toBeGreaterThan(20);
 
       // Over the protocol: a system failure INSTEAD. Not the same report cut
-      // short — `expectFailClosed` asserts the E6, the section headers and the
+      // short — `expectFailClosed` asserts the E4, the section headers and the
       // truncation vocabulary are all absent — and not a warning.
       expectFailClosed(overProtocol);
       expect(overProtocol).toContain("does not fit inside the tool protocol");
@@ -841,8 +843,8 @@ describe("ticket 05 — case 4: a result that cannot be expressed inside the pro
         },
       );
 
-      // The fixture's E6 would otherwise produce "Commit refused — 1 error(s)
-      // … [E6] …", which is what `expectFailClosed` proves is absent.
+      // The fixture's E4 would otherwise produce "Commit refused — 1 error(s)
+      // … [E4] …", which is what `expectFailClosed` proves is absent.
       expectFailClosed(verdict);
       expect(raised.map((failure) => failure.case)).toEqual(["over-protocol-result"]);
       expect(surfaces).toEqual(["commit"]);
@@ -958,7 +960,7 @@ describe("ticket 05 — the channel is wired at BOTH registration sites", () => 
       // CONTROL: the unified site renders a real report for this dirty window.
       const full = await runUnifiedLaneCheck(db, fixture, { sink });
       expect(full).toContain("## ERRORS");
-      expect(full).toContain("[E6]");
+      expect(full).toContain("[E4]");
       expect(raised).toEqual([]);
 
       // CASE 2 on the unified site.

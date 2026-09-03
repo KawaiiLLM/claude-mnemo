@@ -53,6 +53,7 @@ import {
   type RunLaneTouches,
 } from "../db/lane-disposition";
 import { getTurnById } from "../db/turns";
+import { renderSettlementAddressList } from "./note-settlement-prompt";
 import { RELATION_FIELD_ENTRIES, RETRACTION_FIELD_ENTRIES } from "../db/citations";
 import { TASKLESS_TASK_SCOPE_ID } from "../db/homeless-record";
 import {
@@ -143,12 +144,13 @@ import {
  * enforcement below rather than a sentence of teaching:
  *
  *   1. IT READS, IT DOES NOT DERIVE. `readSettlementFrozenScope` supplies the
- *      writable set, its provenance classes, the `(task, lane)` worklist, the
- *      removed-side debts and each lane's frozen members. When that snapshot
- *      exists it WINS over whatever the dispatch computed live, so no caller
- *      can widen this run past what stage 1 froze.
- *   2. ITS AUTHORITY IS PER PROVENANCE. A `removed-side-citer` holds relation
- *      writes only, and the terminal gate blocks it on E4/E6 but never on E3 —
+ *      writable set, its provenance classes, the `(task, lane)` worklist and
+ *      each lane's frozen members. When that snapshot exists it WINS over
+ *      whatever the dispatch computed live, so no caller can widen this run
+ *      past what stage 1 froze.
+ *   2. ITS AUTHORITY IS PER PROVENANCE, and the terminal gate blocks on E4
+ *      alone — never on E3 (a note field no edge pass holds the pen for) and
+ *      never on E6 (an ambiguous side is legal; ruling S15069/T2465-T2466) —
  *      see `classifySettlementFinding`, the one rule.
  *   3. ITS COMMIT IS THE ONLY PUBLICATION. `done`, the cursor advance, the era
  *      grant and the final metrics are all here, in one CAS transaction, and
@@ -505,21 +507,23 @@ export const SETTLEMENT_LANE_CHECK_TOOL_DESCRIPTION =
   "WARNING families whose instances all repeat the same shape — time-order " +
   "violations and cross-task tagged edges — fold into one count-plus-" +
   "sample-addresses line each; every other report keeps one entry per block. " +
-  "The output splits in two. ERRORS come first: states the " +
-  "grammar forbids, each naming the turn it is ANCHORED at — an empty or " +
-  "out-of-vocabulary turn type (E3), an edge whose side tag is missing " +
-  "from that side's own endpoint turn (E4), and a DRAFT edge with either side " +
-  "still empty (E6), which names the side that is missing. A draft is a legal " +
-  "row to WRITE — placing an end is hindsight work — but it is not a legal row " +
-  "to LEAVE, and settling it is exactly your work. " +
+  "The output splits in two. GRAMMAR FINDINGS come first, each naming the " +
+  "turn it is ANCHORED at: an empty or out-of-vocabulary turn type (E3), a " +
+  "side whose stored lane tag is NOT among its own endpoint turn's tags (E4), " +
+  "and a side that resolves AMBIGUOUS — blank, on an endpoint that sits in two " +
+  "or more lanes, so nothing derives which one it means (E6), naming the side. " +
   "Commit refuses " +
-  "while an EDGE error (E4, E6) anchored inside your writable range remains, " +
-  "so repair those (retag, retract and re-add) and re-run. An error " +
+  "while an E4 anchored inside your writable range remains: a stored side its " +
+  "own endpoint contradicts is not a legal row, so `declare` a lane that " +
+  "endpoint carries, or retract the edge. A finding " +
   "anchored OUTSIDE your range is another window's work — leave it. " +
-  "THE ERRORS BLOCK IS EXACTLY WHAT THE GATE REFUSES OVER — one rule builds " +
+  "THE BLOCKING LIST IS EXACTLY WHAT THE GATE REFUSES OVER — one rule builds " +
   "both, so this preview can neither hide a row commit will refuse nor show " +
-  "you one it will not. An E3 (a turn's empty or out-of-vocabulary type) is " +
-  "NOT in it: setting a turn's `type` is a note field no edge pass holds the " +
+  "you one it will not. TWO CLASSES ARE IN THE BLOCK AND NEVER BLOCK. An E6 " +
+  "is a WARNING: an ambiguous side is a legal row, so declare it where the " +
+  "material you are already holding says which lane and LEAVE it where it does " +
+  "not — never retract an edge merely to silence one. An E3 (a turn's empty or " +
+  "out-of-vocabulary type) is a note field no edge pass holds the " +
   "pen for, so it is printed below, under the warnings, as a finding this run " +
   "cannot repair. It is the first pass's debt, and a later window reaches it " +
   "through its own lookback. Do not chase it and do not try to retype a " +
@@ -651,12 +655,14 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   "job itself is marked done — without it, the window is retried later " +
   "even though your writes already stand. " +
   "Commit REFUSES while an EDGE state the grammar forbids still anchors on a " +
-  "turn inside your writable set — " +
-  "a tagged edge whose tags are missing from an endpoint turn's own tags " +
-  "(E4), and a DRAFT edge with either side still empty (E6). " +
-  "No WORD requires a lane tag — every relation has a legal bare form and " +
-  "writing one is accepted — but an edge left with an empty side inside your " +
-  "writable set is unfinished settlement, so place both sides or retract it. " +
+  "turn inside your writable set, and there is exactly ONE such state: a " +
+  "stored side naming a lane that is NOT among its own endpoint turn's tags " +
+  "(E4). `declare` a lane that endpoint carries, or retract the edge. " +
+  "A BLANK SIDE NEVER REFUSES YOU. No word requires a lane tag, a side is " +
+  "resolved when read rather than stored, and a side left ambiguous because " +
+  "its endpoint sits in several lanes (E6) is a warning you may act on and may " +
+  "equally leave — declaring one you cannot honestly decide is worse than " +
+  "leaving it. " +
   "The refusal lists every one with its address and the move " +
   "that clears it; repair them and call `commit` again — a refusal costs " +
   "you nothing and is not a failed attempt. Errors anchored OUTSIDE your " +
@@ -665,9 +671,9 @@ export const SETTLEMENT_COMMIT_TOOL_DESCRIPTION =
   // every provenance by ticket 17: the divergence between what `lane_check`
   // prints as actionable and what this gate refuses over. Stated here because
   // the description is the surface carried into every retry.
-  "ONE ERROR CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty " +
+  "ONE CLASS IS EXEMPT BY AUTHORITY rather than by location: an empty " +
   "or out-of-vocabulary turn type (E3) NEVER blocks this commit, on any turn " +
-  "in your set — not a removed-side citer's, not a window member's. Its " +
+  "in your set. Its " +
   "repair is that turn's `type`, and no edge pass holds that pen (your `note` " +
   "refuses the field). It is the first pass's debt; a later window meets it " +
   "again through its own lookback, and the first pass's own transition gate " +
@@ -1369,32 +1375,37 @@ function describeCommitGateError(db: Database, error: LaneCheckerError): string 
             : `[${error.types.join(",")}] is outside the vocabulary (${error.outsideVocabulary.join(",")})`
         }. Set a legal type on this turn.`
       );
+    // E4's repair is a DECLARATION or a retraction — never "add the tag to
+    // that turn" (peer finding P1-10). The stored side is the newer claim and
+    // the endpoint's own tags are the older, settled fact; telling the edge
+    // pass to edit an endpoint's tags points it at a note field it holds no pen
+    // for on any provenance, and at a turn that may not even be its own.
     case "E4":
       return (
         `[E4] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} {${error.tags.join(",")}} — ` +
         `${error.missing
-          .map((miss) => `"${miss.tag}" missing from the ${miss.endpoint} turn's own tags`)
-          .join(", ")}. Add the tag to that turn, or retract the edge.`
+          .map((miss) => `"${miss.tag}" is not among the ${miss.endpoint} turn's own lanes`)
+          .join(", ")}. Declare a lane that endpoint carries, or retract the edge.`
       );
-    // Ticket 20: the DRAFT edge. Unlike E3/E4 this is not a write-gate rule
-    // re-checked over stock — the write gate accepts the shape, and this is
-    // where the refusal lives instead. The repair line names BOTH ways out
-    // (place the sides, or retract), because a draft settlement decides against
-    // is cleared by deletion just as legitimately.
+    // E6 IS A WARNING (ruling S15069/T2465-T2466). It reaches this renderer
+    // because `lane_check` prints the whole grammar list and the classifier
+    // files it as informational there — it can never reach the REFUSAL, whose
+    // input is the blocking list alone. So the line offers the declaration and
+    // states, in the same breath, that nothing is owed.
     case "E6":
       return (
-        `[E6] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} — DRAFT edge, ` +
+        `[E6] ${anchor}: ${error.relation} -> ${turnAddressFor(db, error.citedId)} — AMBIGUOUS side, ` +
         `${
           error.unsettledSides.length === 2
-            ? "neither side names a lane"
-            : `the ${error.unsettledSides[0]} side names no lane (the ${
+            ? "neither endpoint answers which lane"
+            : `the ${error.unsettledSides[0]} endpoint sits in several lanes (the ${
                 error.unsettledSides[0] === "tail" ? "head" : "tail"
               } side is {${error.tags.join(",")}})`
-        }. Place both sides with a {turn, tailTag, headTag} entry, or retract the edge.`
+        }. Declare that side if you know which lane it means; leaving it is legal and blocks nothing.`
       );
     default: {
-      // Exhaustive over `LaneErrorClass` today (E3/E4/E6; E1 retired with the
-      // tag mandate). A class added to the
+      // Exhaustive over the grammar classes today (E3/E4 errors + the E6
+      // warning; E1 retired with the tag mandate). A class added to the
       // checker must gain a line here rather than reach the agent as an
       // unexplained refusal — this is the compile-time reminder, and the
       // runtime fallback keeps the anchor actionable even if one ever slips
@@ -2723,12 +2734,12 @@ export const UNIFIED_FINALIZE_TOOL_DESCRIPTION =
   "whole writable set is audited, every window turn carries a `topic:` word, " +
   "and the final projection is written. It freezes what the edge pass may " +
   "read — the writable set, the (task, lane) worklist your projection " +
-  "touched, each of those lanes' members, and the lane words your projection " +
-  "REMOVED — and records any homeless group per member. Its own result is " +
-  "DATA ONLY: the frozen writable set, the two read deltas (the writable " +
-  "delta, relations only; the context delta, read-only), worklist, " +
-  "removed-side debts and " +
-  "homeless groups, printed as facts — every instruction for what to do with " +
+  "touched, and each of those lanes' members — and records any homeless group " +
+  "per member. Its own result is " +
+  "DATA ONLY: the frozen writable set, the context delta (read-only, one " +
+  "hop), the worklist and its lane members, and " +
+  "homeless groups, printed as facts — LONG LISTS ARE CUT and say how many " +
+  "they cut; `lane_check` pages the full set. Every instruction for what to do with " +
   "them already lives in your prompt. It marks nothing done and grants " +
   "nothing; only your own later `commit` publishes. " +
   "Takes `summary` (string, REQUIRED, max 1000 characters): the lines you " +
@@ -2846,15 +2857,6 @@ export function createUnifiedNoteSettlementSdkQuery(
       } else {
         request.signal.addEventListener("abort", forwardAbort, { once: true });
       }
-    }
-
-    // THE PRE-RUN TAG SNAPSHOT (note-settlement-stage1.ts's own module
-    // header): the one input to `removedLanes` that cannot be reconstructed
-    // after the projection lands. Taken here, before a single tool is
-    // registered, exactly like stage 1's own standalone dispatch.
-    const priorTagsByTurn = new Map<number, readonly string[]>();
-    for (const turnId of request.writableTurnIds) {
-      priorTagsByTurn.set(turnId, getTurnById(options.db, turnId)?.tags ?? []);
     }
 
     // THE FROZEN-SCOPE HANDOFF SEAM (ticket 02). At construction the
@@ -3339,7 +3341,6 @@ export function createUnifiedNoteSettlementSdkQuery(
 
             const projection = collectStageOneProjection(
               options.db,
-              priorTagsByTurn,
               request.writableTurnIds,
             );
 
@@ -3397,7 +3398,6 @@ export function createUnifiedNoteSettlementSdkQuery(
                 stage1Metrics: JSON.stringify({
                   summary,
                   worklistLanes: projection.worklist.length,
-                  removedLanes: projection.removedLanes.length,
                   homelessGroups: homelessGroups.length,
                 }),
                 snapshots: {
@@ -3405,7 +3405,6 @@ export function createUnifiedNoteSettlementSdkQuery(
                   lookback: [...request.scopeProvenance.baseLookback],
                   closure: [...request.scopeProvenance.closureOnly],
                   worklist: projection.worklist,
-                  removedLanes: projection.removedLanes,
                 },
                 homelessGroups,
                 homelessSupersessions: supersessions,
@@ -3655,10 +3654,10 @@ export function createUnifiedNoteSettlementSdkQuery(
  * instruction. What to DO with this data is the prompt's job, not this
  * string's.
  *
- * MAIN-AGENT-EDGES TICKET 06 adds the two READ DELTAS (read-once spec D6):
- * `writable delta` — the citers the two closures admitted, relations only —
- * and `context delta` — the frozen lane members and cited endpoints stage 1
- * never read, one hop. Both are printed from the SAME persisted snapshot the
+ * MAIN-AGENT-EDGES TICKET 06 adds the READ DELTA (read-once spec D6):
+ * `context delta` — the frozen lane members and cited endpoints stage 1
+ * never read, one hop. Ticket 14 deleted its twin, `writable delta`, with the
+ * two closures that fed it. It is printed from the SAME persisted snapshot the
  * range gate and `lane_check` read (`scope.readDeltas`), so the list the
  * model is told to read once is the list the gate will judge it against.
  * Exported for the test that pins the two lines; production calls it from
@@ -3674,40 +3673,41 @@ export function renderUnifiedFinalizeDataResult(
     .sort((a, b) => a - b)
     .map((id) => turnAddressFor(db, id));
   const worklist = buildSettlementWorklistRendering(db, jobId);
+  // BOUNDED, THROUGH THE WORKLIST RENDERING'S OWN BUDGET (main-agent-edges
+  // ticket 14, peer finding P2-D). Every list below used to be a single
+  // `join(", ")` over a set whose size is a property of the window — a
+  // 900-member lane and a 300-turn frozen set both printed in full, into a data
+  // result the child carries for the rest of its run. `renderSettlementAddressList`
+  // is the resume prompt's own renderer, imported rather than reimplemented, so
+  // the two hosts cut at the same place and name the same overflow count. No new
+  // mechanism, one budget.
   const addressList = (ids: readonly number[]): string =>
-    ids.length > 0 ? ids.map((id) => turnAddressFor(db, id)).join(", ") : "(none)";
+    renderSettlementAddressList(
+      ids.map((id) => turnAddressFor(db, id)),
+      "  ",
+    );
   const lines: string[] = [
     `job ${jobId}, transition ${transitionSeq}.`,
-    `frozen writable set (${frozenAddresses.length}): ${
-      frozenAddresses.length > 0 ? frozenAddresses.join(", ") : "(none)"
-    }`,
-    `writable delta — relations only, not in the initial set (${scope.readDeltas.writableDelta.length}): ${
-      addressList(scope.readDeltas.writableDelta)
-    }`,
-    `context delta — read-only, one hop, not in the initial set (${scope.readDeltas.contextDelta.length}): ${
-      addressList(scope.readDeltas.contextDelta)
-    }`,
+    `frozen writable set (${frozenAddresses.length}):`,
+    renderSettlementAddressList(frozenAddresses, "  "),
+    `context delta — read-only, one hop, not in the initial set (${scope.readDeltas.contextDelta.length}):`,
+    addressList(scope.readDeltas.contextDelta),
     `worklist lanes (${worklist.lanes.length}):`,
   ];
   if (worklist.lanes.length === 0) {
     lines.push("  (none)");
   }
   for (const lane of worklist.lanes) {
-    lines.push(`  ${lane.address} (${lane.memberAddresses.length}): ${lane.memberAddresses.join(", ")}`);
-  }
-  lines.push(`removed-side debts (${worklist.debts.length}):`);
-  if (worklist.debts.length === 0) {
-    lines.push("  (none)");
-  }
-  for (const debt of worklist.debts) {
-    lines.push(`  edge #${debt.edgeId}: ${debt.citingAddress} names removed lane "${debt.removedLaneTag}"`);
+    lines.push(`  ${lane.address} (${lane.memberAddresses.length}):`);
+    lines.push(renderSettlementAddressList(lane.memberAddresses, "    "));
   }
   lines.push(`homeless groups (${worklist.homeless.length}):`);
   if (worklist.homeless.length === 0) {
     lines.push("  (none)");
   }
   for (const group of worklist.homeless) {
-    lines.push(`  "${group.label}" — ${group.reason}: ${group.memberAddresses.join(", ")}`);
+    lines.push(`  "${group.label}" — ${group.reason}:`);
+    lines.push(renderSettlementAddressList(group.memberAddresses, "    "));
   }
   return lines.join("\n");
 }
