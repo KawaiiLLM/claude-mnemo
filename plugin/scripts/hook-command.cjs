@@ -577,7 +577,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.29.0-mtl4xlj9" : "dev";
+var BUILD_ID = true ? "0.29.0-mtl5nlzt" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1298,8 +1298,7 @@ function selectLogicalEdgeRow(rows) {
     if (!isRelationClass(row.relationClass)) {
       continue;
     }
-    const materialized = edgeRelationClass(row);
-    const rank = materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    const rank = RELATION_CLASS_SPECIFICITY[row.relationClass];
     if (best === null || rank > bestRank || rank === bestRank && row.id < best.id) {
       best = row;
       bestRank = rank;
@@ -2656,7 +2655,9 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
     head: db.query(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`)
   };
   const collidingSibling = db.query(
-    `SELECT other.id AS id
+    `SELECT other.id AS id,
+            other.relation_class AS relationClass,
+            other.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN memory_edges other
          ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
@@ -2700,26 +2701,50 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
         const nextHead = side === "head" ? UNDECLARED_SIDE_TAG : live.headTag;
-        if (collidingSibling.get(nextTail, nextHead, row.id) !== null) {
-          dropAllSideIndexRows.run(row.id);
-          deleteEdge.run(row.id);
+        const sibling = collidingSibling.get(nextTail, nextHead, row.id);
+        if (sibling !== null) {
+          const winner = selectLogicalEdgeRow([
+            { id: row.id, relationClass: row.relationClass },
+            sibling
+          ]);
+          if (winner.id === sibling.id) {
+            dropAllSideIndexRows.run(row.id);
+            deleteEdge.run(row.id);
+            insertReceipt.run(
+              row.id,
+              "delete-edge",
+              side,
+              row.citingId,
+              row.citedId,
+              row.relationClass,
+              row.relationCoverage,
+              row.tailTag,
+              row.headTag,
+              ctx.writer,
+              ctx.nowEpoch
+            );
+            deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+            stampedCiterIds.add(row.citingId);
+            deleted = true;
+            continue;
+          }
+          dropAllSideIndexRows.run(sibling.id);
+          deleteEdge.run(sibling.id);
           insertReceipt.run(
-            row.id,
+            sibling.id,
             "delete-edge",
             side,
             row.citingId,
             row.citedId,
-            row.relationClass,
-            row.relationCoverage,
-            row.tailTag,
-            row.headTag,
+            sibling.relationClass,
+            sibling.relationCoverage,
+            nextTail,
+            nextHead,
             ctx.writer,
             ctx.nowEpoch
           );
-          deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+          deletedEdges.push({ edgeId: sibling.id, citingId: row.citingId, citedId: row.citedId, side });
           stampedCiterIds.add(row.citingId);
-          deleted = true;
-          continue;
         }
         clearSide[side].run(row.id);
         dropSideIndexRow.run(row.id, side);
@@ -3117,6 +3142,14 @@ function deriveTurnSegmentMembership(db, turnId, tags, nowEpoch, operation = "no
   }
   return target;
 }
+var MembershipWriteRefusedError = class extends Error {
+  constructor(result) {
+    super(result.message);
+    this.result = result;
+    this.name = "MembershipWriteRefusedError";
+  }
+  result;
+};
 function writeMembershipTags(db, input) {
   const { operation, writes, nowEpoch } = input;
   if (writes.length === 0) {
@@ -11417,26 +11450,31 @@ function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
     return;
   }
   const keptTags = existing.tags.filter((tag) => tag.includes(":"));
-  db.query(
-    `UPDATE turns
-       SET status = 'active',
-           title = NULL,
-           content = NULL,
-           insight = NULL,
-           type = '[]',
-           updated_at_epoch = ?
-       WHERE id = ?`
-  ).run(updatedAtEpoch, turnId);
-  reindexTurnFromDb(db, turnId);
   const resetTagsMoved = JSON.stringify(existing.tags) !== stringifyArray(keptTags);
-  writeMembershipTags(db, {
-    operation: "normal",
-    writes: [{ turnId, tags: keptTags }],
-    nowEpoch: updatedAtEpoch
+  runWriteTransaction(db, () => {
+    const membership = writeMembershipTags(db, {
+      operation: "normal",
+      writes: [{ turnId, tags: keptTags }],
+      nowEpoch: updatedAtEpoch
+    });
+    if (!membership.ok) {
+      throw new MembershipWriteRefusedError(membership);
+    }
+    db.query(
+      `UPDATE turns
+         SET status = 'active',
+             title = NULL,
+             content = NULL,
+             insight = NULL,
+             type = '[]',
+             updated_at_epoch = ?
+         WHERE id = ?`
+    ).run(updatedAtEpoch, turnId);
+    reindexTurnFromDb(db, turnId);
+    if (existing.type.length > 0 || resetTagsMoved) {
+      recomputeSegmentFacetsForTurn(db, turnId);
+    }
   });
-  if (existing.type.length > 0 || resetTagsMoved) {
-    recomputeSegmentFacetsForTurn(db, turnId);
-  }
 }
 function getTurnsByIds(db, turnIds) {
   if (turnIds.length === 0) {
@@ -32247,6 +32285,14 @@ function compactMetadataTags(claim) {
   ];
 }
 function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
+  const membership = writeMembershipTags(db, {
+    operation: "normal",
+    writes: [{ turnId, tags: compactMetadataTags(claim) }],
+    nowEpoch
+  });
+  if (!membership.ok) {
+    throw new MembershipWriteRefusedError(membership);
+  }
   db.query(
     `UPDATE turns
      SET type = '["compact"]',
@@ -32270,11 +32316,6 @@ function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
     nowEpoch,
     turnId
   );
-  writeMembershipTags(db, {
-    operation: "normal",
-    writes: [{ turnId, tags: compactMetadataTags(claim) }],
-    nowEpoch
-  });
   const pruned = db.query(
     "DELETE FROM memory_edges WHERE citing_kind = 'turn' AND citing_id = ?"
   ).run(turnId);

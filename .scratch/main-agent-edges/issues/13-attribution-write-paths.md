@@ -99,3 +99,24 @@ None of the four items' premises were false at HEAD as originally stated in the 
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_017wgBfgUE6NJuqgHWpbVi2B
+
+---
+
+## Integrator adjudication (main, 2026-09-03)
+
+Merged `c862d0ab` no-ff, clean beside ticket 12; bundles rebuilt. `npx tsc --noEmit` 0; guards green.
+Full `bun test` **4794 / 0 / 276** against 4788/0/276 — the worker's +6 exactly. `selectLogicalEdgeRow`
+imported and called at both collision sites (grep 3 hits).
+
+My probes, on sites the worker's six did not use:
+
+| # | mutation | result |
+|---|---|---|
+| I1 | `lanes.ts`: survivor = `candidates[0]` (lowest id) instead of `selectLogicalEdgeRow` | RED — "the MORE SPECIFIC class survives even at a HIGHER row id" |
+| I2 | `capture-repair.ts`: the membership refusal ignored (`if (false)`) | RED — "refuses ATOMICALLY … no field of the turn or its edges changes" |
+
+Restored by `cp`, md5 verified. Accepted. Item 3 (claim scope) correctly stopped under ruling T2465 and
+left untouched — ticket 14 deletes it. The worker's judgment call — an explicit `onAmbiguous: () =>
+"keep"` at the two lane-creation call sites instead of changing the seam's global default — is the
+right scope for this ticket; ticket 14 makes the global default a no-op and removes those two
+overrides (named in its brief).

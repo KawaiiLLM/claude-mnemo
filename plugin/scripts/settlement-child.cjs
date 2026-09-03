@@ -36256,16 +36256,6 @@ var EDGE_PROVENANCES = [
 ];
 var EDGE_SIDES = ["tail", "head"];
 var UNSETTLED_SIDE_TAG = "";
-var PROVENANCE_RANK = {
-  retrieval: 0,
-  rollback: 1,
-  "text-ref": 2,
-  judged: 3,
-  asserted: 4
-};
-function rankEdgeProvenance(provenance) {
-  return PROVENANCE_RANK[provenance];
-}
 function isEdgeNodeKind(value) {
   return typeof value === "string" && EDGE_NODE_KINDS.includes(value);
 }
@@ -36326,8 +36316,7 @@ function selectLogicalEdgeRow(rows) {
     if (!isRelationClass(row.relationClass)) {
       continue;
     }
-    const materialized = edgeRelationClass(row);
-    const rank = materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    const rank = RELATION_CLASS_SPECIFICITY[row.relationClass];
     if (best === null || rank > bestRank || rank === bestRank && row.id < best.id) {
       best = row;
       bestRank = rank;
@@ -38281,6 +38270,7 @@ function checkCompleteReadFreshness(db, writer, entityType, entityId, field, sta
 var RELATIONS_GATE_FIELD = "relations";
 var LANE_MERGE_WRITER = "lane:merge";
 var LANE_CLEAR_WRITER = "lane:clear";
+var LANE_CREATE_WRITER = "lane:create";
 function stampTurnRelationsRevision(db, turnId, writer, nowEpoch) {
   return stampField(
     db,
@@ -39174,7 +39164,9 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
     head: db.query(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`)
   };
   const collidingSibling = db.query(
-    `SELECT other.id AS id
+    `SELECT other.id AS id,
+            other.relation_class AS relationClass,
+            other.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN memory_edges other
          ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
@@ -39218,26 +39210,50 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
         const nextHead = side === "head" ? UNDECLARED_SIDE_TAG : live.headTag;
-        if (collidingSibling.get(nextTail, nextHead, row.id) !== null) {
-          dropAllSideIndexRows.run(row.id);
-          deleteEdge.run(row.id);
+        const sibling = collidingSibling.get(nextTail, nextHead, row.id);
+        if (sibling !== null) {
+          const winner = selectLogicalEdgeRow([
+            { id: row.id, relationClass: row.relationClass },
+            sibling
+          ]);
+          if (winner.id === sibling.id) {
+            dropAllSideIndexRows.run(row.id);
+            deleteEdge.run(row.id);
+            insertReceipt.run(
+              row.id,
+              "delete-edge",
+              side,
+              row.citingId,
+              row.citedId,
+              row.relationClass,
+              row.relationCoverage,
+              row.tailTag,
+              row.headTag,
+              ctx.writer,
+              ctx.nowEpoch
+            );
+            deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+            stampedCiterIds.add(row.citingId);
+            deleted = true;
+            continue;
+          }
+          dropAllSideIndexRows.run(sibling.id);
+          deleteEdge.run(sibling.id);
           insertReceipt.run(
-            row.id,
+            sibling.id,
             "delete-edge",
             side,
             row.citingId,
             row.citedId,
-            row.relationClass,
-            row.relationCoverage,
-            row.tailTag,
-            row.headTag,
+            sibling.relationClass,
+            sibling.relationCoverage,
+            nextTail,
+            nextHead,
             ctx.writer,
             ctx.nowEpoch
           );
-          deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+          deletedEdges.push({ edgeId: sibling.id, citingId: row.citingId, citedId: row.citedId, side });
           stampedCiterIds.add(row.citingId);
-          deleted = true;
-          continue;
         }
         clearSide[side].run(row.id);
         dropSideIndexRow.run(row.id, side);
@@ -41100,6 +41116,15 @@ function countTurnsCarryingTag(db, tag, segmentId) {
   ).get(tag, segmentId)?.n ?? 0;
   return { total, inSegment };
 }
+function turnIdsCarryingTagInSegment(db, tag, segmentId) {
+  return db.query(
+    `SELECT t.id AS id FROM turns t
+         JOIN segment_members sm ON sm.turn_id = t.id
+        WHERE EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+          AND sm.segment_id = ?
+        ORDER BY t.id ASC`
+  ).all(tag, segmentId).map((row) => row.id);
+}
 function getLane(db, segmentId, tag) {
   return mapLaneRow(
     db.query(
@@ -41165,6 +41190,9 @@ function makeSideOwnershipResolver(db, segmentId) {
     return owners.get(id) === segmentId;
   };
 }
+function logicalEdgeSpecificityRank(relationClass) {
+  return isRelationClass(relationClass) ? RELATION_CLASS_SPECIFICITY[relationClass] : -1;
+}
 function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
   const memberTurns = db.query(
     `SELECT t.id AS id, t.tags AS tags FROM turns t
@@ -41213,7 +41241,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     `SELECT id,
               citing_kind AS citingKind, citing_id AS citingId,
               cited_kind AS citedKind, cited_id AS citedId,
-              relation_class AS relationClass, provenance,
+              relation_class AS relationClass, relation_coverage AS relationCoverage, provenance,
               tail_tag AS tailTag, head_tag AS headTag,
               created_at_epoch AS createdAtEpoch
          FROM memory_edges
@@ -41276,34 +41304,39 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
       survivors.push(bucket[0]);
       continue;
     }
-    const ordered = sortLaneModelV12MergeGroup(
-      bucket.map((entry) => ({
-        id: entry.row.id,
-        provenance: entry.row.provenance,
-        createdAtEpoch: entry.row.createdAtEpoch,
-        entry
-      }))
-    );
-    const kept = ordered[0];
-    survivors.push(kept.entry);
-    for (const dropped of ordered.slice(1)) {
+    const candidates2 = bucket.map((entry) => ({
+      id: entry.row.id,
+      relationClass: entry.row.relationClass,
+      relationCoverage: entry.row.relationCoverage,
+      entry
+    })).sort((a, b) => a.id - b.id);
+    const winner = selectLogicalEdgeRow(candidates2);
+    const kept = winner.entry;
+    const keptRank = logicalEdgeSpecificityRank(winner.relationClass);
+    survivors.push(kept);
+    for (const candidate of candidates2) {
+      if (candidate === winner) {
+        continue;
+      }
+      const dropped = candidate.entry;
+      const droppedRank = logicalEdgeSpecificityRank(candidate.relationClass);
       collisions.push({
-        citingAddress: resolveEdgeNodeAddress(db, kept.entry.row.citingKind, kept.entry.row.citingId),
-        citedAddress: resolveEdgeNodeAddress(db, kept.entry.row.citedKind, kept.entry.row.citedId),
-        relationClass: kept.entry.row.relationClass,
-        tailTag: kept.entry.tailTag,
-        headTag: kept.entry.headTag,
-        keptEdgeId: kept.id,
-        keptProvenance: kept.provenance,
-        keptCreatedAtEpoch: kept.createdAtEpoch,
-        droppedEdgeId: dropped.id,
-        droppedProvenance: dropped.provenance,
-        droppedCreatedAtEpoch: dropped.createdAtEpoch,
-        rule: laneModelV12MergeRule(kept, dropped)
+        citingAddress: resolveEdgeNodeAddress(db, kept.row.citingKind, kept.row.citingId),
+        citedAddress: resolveEdgeNodeAddress(db, kept.row.citedKind, kept.row.citedId),
+        relationClass: kept.row.relationClass,
+        tailTag: kept.tailTag,
+        headTag: kept.headTag,
+        keptEdgeId: kept.row.id,
+        keptProvenance: kept.row.provenance,
+        keptCreatedAtEpoch: kept.row.createdAtEpoch,
+        droppedEdgeId: dropped.row.id,
+        droppedProvenance: dropped.row.provenance,
+        droppedCreatedAtEpoch: dropped.row.createdAtEpoch,
+        rule: keptRank === droppedRank ? "lowest-id" : "specificity"
       });
-      dropSideTagRows.run(dropped.id);
-      deleteEdge.run(dropped.id);
-      noteCitingTurn(dropped.entry.row);
+      dropSideTagRows.run(dropped.row.id);
+      deleteEdge.run(dropped.row.id);
+      noteCitingTurn(dropped.row);
     }
   }
   let edgeSidesRewritten = 0;
@@ -41404,22 +41437,6 @@ var LANE_MODEL_V12_MERGED_RELATION_WORDS = [
 ];
 function resolveEdgeNodeAddress(db, kind, id) {
   return kind === "turn" ? resolveTurnAddress(db, id) : `${kind}#${id}`;
-}
-function rankLaneModelV12MergeProvenance(provenance) {
-  return isEdgeProvenance(provenance) ? rankEdgeProvenance(provenance) : -1;
-}
-function sortLaneModelV12MergeGroup(group) {
-  return [...group].sort((left, right) => {
-    const rankDiff = rankLaneModelV12MergeProvenance(right.provenance) - rankLaneModelV12MergeProvenance(left.provenance);
-    if (rankDiff !== 0) {
-      return rankDiff;
-    }
-    const ageDiff = left.createdAtEpoch - right.createdAtEpoch;
-    return ageDiff !== 0 ? ageDiff : left.id - right.id;
-  });
-}
-function laneModelV12MergeRule(kept, dropped) {
-  return rankLaneModelV12MergeProvenance(dropped.provenance) === rankLaneModelV12MergeProvenance(kept.provenance) ? "earlier" : "provenance";
 }
 
 // src/db/lane-edge-gate.ts
@@ -52637,6 +52654,11 @@ function handleCreateLane(db, rawId, input, options) {
       if (!lane) {
         return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
       }
+      normalizeIncidentAttribution(db, turnIdsCarryingTagInSegment(db, tag, segmentId), {
+        writer: LANE_CREATE_WRITER,
+        nowEpoch,
+        onAmbiguous: () => "keep"
+      });
       insertImpressionDebt(db, {
         segmentId,
         laneTag: tag,
@@ -55483,6 +55505,13 @@ function evaluateLaneVerb(db, rawInput, action, nowEpoch) {
     }
     const lane = insertLane(db, segmentId, tag, nowEpoch);
     const laneId = lane?.id ?? getLane(db, segmentId, tag)?.id ?? null;
+    if (lane !== null) {
+      normalizeIncidentAttribution(db, turnIdsCarryingTagInSegment(db, tag, segmentId), {
+        writer: LANE_CREATE_WRITER,
+        nowEpoch,
+        onAmbiguous: () => "keep"
+      });
+    }
     return {
       ok: true,
       outcome: { lane: { action, segmentId, tag, laneId } }

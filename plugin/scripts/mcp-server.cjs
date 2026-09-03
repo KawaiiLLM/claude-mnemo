@@ -7172,8 +7172,7 @@ function selectLogicalEdgeRow(rows) {
     if (!isRelationClass(row.relationClass)) {
       continue;
     }
-    const materialized = edgeRelationClass(row);
-    const rank = materialized === null ? -1 : RELATION_CLASS_SPECIFICITY[materialized.relationClass];
+    const rank = RELATION_CLASS_SPECIFICITY[row.relationClass];
     if (best === null || rank > bestRank || rank === bestRank && row.id < best.id) {
       best = row;
       bestRank = rank;
@@ -8764,7 +8763,7 @@ function checkTurnLiveForWrite(db, turnId, address, options = {}) {
     message: `${address} is skipped \u2014 it is dormant, so it carries no type, no edges and no membership until a note revives it. Write its note first (title and content), or leave it alone. Nothing was written.`
   };
 }
-var EDGE_WRITE_GATE_FIELD, CLAIM_WRITER_PATTERN, CLAIM_WRITER_STAGES, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD, LANE_MERGE_WRITER, LANE_CLEAR_WRITER;
+var EDGE_WRITE_GATE_FIELD, CLAIM_WRITER_PATTERN, CLAIM_WRITER_STAGES, ANONYMOUS_WRITER, SESSION_WRITER_PATTERN, STALE_READ_GRANT_AGE_SECONDS, RELATIONS_GATE_FIELD, LANE_MERGE_WRITER, LANE_CLEAR_WRITER, LANE_CREATE_WRITER;
 var init_write_gate = __esm({
   "src/db/write-gate.ts"() {
     "use strict";
@@ -8780,6 +8779,7 @@ var init_write_gate = __esm({
     RELATIONS_GATE_FIELD = "relations";
     LANE_MERGE_WRITER = "lane:merge";
     LANE_CLEAR_WRITER = "lane:clear";
+    LANE_CREATE_WRITER = "lane:create";
   }
 });
 
@@ -9108,7 +9108,9 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
     head: db.query(`UPDATE memory_edges SET head_tag = '' WHERE id = ?`)
   };
   const collidingSibling = db.query(
-    `SELECT other.id AS id
+    `SELECT other.id AS id,
+            other.relation_class AS relationClass,
+            other.relation_coverage AS relationCoverage
        FROM memory_edges me
        JOIN memory_edges other
          ON other.citing_kind = me.citing_kind AND other.citing_id = me.citing_id
@@ -9152,26 +9154,50 @@ function normalizeIncidentAttribution(db, turnIds, ctx) {
         }
         const nextTail = side === "tail" ? UNDECLARED_SIDE_TAG : live.tailTag;
         const nextHead = side === "head" ? UNDECLARED_SIDE_TAG : live.headTag;
-        if (collidingSibling.get(nextTail, nextHead, row.id) !== null) {
-          dropAllSideIndexRows.run(row.id);
-          deleteEdge.run(row.id);
+        const sibling = collidingSibling.get(nextTail, nextHead, row.id);
+        if (sibling !== null) {
+          const winner = selectLogicalEdgeRow([
+            { id: row.id, relationClass: row.relationClass },
+            sibling
+          ]);
+          if (winner.id === sibling.id) {
+            dropAllSideIndexRows.run(row.id);
+            deleteEdge.run(row.id);
+            insertReceipt.run(
+              row.id,
+              "delete-edge",
+              side,
+              row.citingId,
+              row.citedId,
+              row.relationClass,
+              row.relationCoverage,
+              row.tailTag,
+              row.headTag,
+              ctx.writer,
+              ctx.nowEpoch
+            );
+            deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+            stampedCiterIds.add(row.citingId);
+            deleted = true;
+            continue;
+          }
+          dropAllSideIndexRows.run(sibling.id);
+          deleteEdge.run(sibling.id);
           insertReceipt.run(
-            row.id,
+            sibling.id,
             "delete-edge",
             side,
             row.citingId,
             row.citedId,
-            row.relationClass,
-            row.relationCoverage,
-            row.tailTag,
-            row.headTag,
+            sibling.relationClass,
+            sibling.relationCoverage,
+            nextTail,
+            nextHead,
             ctx.writer,
             ctx.nowEpoch
           );
-          deletedEdges.push({ edgeId: row.id, citingId: row.citingId, citedId: row.citedId, side });
+          deletedEdges.push({ edgeId: sibling.id, citingId: row.citingId, citedId: row.citedId, side });
           stampedCiterIds.add(row.citingId);
-          deleted = true;
-          continue;
         }
         clearSide[side].run(row.id);
         dropSideIndexRow.run(row.id, side);
@@ -9242,6 +9268,7 @@ var init_normalize_incident_attribution = __esm({
   "src/db/normalize-incident-attribution.ts"() {
     "use strict";
     init_edge_side_resolution();
+    init_memory_edges();
     init_note_settlement_pre_resolutions();
     init_settlement_job_invalidation();
     init_write_gate();
@@ -11168,6 +11195,15 @@ function countTurnsCarryingTag(db, tag, segmentId) {
   ).get(tag, segmentId)?.n ?? 0;
   return { total, inSegment };
 }
+function turnIdsCarryingTagInSegment(db, tag, segmentId) {
+  return db.query(
+    `SELECT t.id AS id FROM turns t
+         JOIN segment_members sm ON sm.turn_id = t.id
+        WHERE EXISTS (SELECT 1 FROM json_each(t.tags) j WHERE j.value = ?)
+          AND sm.segment_id = ?
+        ORDER BY t.id ASC`
+  ).all(tag, segmentId).map((row) => row.id);
+}
 function bestEffortCanonicalizeLegacyTag(raw) {
   return raw.trim().toLowerCase().normalize("NFC");
 }
@@ -11234,6 +11270,9 @@ function makeSideOwnershipResolver(db, segmentId) {
     return owners.get(id) === segmentId;
   };
 }
+function logicalEdgeSpecificityRank(relationClass) {
+  return isRelationClass(relationClass) ? RELATION_CLASS_SPECIFICITY[relationClass] : -1;
+}
 function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
   const memberTurns = db.query(
     `SELECT t.id AS id, t.tags AS tags FROM turns t
@@ -11282,7 +11321,7 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
     `SELECT id,
               citing_kind AS citingKind, citing_id AS citingId,
               cited_kind AS citedKind, cited_id AS citedId,
-              relation_class AS relationClass, provenance,
+              relation_class AS relationClass, relation_coverage AS relationCoverage, provenance,
               tail_tag AS tailTag, head_tag AS headTag,
               created_at_epoch AS createdAtEpoch
          FROM memory_edges
@@ -11345,34 +11384,39 @@ function mergeLaneTag(db, segmentId, from, into, nowEpoch) {
       survivors.push(bucket[0]);
       continue;
     }
-    const ordered = sortLaneModelV12MergeGroup(
-      bucket.map((entry) => ({
-        id: entry.row.id,
-        provenance: entry.row.provenance,
-        createdAtEpoch: entry.row.createdAtEpoch,
-        entry
-      }))
-    );
-    const kept = ordered[0];
-    survivors.push(kept.entry);
-    for (const dropped of ordered.slice(1)) {
+    const candidates2 = bucket.map((entry) => ({
+      id: entry.row.id,
+      relationClass: entry.row.relationClass,
+      relationCoverage: entry.row.relationCoverage,
+      entry
+    })).sort((a, b) => a.id - b.id);
+    const winner = selectLogicalEdgeRow(candidates2);
+    const kept = winner.entry;
+    const keptRank = logicalEdgeSpecificityRank(winner.relationClass);
+    survivors.push(kept);
+    for (const candidate of candidates2) {
+      if (candidate === winner) {
+        continue;
+      }
+      const dropped = candidate.entry;
+      const droppedRank = logicalEdgeSpecificityRank(candidate.relationClass);
       collisions.push({
-        citingAddress: resolveEdgeNodeAddress(db, kept.entry.row.citingKind, kept.entry.row.citingId),
-        citedAddress: resolveEdgeNodeAddress(db, kept.entry.row.citedKind, kept.entry.row.citedId),
-        relationClass: kept.entry.row.relationClass,
-        tailTag: kept.entry.tailTag,
-        headTag: kept.entry.headTag,
-        keptEdgeId: kept.id,
-        keptProvenance: kept.provenance,
-        keptCreatedAtEpoch: kept.createdAtEpoch,
-        droppedEdgeId: dropped.id,
-        droppedProvenance: dropped.provenance,
-        droppedCreatedAtEpoch: dropped.createdAtEpoch,
-        rule: laneModelV12MergeRule(kept, dropped)
+        citingAddress: resolveEdgeNodeAddress(db, kept.row.citingKind, kept.row.citingId),
+        citedAddress: resolveEdgeNodeAddress(db, kept.row.citedKind, kept.row.citedId),
+        relationClass: kept.row.relationClass,
+        tailTag: kept.tailTag,
+        headTag: kept.headTag,
+        keptEdgeId: kept.row.id,
+        keptProvenance: kept.row.provenance,
+        keptCreatedAtEpoch: kept.row.createdAtEpoch,
+        droppedEdgeId: dropped.row.id,
+        droppedProvenance: dropped.row.provenance,
+        droppedCreatedAtEpoch: dropped.row.createdAtEpoch,
+        rule: keptRank === droppedRank ? "lowest-id" : "specificity"
       });
-      dropSideTagRows.run(dropped.id);
-      deleteEdge.run(dropped.id);
-      noteCitingTurn(dropped.entry.row);
+      dropSideTagRows.run(dropped.row.id);
+      deleteEdge.run(dropped.row.id);
+      noteCitingTurn(dropped.row);
     }
   }
   let edgeSidesRewritten = 0;
@@ -12104,6 +12148,7 @@ var init_lanes = __esm({
     init_normalize_incident_attribution();
     init_memory_edges();
     init_segments();
+    init_relation_class();
     init_tag_namespace();
     init_turn_liveness();
     init_write_gate();
@@ -12566,7 +12611,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.29.0-mtl4xlj9" : "dev";
+    BUILD_ID = true ? "0.29.0-mtl5nlzt" : "dev";
   }
 });
 
@@ -42914,6 +42959,7 @@ function touchSessionRememberActivity(db, sessionId) {
 
 // src/db/turns.ts
 init_turn_tags();
+init_database();
 init_search();
 init_segments();
 var TURN_SELECT = `
@@ -52112,6 +52158,7 @@ init_references();
 init_segments();
 init_impressions();
 init_lanes();
+init_normalize_incident_attribution();
 init_tag_namespace();
 init_write_gate();
 init_topic_tag();
@@ -52452,6 +52499,11 @@ function handleCreateLane(db, rawId, input, options) {
       if (!lane) {
         return { kind: "duplicate", lane: getLane(db, segmentId, tag) };
       }
+      normalizeIncidentAttribution(db, turnIdsCarryingTagInSegment(db, tag, segmentId), {
+        writer: LANE_CREATE_WRITER,
+        nowEpoch,
+        onAmbiguous: () => "keep"
+      });
       insertImpressionDebt(db, {
         segmentId,
         laneTag: tag,
