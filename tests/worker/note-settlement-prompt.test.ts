@@ -33,7 +33,9 @@ import {
 } from "../../src/worker/note-settlement-context";
 import {
   NOTE_SETTLEMENT_SYSTEM_PROMPT,
+  SETTLEMENT_ADDRESS_LIST_BUDGET,
   renderNoteSettlementPrompt,
+  renderSettlementAddressList,
 } from "../../src/worker/note-settlement-prompt";
 import { renderEdgePassTeaching } from "../../src/worker/note-settlement-edge-pass-teaching";
 import { buildSettlementWorklistRendering } from "../../src/worker/note-settlement-shape-numbers";
@@ -1178,7 +1180,7 @@ describe("ticket 07 — lane_check lands in the review, and the retired procedur
     const procedure = prompt.slice(prompt.indexOf("## Procedure"), prompt.indexOf("## Duties"));
 
     expect(procedure).not.toContain("Do not call `lane_check` during the");
-    expect(procedure).toContain("Then `lane_check`: E6 and E4");
+    expect(procedure).toContain("Then `lane_check`: an E4 anchored on");
     expect(prompt).toContain("after your first complete pass, call `lane_check`");
   });
 
@@ -1743,12 +1745,12 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
       { address: "E9/#alpha", memberAddresses: ["S3/T1", "S3/T2"] },
       { address: "E9/#beta", memberAddresses: ["S3/T4"] },
     ],
-    debts: [{ edgeId: 41, removedLaneTag: "gamma", citingAddress: "S3/T7" }],
     homeless: [
       { label: "an orphan line", reason: "no attached task covers it", memberAddresses: ["S3/T5"] },
     ],
-    // main-agent-edges ticket 06: the two read deltas the transition froze.
-    writableDelta: ["S3/T7"],
+    // main-agent-edges ticket 06: the read delta the transition froze. Ticket
+    // 14 retired its twin (`writableDelta`) and the removed-side debt list
+    // with the repair channel both belonged to.
     contextDelta: ["S3/T2", "S3/T9"],
   };
 
@@ -1776,7 +1778,7 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("at the commit");
   });
 
-  test("the worklist is declared with its lanes, frozen members, debts and homeless dispositions", () => {
+  test("the worklist is declared with its lanes, frozen members and homeless dispositions", () => {
     const prompt = renderStageTwoPrompt();
 
     expect(prompt).toContain("YOUR WORKLIST (frozen by the stage-1 transition");
@@ -1784,12 +1786,13 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("E9/#alpha (2):");
     expect(prompt).toContain("S3/T1, S3/T2");
     expect(prompt).toContain("E9/#beta (1):");
-    expect(prompt).toContain('edge #41: S3/T7 still names the removed lane "gamma"');
     expect(prompt).toContain('"an orphan line" — no attached task covers it');
     expect(prompt).toContain("a turn that joined after the transition is not one");
-    // main-agent-edges ticket 06: the two read deltas print with the worklist,
-    // each labelled with its authority.
-    expect(prompt).toContain("writable delta — relations only, not in the initial set (1):");
+    // main-agent-edges ticket 06: the read delta prints with the worklist,
+    // labelled with its authority. Ticket 14: the removed-side debt roster and
+    // the writable-delta line are gone with the two closures that fed them.
+    expect(prompt).not.toContain("removed-side debts");
+    expect(prompt).not.toContain("writable delta");
     expect(prompt).toContain("context delta — read-only, one hop, not in the initial set (2):");
     expect(prompt).toContain("S3/T2, S3/T9");
   });
@@ -1800,12 +1803,13 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
   // retraction no longer claims "the bare citation comes back" — ticket 03
   // deleted `restoreBareRowsForEmptiedPairs`, so that sentence was FALSE at
   // HEAD and this test's old `toContain("the bare citation")` pinned it.
-  test("the two edge debts are taught by name: debt discharge and homeless retraction — and the draft one is gone", () => {
+  test("the ONE edge debt is taught by name: homeless retraction — the draft and side-citer ones are gone", () => {
     const prompt = renderStageTwoPrompt();
 
-    expect(prompt).toContain("DEBT DISCHARGE. Each entry of the writable delta is a citing turn whose");
-    expect(prompt).toContain("Your authority over that citing turn is RELATIONS ONLY");
-    expect(prompt).toContain("declare the side, or retract the row");
+    // MAIN-AGENT-EDGES TICKET 14: DEBT DISCHARGE went with the writable delta
+    // it was defined over — an ambiguous side owes nobody anything.
+    expect(prompt).not.toContain("DEBT DISCHARGE");
+    expect(prompt).not.toContain("Your authority over that citing turn is RELATIONS ONLY");
     expect(prompt).toContain("HOMELESS RETRACTION, with cause");
     expect(prompt).toContain("The retraction records itself");
     expect(prompt).not.toContain("DRAFT RECONCILIATION");
@@ -1835,7 +1839,13 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
     expect(prompt).toContain("under");
     expect(prompt).toContain("as a finding this run cannot repair");
     expect(prompt).toContain("Do not chase it, and do not retype a turn to silence it.");
-    expect(prompt).toContain("E4 and E6 anchored on that same turn ARE yours");
+    // TICKET 14 (peer finding P2-C): E4 and E6 no longer share a verdict, so
+    // the sentence that gave them one is retired and each is taught alone.
+    expect(prompt).not.toContain("E4 and E6 anchored on that same turn ARE yours");
+    expect(prompt).toContain("An E4 anchored on that same turn IS yours and DOES block your commit");
+    expect(prompt).toContain("An E6 is a WARNING and");
+    expect(prompt).toContain("blocks nothing");
+    expect(prompt).toContain("an undeclared ambiguous side is a legal row");
   });
 
   // TICKET 04's other half of the same teaching: the warnings header is now
@@ -1881,17 +1891,77 @@ describe("staged settlement ticket 07 — the stage-2 duties are taught only whe
 
     expect(prompt).toContain("You are the SECOND of two passes");
     expect(prompt).toContain("YOUR WORKLIST");
-    expect(prompt).toContain("DEBT DISCHARGE");
     expect(prompt).toContain("HOMELESS RETRACTION");
     expect(prompt).toContain("This is the pass that writes it.");
     // And the empty lists say so in words, which a missing section could not.
     expect(prompt).toContain("lanes to work, in stage 1's own order (0)");
-    expect(prompt).toContain("removed-side debts (0)");
     expect(prompt).toContain("homeless dispositions (0)");
-    expect(prompt).toContain("writable delta — relations only, not in the initial set (0)");
     expect(prompt).toContain("context delta — read-only, one hop, not in the initial set (0)");
     // What survives unchanged: everything the pass has always taught.
     expect(prompt).toContain("## Duties");
     expect(prompt).toContain("THE EDGE PASS — DECLARE, FILL, REVIEW.");
+  });
+});
+
+
+/**
+ * MAIN-AGENT-EDGES TICKET 14, PEER FINDING P2-D — THE WORKLIST RENDERING'S
+ * BUDGET, and the ONE mechanism both hosts obey.
+ *
+ * Every address list in the stage-2 prompt and in the unified `finalize` DATA
+ * result is a set whose size is a property of the window, not of the design: a
+ * production lane with 900 frozen members put ~30KB of addresses into a prompt
+ * whose whole point is to be small, and the finalize result joined the same
+ * lists onto single lines. `renderSettlementAddressList` is the one bound, it
+ * is EXPORTED so `note-settlement-sdk-query.ts` prints through it rather than
+ * reimplementing it, and its overflow is NAMED with the true total.
+ *
+ * MUTATION: delete the `addresses.length > SETTLEMENT_ADDRESS_LIST_BUDGET`
+ * branch from `renderAddressList` (note-settlement-prompt.ts) and both tests
+ * below go red.
+ */
+describe("the address-list budget (P2-D): long lists are cut and the cut is named", () => {
+  const address = (n: number): string => `S9/T${n}`;
+
+  test("a list at the budget prints whole; one address over it is cut and states the true total", () => {
+    const atBudget = Array.from({ length: SETTLEMENT_ADDRESS_LIST_BUDGET }, (_, i) =>
+      address(i + 1),
+    );
+    const whole = renderSettlementAddressList(atBudget, "  ");
+    expect(whole).toContain(address(1));
+    expect(whole).toContain(address(SETTLEMENT_ADDRESS_LIST_BUDGET));
+    expect(whole).not.toContain("more (");
+
+    const overBudget = [...atBudget, address(SETTLEMENT_ADDRESS_LIST_BUDGET + 1)];
+    const cut = renderSettlementAddressList(overBudget, "  ");
+    // The last address is NOT printed…
+    expect(cut).not.toContain(address(SETTLEMENT_ADDRESS_LIST_BUDGET + 1));
+    // …and the cut says so, with the true total and where to get the rest.
+    expect(cut).toContain(`… and 1 more (${overBudget.length} total, not all shown`);
+    expect(cut).toContain("`lane_check` pages the full set");
+  });
+
+  test("the stage-2 prompt's own lane roster obeys the same bound", () => {
+    const oversized = Array.from({ length: SETTLEMENT_ADDRESS_LIST_BUDGET + 5 }, (_, i) =>
+      address(i + 1),
+    );
+    const sessionDbId = seedSession();
+    seedTurn(sessionDbId, 1);
+    const job = claimWindow(sessionDbId, 1, 1);
+    const context = buildNoteSettlementContext(db, job, { nowEpoch: NOW })!;
+    const writableTurnIds = computeSettlementWritableTurnIds(db, context.reviewableTurnIds);
+    const prompt = renderNoteSettlementPrompt(
+      context,
+      resolveSettlementWritableSet(db, context, writableTurnIds),
+      {
+        lanes: [{ address: "E9/#alpha", memberAddresses: oversized }],
+        homeless: [],
+        contextDelta: [],
+      },
+    );
+
+    expect(prompt).toContain(`E9/#alpha (${oversized.length}):`);
+    expect(prompt).not.toContain(address(SETTLEMENT_ADDRESS_LIST_BUDGET + 5));
+    expect(prompt).toContain(`… and 5 more (${oversized.length} total, not all shown`);
   });
 });

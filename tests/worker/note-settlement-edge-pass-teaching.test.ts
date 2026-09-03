@@ -46,22 +46,25 @@ const NOW = 1_800_000_000;
 describe("the shared edge-pass block — READ ONCE", () => {
   const block = renderEdgePassTeaching();
 
-  test("names the two deltas by authority and as set differences against the first read", () => {
+  // MAIN-AGENT-EDGES TICKET 14: the WRITABLE DELTA half of this teaching is
+  // retired with the two side-citer closures that fed it (ruling
+  // S15069/T2465-T2466 — an ambiguous side is a warning and mints no repair
+  // authority). One list is named, and the retired sentences are asserted
+  // absent in the retired-needles test below.
+  test("names the one delta by authority and as a set difference against the first read", () => {
     expect(block).toContain("THE EDGE PASS — DECLARE, FILL, REVIEW.");
-    expect(block).toContain("READ ONCE. `finalize`'s result prints two address lists beside the frozen");
-    expect(block).toContain("WRITABLE DELTA: turns that entered your");
-    expect(block).toContain("yours for RELATIONS ONLY, never a note");
-    expect(block).toContain("field. CONTEXT DELTA: every frozen lane member and every turn a writable");
-    expect(block).toContain("citer's edge points at that the first read never covered; read-only");
-    expect(block).toContain("judgment material, ONE HOP");
+    expect(block).toContain("READ ONCE. `finalize`'s result prints one address list beside the frozen");
+    expect(block).toContain("writable set and the worklist. CONTEXT DELTA: every frozen lane member and");
+    expect(block).toContain("every turn a writable citer's edge points at that the first read never");
+    expect(block).toContain("covered; read-only judgment material, ONE HOP");
     expect(block).toContain("and a relation write on one is refused");
-    expect(block).toContain("Both lists are set");
-    expect(block).toContain("differences against what was already read, so an address from the first");
-    expect(block).toContain("read appears in neither.");
+    expect(block).toContain("It is a");
+    expect(block).toContain("set difference against what was already read, so an address from the first");
+    expect(block).toContain("read never appears in it.");
   });
 
-  test("reads the union once, with the first read's own field list and budgets, and then nothing", () => {
-    expect(block).toContain("Read the UNION of the two lists ONCE, in as few");
+  test("reads the delta once, with the first read's own field list and budgets, and then nothing", () => {
+    expect(block).toContain("Read it ONCE, in as few");
     expect(block).toContain("pages as the envelope allows, as a list of turn addresses with");
     const fields = SETTLEMENT_READ_FIELDS.map((field) => `"${field}"`).join(",");
     const budgets = Object.entries(SETTLEMENT_READ_FIELD_BUDGETS)
@@ -87,14 +90,27 @@ describe("the shared edge-pass block — READ ONCE", () => {
 describe("the shared edge-pass block — DECLARE", () => {
   const block = renderEdgePassTeaching();
 
-  test("states the resolution model and what E6 and E4 are under it", () => {
+  /**
+   * TICKET 14, PEER FINDING P2-C. The retired pair was "…is E6 until you
+   * declare it" and "…is E4 until you re-set or clear it": both taught an
+   * obligation, and only one of them still exists. E6 is a WARNING nobody is
+   * compelled to repair; E4 is the one class that blocks.
+   */
+  test("states the resolution model, E6 as a warning and E4 as the one that blocks", () => {
     expect(block).toContain("DECLARE. A lane side is RESOLVED when read, not stored: declared where a");
     expect(block).toContain("declaration exists, else DERIVED from the endpoint's single lane, else");
     expect(block).toContain("none. A side is STORED only where its endpoint sits in SEVERAL lanes");
-    expect(block).toContain("whose side is blank on such an endpoint is E6 until you declare it, and a");
-    expect(block).toContain("stored side no longer among its endpoint's lanes is E4 until you re-set or");
-    expect(block).toContain("clear it. A blank side on an endpoint in ONE lane or in NO lane is never a");
-    expect(block).toContain("finding, and declaring one is refused as derivable.");
+    expect(block).toContain("side is blank on such an endpoint reads AMBIGUOUS and is reported as E6, a");
+    expect(block).toContain("WARNING that blocks nothing — declare it where the material you are");
+    expect(block).toContain("already holding says which lane, leave it where it does not, and an edge");
+    expect(block).toContain("left ambiguous is a legal row nobody will refuse you over.");
+    expect(block).toContain("A stored side");
+    expect(block).toContain("no longer among its endpoint's lanes is E4, and that one DOES block: it is");
+    expect(block).toContain("a claim its own endpoint contradicts, so `declare` a lane the endpoint");
+    expect(block).toContain("carries, or retract the edge.");
+    expect(block).toContain("A blank side on an endpoint in ONE lane or");
+    expect(block).toContain("in NO lane is never a finding at all, and declaring one is refused as");
+    expect(block).toContain("derivable.");
   });
 
   test("teaches the `declare` entry, both sides named, three-state patch, class as precondition", () => {
@@ -161,21 +177,18 @@ describe("the shared edge-pass block — REVIEW", () => {
     expect(block).toContain("never deletes a claim it did not see.");
   });
 
-  test("lane_check: E6 and E4 are yours and repaired by declare or retraction, never a tags write", () => {
-    expect(block).toContain("Then `lane_check`: E6 and E4");
-    expect(block).toContain("anchored on a citer in your writable set are yours and block `commit`;");
-    expect(block).toContain("each is repaired by a `declare` entry or a retraction, never by a tags");
-    expect(block).toContain("write.");
+  test("lane_check: the E4 blocks and is repaired by declare or retraction, the E6 does not", () => {
+    expect(block).toContain("Then `lane_check`: an E4 anchored on");
+    expect(block).toContain("a citer in your writable set is yours and blocks `commit` — repair it with");
+    expect(block).toContain("a `declare` entry naming a lane the endpoint carries, or with a");
+    expect(block).toContain("retraction, never with a tags write.");
+    expect(block).toContain("An E6 on the same list is a warning:");
+    expect(block).toContain("read it, declare what you can honestly declare, and commit either way.");
   });
 
-  test("the two handover debts, over finalize's lists and nothing wider", () => {
-    expect(block).toContain("Then the two handover debts, over the lists `finalize` printed and");
-    expect(block).toContain("nothing wider:");
-    expect(block).toContain("DEBT DISCHARGE. Each entry of the writable delta is a citing turn whose");
-    expect(block).toContain("edge stage 1 left owing a lane side");
-    expect(block).toContain("Your authority over that citing turn is RELATIONS ONLY");
-    expect(block).toContain("moves are exactly: declare the side, or retract the row. Every listed");
-    expect(block).toContain("debt is discharged before you commit.");
+  test("the ONE handover debt, over finalize's list and nothing wider", () => {
+    expect(block).toContain("Then the one handover debt, over the list `finalize` printed and nothing");
+    expect(block).toContain("wider:");
     expect(block).toContain("HOMELESS RETRACTION, with cause. A turn in the homeless list has no");
     expect(block).toContain("legal task container, so no lane can ever attribute a side of its");
     expect(block).toContain("edges. Retract those rows. The retraction records itself — the deleted");
@@ -195,6 +208,18 @@ describe("the shared edge-pass block — REVIEW", () => {
       "PLACE EVERY EDGE AT WRITE",
       "{turn, tailTag, headTag}",
       "does NOT survive `commit`",
+      // MAIN-AGENT-EDGES TICKET 14 (ruling S15069/T2465-T2466). Every needle
+      // below is a sentence, or a load-bearing fragment of one, that taught
+      // the retired repair channel: a writable delta with relations-only
+      // authority, a debt somebody had to discharge, and an E6 that blocked.
+      "WRITABLE DELTA",
+      "writable delta",
+      "DEBT DISCHARGE",
+      "yours for RELATIONS ONLY",
+      "is E6 until you declare it",
+      "E6 and E4",
+      "two handover debts",
+      "Read the UNION of the two lists",
     ]) {
       expect({ retired, present: block.includes(retired) }).toEqual({ retired, present: false });
     }

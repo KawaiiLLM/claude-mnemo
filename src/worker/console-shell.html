@@ -946,9 +946,9 @@ function renderGraphSvg(){
     // reads by HUE alone.
     // A DRAFT is an edge attributing to no lane on EITHER side, so a
     // half-attributed edge greys out with a fully unattributed one. That
-    // deliberately drops the distinction between E6 (blocks commit) and the
-    // ordinary backlog: the console is a reading surface and the commit
-    // refusal names E6 by address, which is where it is actionable.
+    // deliberately drops the distinction between E6 and the ordinary backlog,
+    // and costs nothing now: E6 is a warning class and refuses no commit, so
+    // the console's grey is the whole of what a reader can act on.
     //
     // `style`, never `stroke:css(...)`: `css()` resolves through
     // getComputedStyle and BAKES the literal in force when the edge was drawn,

@@ -547,8 +547,7 @@ export interface NoteSettlementStageTransitionOptions {
    * THE THREE PERSISTED SNAPSHOTS (staged-settlement ticket 04) — the writable
    * set with its provenance classes, the ordered `(task, lane)` worklist, and
    * the per-lane member snapshots — written inside this same fenced
-   * transaction, along with the removed-side-citer closure the projection's own
-   * lane removals create.
+   * transaction.
    *
    * OPTIONAL because stage 1 is still stubbed: a pass that made no projection
    * has no writable set to declare and no worklist to hand on, and writing an
@@ -2228,4 +2227,142 @@ export function advanceNoteSettlementCursor(
     ).run(sessionId, next, nowEpoch);
   }
   return next;
+}
+
+/**
+ * THE STAGE-ONE RESET, for one job: status `pending`, generation bumped, stage
+ * back to `topics` with the transition marker and stage-1 metrics cleared, and
+ * every piece of transition scratch deleted.
+ *
+ * ONE CALLER SURVIVES, and it is not the one this function shipped for. Ticket
+ * 04 factored it out of `invalidateOverlappingSettlementJobs` — the structural
+ * invalidation a newly-ambiguous side used to trigger — and that whole
+ * mechanism is DELETED (main-agent-edges ticket 14, ruling S15069/T2465-T2466:
+ * an ambiguous side is a warning and resets nothing). What remains is the
+ * CUTOVER FENCE (`db/schema.ts`, spec D9 / R10-8): before the one-shot rewrites
+ * `memory_edges`, every pending or failed job that kept `stage = 'edges'` is
+ * reset, because its frozen stage-2 worklist was computed over the unfolded
+ * table. That purpose has nothing to do with attribution, which is why the
+ * function moved here — to the job lifecycle it belongs to — rather than going
+ * with the invalidation module.
+ *
+ * `done` and `abandoned` are terminal and answer `null`: nothing will claim
+ * them again, so a reset would produce a job that reruns a published window.
+ *
+ * `stage`, `transition_seq` and `stage1_metrics` are added additively by
+ * `ensureNoteSettlementStageSchema`; a database that has not reached it holds
+ * no staged job at all, so the status/generation half of the reset is the whole
+ * of it there. The no-stage arm of the SELECT is `NULL AS stage`, ONE alias —
+ * it shipped as `NULL AS stage AS stage`, a syntax error that made this
+ * function unrunnable on exactly the databases the arm exists for (ticket 12,
+ * P2-A); `tests/db/settlement-job-reset.test.ts` runs it against a table with
+ * no `stage` column so the arm is executed, not assumed.
+ */
+export function resetNoteSettlementJobToStageOne(
+  db: Database,
+  jobId: number,
+  nowEpoch: number,
+): SettlementJobStageOneReset | null {
+  const hasStageColumns = settlementJobsHasColumn(db, "stage");
+  const job = db
+    .query<
+      { id: number; status: string; stage: string | null; claimGeneration: number },
+      [number]
+    >(
+      `SELECT id, status, ${hasStageColumns ? "stage" : "NULL"} AS stage,
+              claim_generation AS claimGeneration
+         FROM note_settlement_jobs WHERE id = ?`,
+    )
+    .get(jobId);
+  if (
+    !job ||
+    (job.status !== "pending" && job.status !== "claimed" && job.status !== "failed")
+  ) {
+    return null;
+  }
+  const changes = db
+    .query<unknown, [number, number]>(
+      `UPDATE note_settlement_jobs
+          SET status = 'pending',
+              claimed_at_epoch = NULL,
+              claim_generation = claim_generation + 1,
+              ${hasStageColumns ? "stage = 'topics', transition_seq = NULL, stage1_metrics = NULL," : ""}
+              updated_at_epoch = ?
+        WHERE id = ?
+          AND status IN ('pending', 'claimed', 'failed')`,
+    )
+    .run(nowEpoch, jobId).changes;
+  if (changes === 0) {
+    return null;
+  }
+  clearSettlementJobTransitionScratch(db, jobId);
+  return {
+    jobId,
+    previousStatus: job.status,
+    previousStage: job.stage ?? "topics",
+    claimGeneration: job.claimGeneration + 1,
+  };
+}
+
+/** What one `resetNoteSettlementJobToStageOne` did, for the caller's receipt. */
+export interface SettlementJobStageOneReset {
+  jobId: number;
+  /** The status the row held before the reset — `pending`, `claimed` or `failed`. */
+  previousStatus: string;
+  /** The stage it held before the reset. `edges` is the case the reset exists for. */
+  previousStage: string;
+  /** The generation AFTER the bump: the value a running dispatch's fence will now fail against. */
+  claimGeneration: number;
+}
+
+/**
+ * Everything a stage-1 transition froze for one job, deleted: the four
+ * transition snapshots, the homeless groups (their members and supersessions
+ * cascade) and the retraction audits, and the impression-debt LEASE — released
+ * rather than deleted, because the debt itself belongs to the lane, not to the
+ * run.
+ *
+ * The two side-citer scratch tables that used to be on this list
+ * (`note_settlement_removed_side_debts`, `note_settlement_pre_side_resolutions`)
+ * are not merely skipped here — they no longer exist
+ * (`db/note-settlement-snapshots.ts` drops them).
+ */
+function clearSettlementJobTransitionScratch(db: Database, jobId: number): void {
+  for (const table of [
+    "note_settlement_writable_turns",
+    "note_settlement_worklist",
+    "note_settlement_lane_members",
+    "note_settlement_declaration_endpoints",
+    "homeless_retraction_audits",
+    "homeless_groups",
+  ]) {
+    if (!settlementScratchTableExists(db, table)) {
+      continue;
+    }
+    db.query<unknown, [number]>(`DELETE FROM ${table} WHERE job_id = ?`).run(jobId);
+  }
+  if (settlementScratchTableExists(db, "impression_debts")) {
+    db.query<unknown, [number]>(
+      `UPDATE impression_debts
+          SET claimed_at_epoch = NULL, claimed_by_job_id = NULL
+        WHERE claimed_by_job_id = ? AND acked_at_epoch IS NULL`,
+    ).run(jobId);
+  }
+}
+
+function settlementScratchTableExists(db: Database, name: string): boolean {
+  return (
+    db
+      .query<{ name: string }, [string]>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      )
+      .get(name) !== null
+  );
+}
+
+function settlementJobsHasColumn(db: Database, column: string): boolean {
+  return db
+    .query<{ name: string }, []>(`PRAGMA table_info(note_settlement_jobs)`)
+    .all()
+    .some((row) => row.name === column);
 }

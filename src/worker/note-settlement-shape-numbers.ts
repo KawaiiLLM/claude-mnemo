@@ -12,7 +12,6 @@ import {
   readNoteSettlementLaneMemberSnapshot,
   readNoteSettlementWorklistSnapshot,
   readNoteSettlementWritableSnapshot,
-  type NoteSettlementRemovedSideDebt,
   type NoteSettlementWorklistLane,
   type SettlementReadDeltas,
   type SettlementWritableProvenance,
@@ -62,24 +61,21 @@ export interface SettlementFrozenScope {
   /**
    * The same ids in the three-bucket shape the refusal renderer and the
    * phase-connectivity window take, derived from the SNAPSHOT's own classes
-   * rather than recomputed from the context: `removed-side-citer`-only ids
-   * file under `closureOnly`, the same catch-all
+   * rather than recomputed from the context. `closureOnly` is the catch-all
    * `resolveSettlementScopeProvenance` uses for an id it cannot place.
    */
   scopeProvenance: SettlementScopeProvenance;
   /** Snapshot #2, in the order stage 1 judged the lanes. */
   worklist: NoteSettlementWorklistLane[];
-  /** Snapshot #2's travelling companion: the debts stage 1's own removals created. */
-  debts: NoteSettlementRemovedSideDebt[];
   /** Snapshot #3, keyed by `laneSnapshotKey`. */
   laneMembers: Map<string, number[]>;
   /** Snapshot #4 (ticket 06): the other endpoint of every live outgoing edge of a writable citer. */
   declarationEndpointIds: number[];
   /**
-   * The two stage-2 read lists (ticket 06), a pure function of the four
-   * snapshots above — `writableDelta` (relations only) and `contextDelta`
-   * (read-only, one hop). Computed here, once, so the finalize result and
-   * the resume prompt print the same lists.
+   * The stage-2 read list (ticket 06, narrowed to one by ticket 14): a pure
+   * function of the four snapshots above — `contextDelta`, read-only and one
+   * hop. Computed here, once, so the finalize result and the resume prompt
+   * print the same list.
    */
   readDeltas: SettlementReadDeltas;
 }
@@ -113,7 +109,7 @@ export function readSettlementFrozenScope(
       closureOnly.add(turnId);
     }
   }
-  const { lanes, debts } = readNoteSettlementWorklistSnapshot(db, jobId);
+  const { lanes } = readNoteSettlementWorklistSnapshot(db, jobId);
   const laneMembers = readNoteSettlementLaneMemberSnapshot(db, jobId);
   const declarationEndpointIds = readNoteSettlementDeclarationEndpointSnapshot(db, jobId);
   return {
@@ -121,7 +117,6 @@ export function readSettlementFrozenScope(
     writableProvenance,
     scopeProvenance: { window, baseLookback, closureOnly },
     worklist: lanes,
-    debts,
     laneMembers,
     declarationEndpointIds,
     readDeltas: computeSettlementReadDeltas({
@@ -533,16 +528,13 @@ export interface SettlementWorklistLaneRendering {
 
 export interface SettlementWorklistRendering {
   lanes: SettlementWorklistLaneRendering[];
-  debts: Array<{ edgeId: number; removedLaneTag: string; citingAddress: string }>;
   homeless: Array<{ label: string; reason: string; memberAddresses: string[] }>;
   /**
-   * The two stage-2 read lists (ticket 06), as addresses: turns the closures
-   * made writable for RELATIONS ONLY, and the read-only one-hop context —
-   * frozen lane members and cited endpoints stage 1 never read. Both are set
-   * differences against the initial writable set, so an address printed
-   * there appears in neither.
+   * The stage-2 read list (ticket 06), as addresses: the read-only one-hop
+   * context — frozen lane members and cited endpoints stage 1 never read. A set
+   * difference against the initial writable set, so an address stage 1 already
+   * read never appears here.
    */
-  writableDelta: string[];
   contextDelta: string[];
 }
 
@@ -569,7 +561,7 @@ export function buildSettlementWorklistRendering(
 ): SettlementWorklistRendering {
   const scope = readSettlementFrozenScope(db, jobId);
   if (!scope) {
-    return { lanes: [], debts: [], homeless: [], writableDelta: [], contextDelta: [] };
+    return { lanes: [], homeless: [], contextDelta: [] };
   }
   const homelessByGroup = new Map<
     number,
@@ -598,13 +590,7 @@ export function buildSettlementWorklistRendering(
         scope.laneMembers.get(laneSnapshotKey(lane.segmentId, lane.laneTag)) ?? []
       ).map((turnId) => turnAddress(db, turnId)),
     })),
-    debts: scope.debts.map((debt) => ({
-      edgeId: debt.edgeId,
-      removedLaneTag: debt.removedLaneTag,
-      citingAddress: turnAddress(db, debt.citingTurnId),
-    })),
     homeless: [...homelessByGroup.values()],
-    writableDelta: scope.readDeltas.writableDelta.map((turnId) => turnAddress(db, turnId)),
     contextDelta: scope.readDeltas.contextDelta.map((turnId) => turnAddress(db, turnId)),
   };
 }

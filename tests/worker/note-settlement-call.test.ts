@@ -54,7 +54,6 @@ import {
   type NoteSettlementQueryResult,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
-import { readNoteSettlementClaimScope } from "../../src/db/settlement-job-invalidation";
 import type {
   NoteSettlementUnifiedQuery,
   NoteSettlementUnifiedQueryResult,
@@ -2564,33 +2563,42 @@ describe("main-agent-edges ticket 04 — the resume dispatch writes its claim sc
   const MONITOR_INTERVAL_MS = 1_000;
 
   /**
-   * THE CLAIM-TIME SCOPE (spec D9, R10-7). Before this ticket a job's reach over
-   * turns was durable only after its stage-1 transition, so a lane verb running
-   * in another process could not see a topics-stage run at all and would delete
-   * an edge it was about to lane. The dispatch writes the set down at the one
-   * moment it is both known and immutable.
+   * THE CLAIM-TIME SCOPE IS GONE (main-agent-edges ticket 14). Ticket 04 had
+   * both dispatch shapes write `note_settlement_claim_scope` at claim time, so
+   * a lane verb in another process could see a topics-stage run's reach and
+   * INVALIDATE it rather than delete an edge under it. Ruling
+   * S15069/T2465-T2466 deleted both halves — nothing is deleted for ambiguity,
+   * so nothing needs invalidating to prevent a deletion — and the table with
+   * them. What is pinned instead is the SUBTRACTION, on the one shape whose
+   * write ticket 02b found unpinned as well as on this one.
    */
-  test("the writable set is persisted as this job's claim scope, before the model runs", async () => {
+  test("no claim-scope table is created or written by the resume dispatch", async () => {
     const fixture = seedFourTurnWindow();
-    let scopeAtQueryTime: number[] = [];
-    const outcome = await dispatchWith(async (request) => {
-      // Read INSIDE the query: the record has to exist before the model does
-      // anything, not after the run ends.
-      scopeAtQueryTime = readNoteSettlementClaimScope(db, request.jobId);
+    let existedAtQueryTime = true;
+    const outcome = await dispatchWith(async () => {
+      existedAtQueryTime =
+        db
+          .query<{ name: string }, []>(
+            `SELECT name FROM sqlite_master
+              WHERE type = 'table' AND name = 'note_settlement_claim_scope'`,
+          )
+          .get() !== null;
       return { text: "no commit", commitMetrics: null };
     })({ job: fixture.job });
 
     expect(outcome.ok).toBe(false);
-    expect(scopeAtQueryTime).toEqual(fixture.turnIds.slice().sort((a, b) => a - b));
-    expect(readNoteSettlementClaimScope(db, fixture.job.id)).toEqual(scopeAtQueryTime);
+    expect(existedAtQueryTime).toBe(false);
   });
 
   /**
-   * CANCELLATION ON BOTH DISPATCH SHAPES (spec D9). The unified dispatch has had
-   * a claim monitor since settlement-execution-repair ticket 07; this one — the
-   * cold stage-2 resume — had none, so `invalidateOverlappingSettlementJobs`'
-   * generation bump left a running resume writing against a claim it no longer
-   * held until it finished on its own.
+   * THE CLAIM MONITOR SURVIVES THE SUBTRACTION (ticket 14), and this is why:
+   * structural invalidation was never its only cause. ORDINARY CLAIM LOSS is —
+   * a lease that expires mid-run is reaped by
+   * `reclaimExpiredNoteSettlementClaims`, which bumps `claim_generation` and
+   * lets another worker take the job, leaving this run writing against a claim
+   * it no longer holds. The unified dispatch has had a monitor for exactly that
+   * since settlement-execution-repair ticket 07; ticket 04 gave the cold stage-2
+   * resume the same one, and it is kept.
    */
   test("a generation bump under a never-resolving query aborts the run and ends the await", async () => {
     const fixture = seedFourTurnWindow();
@@ -2622,7 +2630,7 @@ describe("main-agent-edges ticket 04 — the resume dispatch writes its claim sc
     expect(timers.countScheduled(MONITOR_INTERVAL_MS)).toBe(1);
     expect(aborted).toBe(false);
 
-    // Exactly what `invalidateOverlappingSettlementJobs` does to a claimed row.
+    // Exactly what an expired-lease reclaim does to a claimed row.
     db.query<unknown, [number]>(
       "UPDATE note_settlement_jobs SET status = 'pending', claim_generation = claim_generation + 1 WHERE id = ?",
     ).run(fixture.job.id);
@@ -2638,30 +2646,33 @@ describe("main-agent-edges ticket 04 — the resume dispatch writes its claim sc
   });
 });
 
-describe("main-agent-edges ticket 02b — the UNIFIED dispatch writes its claim scope too", () => {
+describe("main-agent-edges ticket 14 — the UNIFIED dispatch writes no claim scope either", () => {
   /**
-   * The sibling of ticket 04's resume-dispatch test above. Both shapes call
-   * `persistNoteSettlementClaimScope` the instant `writableTurnIds` resolves,
-   * and a structural verb has no way to ask which shape is running — so the
-   * unified shape's call has to be pinned on its own. It was not: dropping it
-   * left the whole suite green (ticket 04's integration finding).
-   *
-   * THE MUTATION: delete the `persistNoteSettlementClaimScope` call in
-   * `createUnifiedNoteSettlementDispatch` (note-settlement-dispatch.ts) and
-   * this test goes red.
+   * The sibling of the resume-dispatch test above. Ticket 02b pinned that BOTH
+   * shapes wrote the claim scope, because ticket 04's integrator found the
+   * unified shape's write had no test that could fail. Ticket 14 deletes the
+   * write on both shapes, so both absences are pinned — and this one still
+   * checks the request's own declared set, which is what the deleted table used
+   * to be a durable copy of.
    */
-  test("the writable set is persisted as this job's claim scope before the unified query runs", async () => {
+  test("no claim-scope table exists when the unified query runs, and the request still declares the set", async () => {
     const fixture = seedFourTurnWindow();
-    let scopeAtQueryTime: number[] = [];
+    let existedAtQueryTime = true;
     let writableAtQueryTime: number[] = [];
     const dispatch = createUnifiedNoteSettlementDispatch({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
       now: () => NOW,
       runQuery: async (request) => {
-        // Read INSIDE the query: the record has to exist before the model
-        // does anything, not after the run ends.
-        scopeAtQueryTime = readNoteSettlementClaimScope(db, request.jobId);
+        // Read INSIDE the query: if anything still wrote the record, it would
+        // exist by now.
+        existedAtQueryTime =
+          db
+            .query<{ name: string }, []>(
+              `SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = 'note_settlement_claim_scope'`,
+            )
+            .get() !== null;
         writableAtQueryTime = [...request.writableTurnIds].sort((a, b) => a - b);
         return {
           text: "the run ended without finalizing.",
@@ -2676,9 +2687,8 @@ describe("main-agent-edges ticket 02b — the UNIFIED dispatch writes its claim 
     const outcome = await dispatch({ job: fixture.job });
 
     expect(outcome.ok).toBe(false);
-    expect(scopeAtQueryTime).toEqual(fixture.turnIds.slice().sort((a, b) => a - b));
-    // The SAME set the request declares — never a second derivation.
-    expect(scopeAtQueryTime).toEqual(writableAtQueryTime);
-    expect(readNoteSettlementClaimScope(db, fixture.job.id)).toEqual(scopeAtQueryTime);
+    expect(existedAtQueryTime).toBe(false);
+    // The request still declares the immutable set — that half is untouched.
+    expect(writableAtQueryTime).toEqual(fixture.turnIds.slice().sort((a, b) => a - b));
   });
 });

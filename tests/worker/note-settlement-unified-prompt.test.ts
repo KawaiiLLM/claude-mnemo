@@ -340,13 +340,15 @@ describe("main-agent-edges ticket 06 — PHASE 2 is the shared edge pass, and th
       text.indexOf("5. READ `finalize`'s own result"),
       text.indexOf("6. Run the edge pass exactly as taught below"),
     );
-    expect(step5).toContain("the two READ DELTAS — the writable delta");
-    expect(step5).toContain("and the context delta");
+    // MAIN-AGENT-EDGES TICKET 14: one delta, not two — `writableDelta` went
+    // with the two side-citer closures that fed it.
+    expect(step5).toContain("READ DELTA — the context delta");
+    expect(step5).not.toContain("writable delta");
     const step6 = text.slice(
       text.indexOf("6. Run the edge pass exactly as taught below"),
       text.indexOf("THE EDGE PASS — DECLARE, FILL, REVIEW."),
     );
-    expect(step6).toContain("read the delta union");
+    expect(step6).toContain("read the context delta");
     expect(step6).toContain("once, then DECLARE, FILL and REVIEW over the worklist");
     expect(step6).toContain("ONE crossing pass over lanes that genuinely link");
     // The block itself, verbatim, between step 6 and the lane_check step.

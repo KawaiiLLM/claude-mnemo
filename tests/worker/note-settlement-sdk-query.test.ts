@@ -129,6 +129,34 @@ function seedAmbiguousLaneHome(db: Database, turnIds: readonly number[]): number
   return segmentId;
 }
 
+/**
+ * ONE BLOCKING FINDING, anchored at `citing` (main-agent-edges ticket 14).
+ *
+ * E6 was the vehicle several fixtures below used for "a blocking error at this
+ * turn"; ruling S15069/T2465-T2466 made it a warning, so those fixtures need
+ * the one remaining blocking edge class — E4, a stored side naming a lane its
+ * own endpoint does not carry.
+ *
+ * Written past `writeMemoryEdges` on purpose: the write gate refuses this shape
+ * at write time, and E4 is precisely the rule re-checked over STOCK, which is
+ * what a later tag edit on an endpoint leaves behind. `laneTag` must be
+ * DECLARED in the citer's task and carried by nobody.
+ */
+function seedInvalidDeclaration(
+  db: Database,
+  citing: number,
+  cited: number,
+  laneTag: string,
+  nowEpoch: number,
+): void {
+  db.query<unknown, [number, number, number]>(
+    `INSERT INTO memory_edges
+       (citing_kind, citing_id, cited_kind, cited_id, provenance,
+        tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+     VALUES ('turn', ?, 'turn', ?, 'asserted', '${laneTag}', '', 'use', '', ?)`,
+  ).run(citing, cited, nowEpoch);
+}
+
 function seedTagContainers(db: Database): void {
   for (const tag of ["lease", "lane"]) {
     // Idempotent: some of these tests re-initialise the same database.
@@ -1135,14 +1163,25 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(description).not.toContain("(E1)");
       expect(description).not.toContain("(E2)");
       expect(description).not.toContain("(E5)");
-      // Ticket 20 REVERSED the sentence that used to stand here ("An untagged
-      // edge is NOT an error"). A draft is legal to WRITE and not legal to
-      // LEAVE, and the surface has to say both halves or an agent learns only
-      // the one that lets it commit dirty.
+      // MAIN-AGENT-EDGES TICKET 14 (peer finding P2-C) reverses ticket 20's
+      // reversal: ruling S15069/T2465-T2466 makes an ambiguous side a legal
+      // row to LEAVE, so the two sentences that taught the obligation are
+      // retired and the surface says what the code does — E6 is named, it is
+      // named as a warning, and the declaration is offered, never demanded.
       expect(description).not.toContain("An untagged edge is NOT an error");
-      expect(description).toContain("a DRAFT edge with either side still empty (E6)");
-      expect(description).toContain("A draft is a legal row to WRITE");
-      expect(description).toContain("not a legal row to LEAVE");
+      expect(description).not.toContain("a DRAFT edge with either side still empty (E6)");
+      expect(description).not.toContain("A draft is a legal row to WRITE");
+      expect(description).not.toContain("not a legal row to LEAVE");
+      expect(description).toContain(
+        "a side that resolves AMBIGUOUS — blank, on an endpoint that sits in two",
+      );
+      expect(description).toContain("An E6 " + "is a WARNING");
+      expect(description).toContain("never retract an edge merely to silence one");
+      // E4's own repair line no longer points at an endpoint's TAGS (P1-10):
+      // the edge pass holds no pen for a note field on any provenance.
+      expect(description).toContain(
+        "`declare` a lane that endpoint carries, or retract the edge",
+      );
       // Requirement 6's teaching half: the same rows appear in the attribution
       // warning, and the surface says so rather than letting a reader read one
       // fact as two independent findings.
@@ -1160,12 +1199,15 @@ describe("milestone-election ticket 04 — the state line and used[] reach the s
       expect(commitDescription).not.toContain("(E1)");
       expect(commitDescription).not.toContain("(E2)");
       expect(commitDescription).not.toContain("(E5)");
-      // And the reversal, on the surface that refuses: the WORD still needs no
-      // tag, but a draft left inside the writable set does block.
-      expect(commitDescription).toContain("No WORD requires a lane tag");
-      expect(commitDescription).toContain(
+      // TICKET 14 on the surface that refuses: the WORD still needs no tag,
+      // AND a blank side left inside the writable set no longer blocks either.
+      expect(commitDescription).toContain("A BLANK SIDE NEVER REFUSES YOU");
+      expect(commitDescription).toContain("No word requires a lane tag");
+      expect(commitDescription).not.toContain(
         "an edge left with an empty side inside your writable set is unfinished settlement",
       );
+      expect(commitDescription).not.toContain("place both sides or retract it");
+      expect(commitDescription).toContain("there is exactly ONE such state");
       expect(commitDescription).not.toContain("never blocks a commit");
     } finally {
       db?.close();
@@ -3010,7 +3052,13 @@ describe("commit refuses while an in-scope error remains (tag-mandate ticket 05)
           // `turns.id` would make the list unactionable.
           expect(refusalText).toContain(`S${sessionDbId}/T2`);
           expect(refusalText).toContain(`S${sessionDbId}/T3`);
-          expect(refusalText).toContain('"lane" missing from the cited turn\'s own tags');
+          // MAIN-AGENT-EDGES TICKET 14 (peer finding P1-10): the repair line no
+          // longer says "Add the tag to that turn" — the edge pass holds no pen
+          // for a note field on any provenance, so it names the two moves it
+          // actually has.
+          expect(refusalText).toContain('"lane" is not among the cited turn\'s own lanes');
+          expect(refusalText).toContain("Declare a lane that endpoint carries, or retract the edge");
+          expect(refusalText).not.toContain("Add the tag to that turn");
           expect(refusalText).toContain("NOT a failed attempt");
 
           // THE PROPERTY: a refusal is an ordinary in-run tool rejection.
@@ -3280,29 +3328,29 @@ describe("commit refusal partitions by error origin (settlement-ergonomics ticke
       const closureTurn = insertTypedTurn(db, sessionDbId, 1);
       const lookbackTurn = insertTypedTurn(db, sessionDbId, 2);
       const windowTurn = insertTypedTurn(db, sessionDbId, 3);
-      // TICKET 17 CHANGED THIS FIXTURE'S VEHICLE, not its subject. It used to
-      // give each turn an empty `type` (E3); E3 no longer blocks on any
-      // provenance, so it can no longer contribute a SECTION LINE to a
-      // refusal. E6 (a DRAFT edge, both sides unplaced) is the same shape for
-      // this test's purposes — one blocking error anchored at each of the
-      // three turns, independent of the other two. Every draft cites the same
-      // out-of-set turn T9, whose address is deliberately not one this test
-      // asserts absent from any section.
+      // THIS FIXTURE'S VEHICLE HAS CHANGED TWICE, its subject never. Ticket 17
+      // took E3 (an empty `type`) out of the blocking set, so the fixture moved
+      // to E6 (a draft edge); main-agent-edges ticket 14 took E6 out too
+      // (ruling S15069/T2465-T2466: an ambiguous side is a warning). E4 — a
+      // stored side naming a lane its own endpoint does not carry — is the one
+      // remaining blocking edge class, and it anchors at the CITING turn just
+      // as the other two did: one blocking error at each of the three turns,
+      // independent of the other two. Every row cites the same out-of-set turn
+      // T9, whose address is deliberately not one this test asserts absent from
+      // any section.
       const citedOutside = insertTypedTurn(db, sessionDbId, 9);
-      // Every citer goes into a task declaring TWO lanes, so its blank tail is
-      // genuinely undeclarable and E6 fires — see `seedAmbiguousLaneHome`.
-      seedAmbiguousLaneHome(db, [closureTurn, lookbackTurn, windowTurn, citedOutside]);
-      writeMemoryEdges(
-        db,
-        [closureTurn, lookbackTurn, windowTurn].map((citing) => ({
-          citing: { kind: "turn" as const, id: citing },
-          cited: { kind: "turn" as const, id: citedOutside },
-          ...wordEdgeClass("grounds"),
-          provenance: "asserted" as const,
-          ...deriveSideTags([]),
-        })),
-        NOW,
-      );
+      const laneHome = seedAmbiguousLaneHome(db, [
+        closureTurn,
+        lookbackTurn,
+        windowTurn,
+        citedOutside,
+      ]);
+      // Declared in the task, carried by nobody: what makes the stored side
+      // INVALID rather than merely unknown.
+      insertLane(db, laneHome, "amb-three", 100);
+      for (const citing of [closureTurn, lookbackTurn, windowTurn]) {
+        seedInvalidDeclaration(db, citing, citedOutside, "amb-three", NOW);
+      }
       const job = claimWindow(db, sessionDbId, 3, 3);
       const capturedDb = db;
 
@@ -4591,10 +4639,21 @@ describe("the lease heartbeat", () => {
 //     the gate is pinned separately from the class.
 // ---------------------------------------------------------------------------
 
-describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the writable set", () => {
+/**
+ * MAIN-AGENT-EDGES TICKET 14 — THE ACCEPTANCE CASE, and the reversal of the
+ * describe this replaces.
+ *
+ * It read "ticket 20 — commit refuses while a DRAFT edge anchors inside the
+ * writable set", and its first test pinned the refusal text ("DRAFT edge,
+ * neither side names a lane… Place both sides"). Ruling S15069/T2465-T2466
+ * makes an ambiguous side a WARNING and nothing more, so the refusal is gone
+ * and what is pinned here is its opposite: the finding is REPORTED, the commit
+ * SUCCEEDS, and the edge is still there afterwards because nothing deleted it.
+ */
+describe("ticket 14 — an AMBIGUOUS side inside the writable set is reported and commits", () => {
   /**
    * A window (T1-T2) whose T2 cites T1 through a BARE edge — both sides `''`,
-   * the shape the settlement facade now writes without complaint. Nothing else
+   * the shape the settlement facade writes without complaint. Nothing else
    * is wrong with the fixture: both turns are typed and tagged, so E3 and E4
    * are silent and E6 is the only class in play.
    */
@@ -4622,7 +4681,7 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
     return { sessionDbId, t1, t2, job: claimWindow(db, sessionDbId, 1, 2) };
   }
 
-  test("a draft edge inside the range refuses commit naming the row and both open sides, and a retraction clears it in the same run", async () => {
+  test("an ambiguous side inside the range is named by `lane_check` as a warning, and the commit lands with the edge intact", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -4637,38 +4696,32 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
       const { toolImpl, handlers } = captureToolImpl();
       const queryImpl = mock(() =>
         (async function* () {
-          const refused = (await handlers.get("commit")!({})) as {
+          // THE PREVIEW STILL SHOWS IT — demoting a class is not hiding its
+          // fact. It is on the WARNING side, and the repair line offers the
+          // declaration rather than demanding it.
+          const preview = (await handlers.get("lane_check")!({})) as {
             content: Array<{ text: string }>;
           };
-          const text = refused.content[0]!.text;
-          expect(text).toContain("Commit refused");
-          expect(text).toContain("[E6]");
-          // Addressed the way the repair call is addressed, both ends.
-          expect(text).toContain(`S${sessionDbId}/T2`);
-          expect(text).toContain(`S${sessionDbId}/T1`);
-          expect(text).toContain("DRAFT edge, neither side names a lane");
-          expect(text).toContain("Place both sides");
-          // No other class is involved — this fixture is clean but for the draft.
-          expect(text).not.toContain("[E3]");
-          expect(text).not.toContain("[E4]");
-          // A refusal costs the job nothing.
-          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("claimed");
+          const previewText = preview.content[0]!.text;
+          expect(previewText).toContain("[E6]");
+          expect(previewText).toContain(`S${sessionDbId}/T2`);
+          expect(previewText).toContain("AMBIGUOUS side -- neither endpoint answers which lane");
+          expect(previewText).toContain("shown, never blocking");
+          expect(previewText).not.toContain("DRAFT edge");
+          expect(previewText).not.toContain("Place both sides");
+          // The BLOCKING half of the preview is empty: one rule builds both, so
+          // this is the same statement as "the gate will not refuse".
+          expect(previewText.split("## WARNINGS")[0]!).not.toContain("[E6]");
+          expect(previewText).not.toContain("[E3]");
+          expect(previewText).not.toContain("[E4]");
 
-          await handlers.get("recall")!({
-            id: `S${sessionDbId}/T2`,
-            filter: { fields: ["relations"] },
-            turn: 4_000,
-          });
-          const retracted = (await handlers.get("note")!({
-            turn: `S${sessionDbId}/T2`,
-            retractUse: [`S${sessionDbId}/T1`],
-          })) as { content: Array<{ text: string }> };
-          expect(retracted.content[0]!.text).toContain("Retracted 1 relation(s)");
-
+          // AND THE COMMIT LANDS, with no repair asked for and none made.
           const committed = (await handlers.get("commit")!({ report: "no friction this window" })) as {
             content: Array<{ text: string }>;
           };
           expect(committed.content[0]!.text).toContain("Committed");
+          expect(committed.content[0]!.text).not.toContain("Commit refused");
+          expect(getNoteSettlementJob(capturedDb, job.id)!.status).toBe("done");
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),
@@ -4699,13 +4752,15 @@ describe("ticket 20 — commit refuses while a DRAFT edge anchors inside the wri
       });
 
       expect(getNoteSettlementJob(db, job.id)!.status).toBe("done");
-      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(0);
+      // THE EDGE IS STILL THERE. Nothing in this path deletes an edge for
+      // being ambiguous — that is the ruling's own first clause.
+      expect(getOutgoingEdges(db, { kind: "turn", id: t2 })).toHaveLength(1);
     } finally {
       db?.close();
     }
   });
 
-  test("the SAME draft edge anchored OUTSIDE the writable set never blocks this window", async () => {
+  test("the SAME ambiguous side anchored OUTSIDE the writable set is not even reported here", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -4780,10 +4835,17 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
   /**
    * THE MANUFACTURED-E4 PROBE (acceptance 4). Stage 1 removes lane `lane-x`
    * from an in-window CITED endpoint; the edge that named it on its head side
-   * now points at a lane its own endpoint has left, and only the CITING turn —
-   * which sits outside every window this job rendered — can repair it. The
-   * transition's own closure is what puts that citer in the writable set, with
-   * `removed-side-citer` provenance and relation-only authority.
+   * now points at a lane its own endpoint has left, and only the CITING turn
+   * can repair it.
+   *
+   * MAIN-AGENT-EDGES TICKET 14: the citer used to reach the writable set
+   * through the REMOVED-SIDE CLOSURE, with `removed-side-citer` provenance and
+   * relations-only authority. Ruling S15069/T2465-T2466 deleted that closure
+   * along with the class, so the citer is named in the DEADLOCK-GUARD CLOSURE
+   * bucket instead — an ordinary class, which is the only kind left. The
+   * fixture's subject (which classes the gate blocks on, given a provenance) is
+   * unchanged; what it can no longer express is a relations-only authority,
+   * because there is none.
    */
   function seedRemovedSideFixture(db: Database): {
     cited: number;
@@ -4796,8 +4858,8 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
     // the removal travels to the snapshot as a declared fact rather than
     // being read back out of the database.
     const cited = insertTypedTurn(db, sessionDbId, 1, { tags: "[]" });
-    // The citer is OUT of the window and out of the lookback — nothing but the
-    // closure puts it in reach.
+    // The citer is OUT of the window and out of the lookback — only the
+    // deadlock-guard closure bucket puts it in reach.
     const citer = insertTypedTurn(db, sessionDbId, 5, { tags: "[]" });
     writeMemoryEdges(
       db,
@@ -4822,9 +4884,8 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
         snapshots: {
           window: [cited],
           lookback: [],
-          closure: [],
+          closure: [citer],
           worklist: [],
-          removedLanes: [{ turnId: cited, laneTag: "lane-x" }],
         },
       },
     );
@@ -4839,7 +4900,13 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
     };
   }
 
-  test("the closure files the citer as removed-side-citer and nothing else", () => {
+  /**
+   * REPLACED (ticket 14). This test read "the closure files the citer as
+   * removed-side-citer and nothing else". There is no such closure and no such
+   * class: the snapshot holds exactly the three ordinary classes its caller
+   * named, and nothing is minted on top of them.
+   */
+  test("the snapshot holds exactly the classes the caller named — nothing is minted on top", () => {
     const db = createDatabase(":memory:");
     try {
       initializeSchema(db);
@@ -4847,7 +4914,10 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
       const { cited, citer, job } = seedRemovedSideFixture(db);
       const snapshot = readNoteSettlementWritableSnapshot(db, job.id);
       expect([...(snapshot.get(cited) ?? [])]).toEqual(["window"]);
-      expect([...(snapshot.get(citer) ?? [])]).toEqual(["removed-side-citer"]);
+      expect([...(snapshot.get(citer) ?? [])]).toEqual(["closure"]);
+      expect([...snapshot.keys()].sort((a, b) => a - b)).toEqual(
+        [cited, citer].sort((a, b) => a - b),
+      );
     } finally {
       db.close();
     }
@@ -4879,8 +4949,8 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
       expect(refusal!).not.toContain("RELATIONS on only");
       expect(refusal!).not.toContain("anchor OUTSIDE your writable set");
 
-      // Stage 2 discharges the debt the only way its authority allows: it
-      // retracts the edge. The E3 is still there and the window commits.
+      // Stage 2 discharges the debt by retracting the edge. The E3 is still
+      // there and the window commits.
       db.query<unknown, [number]>("DELETE FROM memory_edges WHERE citing_id = ?").run(citer);
       expect(evaluateSettlementCommitGate(db, stage2Scope(db, job.id))).toBeNull();
     } finally {
@@ -4888,19 +4958,25 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
     }
   });
 
-  test("an unrelated E6 on the same relation-only citer DOES block", () => {
+  /**
+   * REVERSED (ticket 14). This test read "an unrelated E6 on the same
+   * relation-only citer DOES block". Ruling S15069/T2465-T2466 makes an
+   * ambiguous side a warning, so the identical fixture must now COMMIT — and
+   * with the E4 cleared it is the whole of what is left, so the gate answers
+   * `null` rather than merely omitting the class from a refusal.
+   */
+  test("an E6 on that same citer does NOT block, and with the E4 gone the gate is silent", () => {
     const db = createDatabase(":memory:");
     try {
       initializeSchema(db);
       seedTagContainers(db);
       const { cited, citer, job } = seedRemovedSideFixture(db);
       db.query<unknown, [number]>("UPDATE turns SET type = '[]' WHERE id = ?").run(citer);
-      // Both endpoints go into a task declaring TWO lanes, so the draft below
-      // is genuinely undeclarable — see `seedAmbiguousLaneHome`.
+      // Both endpoints go into a task declaring TWO lanes, so the blank side
+      // below is genuinely ambiguous — see `seedAmbiguousLaneHome`.
       seedAmbiguousLaneHome(db, [cited, citer]);
       // Clear the manufactured E4 so E6 is the only relation-grammar defect
-      // left, then plant a DRAFT edge: both sides unplaced. It is relation
-      // grammar, repairable with exactly the authority the debt granted.
+      // left, then plant a bare edge: both sides unplaced.
       db.query<unknown, [number]>("DELETE FROM memory_edges WHERE citing_id = ?").run(citer);
       writeMemoryEdges(
         db,
@@ -4915,11 +4991,11 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
         ],
         NOW,
       );
+      // Not vacuous: the row really is stored with two empty sides on endpoints
+      // that each carry two lanes, which is exactly E6's subject.
+      expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(1);
 
-      const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
-      expect(refusal).not.toBeNull();
-      expect(refusal!).toContain("[E6]");
-      expect(refusal!).not.toContain("[E3]");
+      expect(evaluateSettlementCommitGate(db, stage2Scope(db, job.id))).toBeNull();
     } finally {
       db.close();
     }
@@ -4937,7 +5013,7 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
    * gate that blocked on it would be demanding a repair its own toolset
    * forbids.
    */
-  test("window + removed-side provenance takes the UNION, and E3 still does not block", () => {
+  test("two ordinary provenances take the UNION, and E3 still does not block", () => {
     const db = createDatabase(":memory:");
     try {
       initializeSchema(db);
@@ -4951,7 +5027,7 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
          VALUES (?, ?, 'window')`,
       ).run(job.id, citer);
       const provenances = readNoteSettlementWritableSnapshot(db, job.id).get(citer)!;
-      expect([...provenances].sort()).toEqual(["removed-side-citer", "window"]);
+      expect([...provenances].sort()).toEqual(["closure", "window"]);
 
       const refusal = evaluateSettlementCommitGate(db, stage2Scope(db, job.id));
       expect(refusal).not.toBeNull();
@@ -5039,7 +5115,6 @@ describe("staged settlement — the terminal gate blocks per provenance", () => 
           lookback: [],
           closure: [],
           worklist: [],
-          removedLanes: [],
         },
       });
       expect(transitioned).not.toBeNull();
@@ -5179,8 +5254,12 @@ function seedStageTwoFixture(db: Database): StageTwoFixture {
   // its last relation restore the bare citation row rather than dropping the
   // pair entirely.
   const homeless = insertTurn(5, [], { content: `follows on from [S${sessionDbId}/T1]` });
-  // The removed-side citer: prompt 7 is outside the 1-5 window, and its type is
-  // EMPTY on purpose — that E3 is the error the terminal gate must NOT block on.
+  // THE OUT-OF-WINDOW CITER: prompt 7 is outside the 1-5 window, and its type
+  // is EMPTY on purpose — that E3 is the error the terminal gate must NOT block
+  // on. Main-agent-edges ticket 14: it used to reach the writable set through
+  // the REMOVED-SIDE CLOSURE (`removedLanes` below), which the ruling deleted
+  // with the rest of the repair channel; it is named in the deadlock-guard
+  // CLOSURE bucket instead, which is an ordinary class and the only kind left.
   const citer = insertTurn(7, [], { type: "[]" });
 
   addSegmentMembers(db, taskId, [a1, a2, a3, beta], NOW);
@@ -5192,8 +5271,8 @@ function seedStageTwoFixture(db: Database): StageTwoFixture {
     [
       // A PRE-EXISTING BARE DRAFT on the (a2, a1) pair — both sides unsettled.
       { citing: { kind: "turn", id: a2 }, cited: { kind: "turn", id: a1 }, ...wordEdgeClass("extends"), provenance: "asserted", tailTag: "", headTag: "" },
-      // THE REMOVED-SIDE DEBT: a head side naming `gamma`, a lane the stage-1
-      // projection took off a2.
+      // AN INVALID DECLARATION (E4): a head side naming `gamma`, a lane a2 does
+      // not carry. The run below discharges it by retracting the row.
       { citing: { kind: "turn", id: citer }, cited: { kind: "turn", id: a2 }, ...wordEdgeClass("consume"), provenance: "asserted", tailTag: "", headTag: "gamma" },
       // TWO HOMELESS DRAFTS: neither side can ever be placed, because their
       // citing turn belongs to no task at all.
@@ -5230,14 +5309,11 @@ function seedStageTwoFixture(db: Database): StageTwoFixture {
       snapshots: {
         window: [a1, a2, a3, beta, homeless],
         lookback: [],
-        closure: [],
+        closure: [citer],
         worklist: [
           { segmentId: taskId, laneTag: "alpha" },
           { segmentId: taskId, laneTag: "beta" },
         ],
-        // The projection took `gamma` off a2 — the fact that exists nowhere in
-        // the database to be read back, which is why it is supplied.
-        removedLanes: [{ turnId: a2, laneTag: "gamma" }],
       },
       homelessGroups: [
         {
@@ -5902,14 +5978,14 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         [...fixture.alpha, fixture.beta, fixture.homeless, fixture.citer].sort((a, b) => a - b),
       );
       expect(scope.scopeProvenance.window.has(fixture.alpha[0])).toBe(true);
-      // Relation-only, so it files under the closure bucket rather than the
-      // window it was never in.
+      // Named in the closure bucket rather than the window it was never in.
       expect(scope.scopeProvenance.window.has(fixture.citer)).toBe(false);
       expect(scope.scopeProvenance.closureOnly.has(fixture.citer)).toBe(true);
       expect(scope.worklist.map((lane) => lane.laneTag)).toEqual(["alpha", "beta"]);
-      expect(scope.debts).toHaveLength(1);
-      expect(scope.debts[0]!.removedLaneTag).toBe("gamma");
-      expect(scope.debts[0]!.citingTurnId).toBe(fixture.citer);
+      // MAIN-AGENT-EDGES TICKET 14: the frozen scope carries no debt list —
+      // `note_settlement_removed_side_debts` went with the closure that filled
+      // it (ruling S15069/T2465-T2466).
+      expect(scope).not.toHaveProperty("debts");
 
       // A job that never transitioned has no frozen judgment, and says so.
       const { job } = seedFixture(db);
@@ -5956,7 +6032,6 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
       expect(holder.current.writableProvenance).toEqual(oldPath.writableProvenance);
       expect(holder.current.scopeProvenance).toEqual(oldPath.scopeProvenance);
       expect(holder.current.worklist).toEqual(oldPath.worklist);
-      expect(holder.current.debts).toEqual(oldPath.debts);
       expect(holder.current.laneMembers).toEqual(oldPath.laneMembers);
 
       // Cross-check against the fixture's own declared shape, so a future
@@ -6031,8 +6106,8 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
         `S${fixture.sessionDbId}/T2`,
         `S${fixture.sessionDbId}/T3`,
       ]);
-      expect(rendering.debts[0]!.citingAddress).toBe(`S${fixture.sessionDbId}/T7`);
-      expect(rendering.debts[0]!.removedLaneTag).toBe("gamma");
+      // TICKET 14: no debt roster is rendered — there is no debt table left.
+      expect(rendering).not.toHaveProperty("debts");
       expect(rendering.homeless).toHaveLength(1);
       expect(rendering.homeless[0]!.label).toBe("an orphan line");
       expect(rendering.homeless[0]!.memberAddresses).toEqual([
@@ -6047,9 +6122,12 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
     // Ticket 17: the exemption is TOTAL, and the description must say so — a
     // text that scoped it to relations-only turns would send a window-member
     // run chasing a `type` write its own `note` refuses.
+    // TICKET 14: the sentence no longer names the two deleted classes; the
+    // exemption is stated as total, which is what it always meant.
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).toContain(
-      "NEVER blocks this commit, on any turn in your set — not a removed-side citer's, not a window member's",
+      "NEVER blocks this commit, on any turn in your set",
     );
+    expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain("removed-side citer");
     expect(SETTLEMENT_COMMIT_TOOL_DESCRIPTION).not.toContain(
       "an E3 anchored on a turn you may write RELATIONS on only",
     );
@@ -6092,7 +6170,7 @@ describe("staged settlement ticket 07 — the stage-2 edge pass, at the real reg
 // ---------------------------------------------------------------------------
 
 describe("ticket 19 — a write that lands between a clean preflight and the lock still refuses the commit", () => {
-  test("a draft edge minted inside the terminal transaction refuses that same commit, and the run can still finish", async () => {
+  test("an invalid declaration minted inside the terminal transaction refuses that same commit, and the run can still finish", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -6101,9 +6179,14 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
       const sessionDbId = seedPullSession(db, "settlement-terminal-gate-toctou");
       const t1 = insertTypedTurn(db, sessionDbId, 1);
       const t2 = insertTypedTurn(db, sessionDbId, 2);
-      // Both turns sit in a task declaring TWO lanes, so the draft minted below
-      // is genuinely undeclarable and E6 fires (main-agent-edges spec D6).
-      seedAmbiguousLaneHome(db, [t1, t2]);
+      // MAIN-AGENT-EDGES TICKET 14: the interleaved row used to be a DRAFT edge
+      // (E6). Ruling S15069/T2465-T2466 made E6 a warning that refuses nothing,
+      // so this test — whose whole subject is WHERE the gates run, not what
+      // they refuse — needs the one remaining blocking edge class, E4. A third
+      // lane is declared in the task and carried by nobody, so a side naming it
+      // is invalid rather than merely unknown.
+      const laneHome = seedAmbiguousLaneHome(db, [t1, t2]);
+      insertLane(db, laneHome, "amb-three", 100);
       const job = claimWindow(db, sessionDbId, 1, 2);
       const capturedDb = db;
       const writableTurnIds = new Set([t1, t2]);
@@ -6126,19 +6209,7 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
         runWriteTransaction(database, () => {
           if (mintOnNextTransaction) {
             mintOnNextTransaction = false;
-            writeMemoryEdges(
-              database,
-              [
-                {
-                  citing: { kind: "turn", id: t2 },
-                  cited: { kind: "turn", id: t1 },
-                  ...wordEdgeClass("extends"),
-                  provenance: "asserted",
-                  ...deriveSideTags([]),
-                },
-              ],
-              NOW,
-            );
+            seedInvalidDeclaration(database, t2, t1, "amb-three", NOW);
           }
           return fn();
         });
@@ -6156,9 +6227,9 @@ describe("ticket 19 — a write that lands between a clean preflight and the loc
           const text = refused.content[0]!.text;
           // The gate SAW the row that was not there when the run began.
           expect(text).toContain("Commit refused");
-          expect(text).toContain("[E6]");
+          expect(text).toContain("[E4]");
           expect(text).toContain(`S${sessionDbId}/T2`);
-          expect(text).toContain("DRAFT edge, neither side names a lane");
+          expect(text).toContain("is not among the citing turn's own lanes");
           // The refusal is an ordinary in-run rejection: the transaction rolled
           // back whole, so the job row never moved.
           const afterRefusal = getNoteSettlementJob(capturedDb, job.id)!;
@@ -6548,7 +6619,7 @@ describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writabl
     return { sessionDbId, t1, t2, t3 };
   }
 
-  test("a run whose writable set owns both citers sees E6 and E4 in `lane_check` AND is refused by `commit` on the same two", async () => {
+  test("a run whose writable set owns both citers sees E6 and E4 in `lane_check`, and `commit` refuses on the E4 alone", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -6580,8 +6651,15 @@ describe("ticket 04 — E6 and E4 reach BOTH audit faces, and only for a writabl
           };
           const verdict = refused.content[0]!.text;
           expect(verdict).toContain("Commit refused");
-          expect(verdict).toContain("[E6]");
           expect(verdict).toContain("[E4]");
+          // MAIN-AGENT-EDGES TICKET 14: E6 reaches BOTH faces still — the
+          // preview above proves it — but it reaches the verdict's WARNING
+          // side, never its refusal (ruling S15069/T2465-T2466). "One
+          // definition, two evaluations" is unaffected: the split is by class,
+          // and both surfaces read the same class rule.
+          expect(verdict).not.toContain("[E6]");
+          expect(verdict).toContain(`S${sessionDbId}/T3`);
+          expect(verdict).not.toContain(`S${sessionDbId}/T2`);
 
           yield { type: "result", subtype: "success", is_error: false, result: "done" };
         })(),

@@ -36,9 +36,8 @@ export interface SettlementEdgesScope {
   writableProvenance: SettlementProvenanceIndex;
   scopeProvenance: SettlementScopeProvenance | undefined;
   worklist: SettlementFrozenScope["worklist"];
-  debts: SettlementFrozenScope["debts"];
   laneMembers: SettlementFrozenScope["laneMembers"];
-  /** Ticket 06: the two stage-2 read lists; empty until a transition froze them. */
+  /** Ticket 06: the stage-2 read list; empty until a transition froze it. */
   readDeltas: SettlementReadDeltas;
 }
 
@@ -87,7 +86,6 @@ export function installSettlementEdgesScope(
     writableProvenance: frozen?.writableProvenance ?? new Map(),
     scopeProvenance: frozen?.scopeProvenance ?? fallback.scopeProvenance,
     worklist: frozen?.worklist ?? [],
-    debts: frozen?.debts ?? [],
     laneMembers: frozen?.laneMembers ?? new Map(),
     readDeltas: frozen?.readDeltas ?? emptySettlementReadDeltas(),
   };

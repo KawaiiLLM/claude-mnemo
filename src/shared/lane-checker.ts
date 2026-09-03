@@ -182,8 +182,10 @@
  * ## ERRORS vs WARNINGS
  *
  * Every finding above is a WARNING — connectivity, coupling, bypass
- * candidates, time-order, attribution. `errors` is the separate list: states
- * the GRAMMAR FORBIDS. THREE classes ship, E3, E4 and E6.
+ * candidates, time-order, attribution. `errors` is the separate list: the
+ * GRAMMAR FINDINGS, each naming its anchor. THREE classes ship, E3, E4 and E6,
+ * and only two of them are ones a gate may refuse over: `LaneErrorClass` is
+ * E3/E4, `LaneWarningClass` is E6.
  *
  * **E1 IS RETIRED** (lane-declaration ticket 02): the tag mandate is withdrawn,
  * so an untagged stance edge is an ordinary legal edge. **E5 IS DELETED**
@@ -230,16 +232,15 @@
  *     `turn-phase.ts`'s Gate B enforces at write time, checked again over STOCK
  *     because a later tag EDIT on an endpoint turn can orphan a row the gate
  *     once passed.
- *   - **E6** a DRAFT edge: EITHER side is `''`. New in ticket 20, and unlike
- *     E3/E4 it is not a write-gate rule checked again over stock — the write
- *     gate ACCEPTS this shape on purpose (a writer who cannot yet place an end
- *     must still be able to record the relation), and this class is where the
- *     refusal ticket 08 put at the write gate now lives instead. A draft edge
- *     takes part in NO lane computation (`laneMembershipClaims` yields no claim
- *     the moment either side is `''`), so leaving one behind is not a defect the
- *     reports would otherwise show — it is simply work settlement has not done.
- *     Anchor: the CITING turn, so a draft blocks the window that can retag it
- *     and no other.
+ *   - **E6** a side that resolves `ambiguous`: blank, on an endpoint carrying
+ *     TWO OR MORE lanes. Unlike E3/E4 it is not a write-gate rule checked again
+ *     over stock — the write gate ACCEPTS this shape on purpose (a writer who
+ *     cannot yet place an end must still be able to record the relation).
+ *     **IT IS A WARNING AND REFUSES NOTHING** (ruling S15069/T2465-T2466): the
+ *     side is kept as it is, settlement may declare it when it sees it and may
+ *     leave it, and no verb deletes an edge or resets a job over one. Anchor:
+ *     the CITING turn, so the run that could declare it is the one told about
+ *     it.
  *
  * ### E6 and D9's unattributed-cluster warning report the same rows (ticket 20)
  *
@@ -252,8 +253,8 @@
  *     capped, clustered, silent below four turns, and blocks nothing.
  *   - E6 is the PER-ROW BACKLOG. Its subject is one EDGE, it fires on the first
  *     one (no 4+ boundary), it counts the HALF-settled rows the cluster rule
- *     excludes by construction (`laneEdgeTags` is non-empty for those), it is
- *     uncapped, and it blocks the commit of the window its citing turn sits in.
+ *     excludes by construction (`laneEdgeTags` is non-empty for those), and it
+ *     is uncapped. Like the cluster warning, it blocks nothing.
  *
  * So a both-sides-empty edge inside a 4+ cluster IS reported twice, once as a
  * member of the cluster and once as a row. Neither list is filtered to avoid
@@ -700,15 +701,33 @@ export interface LaneCheckerEdgeInput extends LaneEdgeInput {
 }
 
 /**
- * The three classes of the spec's error table: E3, E4 and E6. E1 (an untagged
+ * The two classes of the spec's error table: E3 and E4. E1 (an untagged
  * `extends`/`narrows`) is RETIRED with the tag mandate itself; E5 (a lane with
  * more than one source or sink) was DELETED by ticket 04; E2 (an
  * out-of-vocabulary relation word) is DELETED AS A CLASS by ticket 11 while its
  * fact survives as a warning. See this module's header for why the surviving
- * numbers do not shift down to close any of the three gaps, and why ticket 20's
- * DRAFT-edge class took E6 rather than reoccupying one of them.
+ * numbers do not shift down to close any of the gaps, and why the DRAFT-edge
+ * class took E6 rather than reoccupying one of them.
  */
-export type LaneErrorClass = "E3" | "E4" | "E6";
+export type LaneErrorClass = "E3" | "E4";
+
+/**
+ * E6 IS A WARNING CLASS (user ruling S15069/T2465-T2466, main-agent-edges
+ * ticket 14): "a side that resolves `ambiguous` is a WARNING, nothing more."
+ *
+ * A blank side on a multi-lane endpoint is a LEGAL post-state now. Settlement
+ * may `declare` it when it sees it and may equally leave it; nothing deletes
+ * the edge, resets a job or mints a repair authority over it. The instance
+ * still travels in `errors` — that list is "the grammar findings, each naming
+ * its anchor", and E3 has ridden it as a non-blocking member since the
+ * settlement gate demoted it — but the CLASS is no longer one a gate may
+ * refuse on. `worker/note-settlement-finding-class.ts` is where that verdict
+ * is stated once and read by every surface.
+ */
+export type LaneWarningClass = "E6";
+
+/** Every class an `errors` instance may carry — the two blocking-capable ones plus E6. */
+export type LaneFindingClass = LaneErrorClass | LaneWarningClass;
 
 interface LaneErrorAnchor {
   /**
@@ -748,9 +767,10 @@ export interface LaneSubsetInvariantError extends LaneErrorAnchor {
 }
 
 /**
- * E6 — a DRAFT edge (ticket 20): EITHER side carries the `''` sentinel, so the
- * edge names no lane on at least one end and takes part in no lane computation.
- * Anchor: the citing turn.
+ * E6 — an AMBIGUOUS side: blank on an endpoint that carries two or more lanes,
+ * so nothing derives which one the edge means. A WARNING class
+ * (`LaneWarningClass`, ruling S15069/T2465-T2466) — reported, never refused
+ * over. Anchor: the citing turn.
  *
  * `unsettledSides` is the load-bearing field — it is what makes the report say
  * WHICH end is missing, which is the difference between "settle this row" and
@@ -759,7 +779,7 @@ export interface LaneSubsetInvariantError extends LaneErrorAnchor {
  * same list and the render can read it as a sentence.
  */
 export interface LaneDraftEdgeError extends LaneErrorAnchor {
-  class: "E6";
+  class: LaneWarningClass;
   citingId: number;
   citedId: number;
   relation: string;

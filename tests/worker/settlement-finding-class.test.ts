@@ -67,7 +67,7 @@ interface ClassFixture {
  * emits four — that is the coverage test's denominator, and it is a fact about
  * the registry rather than about this projection.
  */
-function seedClassFixture(db: Database): ClassFixture {
+function seedClassFixture(db: Database, options: { withE4?: boolean } = {}): ClassFixture {
   const sessionDbId = upsertSession(db, {
     contentSessionId: "settlement-finding-class-session",
     project: "/tmp/project-settlement-finding-class",
@@ -156,8 +156,8 @@ function seedClassFixture(db: Database): ClassFixture {
         provenance: "asserted",
         ...deriveSideTags(["gamma"]),
       },
-      // THE DRAFT: both sides unsettled, anchored at the same turn whose type
-      // is empty.
+      // THE AMBIGUOUS SIDE (E6): both sides blank on endpoints carrying two
+      // lanes, anchored at the same turn whose type is empty.
       {
         citing: { kind: "turn", id: dirtyTurn },
         cited: { kind: "turn", id: windowTail },
@@ -168,6 +168,20 @@ function seedClassFixture(db: Database): ClassFixture {
     ],
     NOW,
   );
+
+  // AN E4, on request: a stored side naming a lane its own endpoint does not
+  // carry. Written past `writeMemoryEdges` because the write gate refuses
+  // exactly this shape — E4 is a rule re-checked over STOCK, and stock is what
+  // a later tag edit produces.
+  if (options.withE4 === true) {
+    insertLane(db, segmentId, "epsilon", NOW);
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, provenance,
+          tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, 'asserted', 'epsilon', 'gamma', 'use', '', ?)`,
+    ).run(dirtyTurn, near, NOW);
+  }
 
   enqueueNoteSettlementWindows(
     db,
@@ -256,7 +270,17 @@ describe("settlement-gate-taxonomy ticket 04 — one rule, one class, both surfa
   // authority alone — and this test fails on the FIRST assertion below: the
   // ERRORS block comes back carrying "2 error(s)" and the commit refuses over
   // the type debt no edge pass can discharge. Verified by running it.
-  test("E3 and E6 on the SAME anchor split, and the render and the gate split them identically", async () => {
+  /**
+   * REPLACED (main-agent-edges ticket 14). This test read "E3 and E6 on the
+   * SAME anchor split", and the split it pinned was E6 blocking while E3 did
+   * not. Ruling S15069/T2465-T2466 demoted E6 to a warning, so the two now land
+   * on the SAME side — which is a stronger statement of the same property, and
+   * the acceptance case for "commit with an outstanding E6 SUCCEEDS".
+   *
+   * The rule still has something to split, and the test below this one is where
+   * it splits: an E4 on the same anchor blocks while both of these do not.
+   */
+  test("E3 and E6 on the SAME anchor are BOTH warnings, and commit succeeds over them", async () => {
     let db: Database | undefined;
     try {
       db = createDatabase(":memory:");
@@ -276,32 +300,64 @@ describe("settlement-gate-taxonomy ticket 04 — one rule, one class, both surfa
         ).content[0]!.text;
       });
 
-      // THE ERRORS BLOCK holds exactly the E6 — one finding, not two.
+      // THE ERRORS BLOCK IS EMPTY. Neither class blocks, and the block is
+      // exactly what the gate refuses over, so it holds nothing.
       const errorsBlock = previewText.split("## WARNINGS")[0]!;
-      expect(errorsBlock).toContain("1 error(s)");
-      expect(errorsBlock).toContain("[E6]");
+      expect(errorsBlock).toContain("(none)");
+      expect(errorsBlock).not.toContain("[E6]");
       expect(errorsBlock).not.toContain("[E3]");
 
-      // THE E3 IS STILL SHOWN — narrowing what blocks is not hiding the fact —
-      // and it is shown BELOW the warnings header, whose promise is now true.
+      // BOTH FACTS ARE STILL SHOWN — narrowing what blocks is not hiding the
+      // fact — and both are below the warnings header, whose promise is true.
       const warningsHalf = previewText.split("## WARNINGS")[1]!;
       expect(warningsHalf).toContain(LANE_CHECK_WARNING_NOTICE);
-      expect(warningsHalf).toContain("## Grammar findings this run cannot repair -- 1 finding(s)");
+      expect(warningsHalf).toContain("## Grammar findings this run cannot repair -- 2 finding(s)");
       expect(warningsHalf).toContain("[E3]");
+      expect(warningsHalf).toContain("[E6]");
       expect(warningsHalf).toContain(`anchor S${fixture.sessionDbId}/T1000`);
 
-      // BOTH findings anchor at the SAME turn, which is what makes this a test
-      // of the rule's third condition and not of the anchor filter.
-      expect(errorsBlock).toContain(`anchor S${fixture.sessionDbId}/T1000`);
+      // AND THE GATE AGREES: nothing refuses, and the job is DONE.
+      expect(commitText).not.toContain("Commit refused");
+      expect(commitText).toContain("Committed.");
+      expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
+    } finally {
+      db?.close();
+    }
+  });
 
-      // AND THE GATE AGREES, instance for instance: it refuses over the E6 and
-      // counts the E3 as the non-blocking remainder rather than listing it.
+  /**
+   * THE OTHER HALF OF THE SAME ACCEPTANCE CRITERION: E4 alone still refuses,
+   * after E6's demotion. Same fixture, same anchor, one extra stock row whose
+   * stored side names a lane its own endpoint does not carry.
+   */
+  test("an E4 on that same anchor STILL refuses commit, and the E3/E6 stay off the blocking list", async () => {
+    let db: Database | undefined;
+    try {
+      db = createDatabase(":memory:");
+      initializeSchema(db);
+      const fixture = seedClassFixture(db, { withE4: true });
+      let previewText = "";
+      let commitText = "";
+
+      await runOnce(db, fixture, async (handlers) => {
+        previewText = (
+          (await handlers.get("lane_check")!({})) as { content: Array<{ text: string }> }
+        ).content[0]!.text;
+        commitText = (
+          (await handlers.get("commit")!({ report: "no friction this window" })) as {
+            content: Array<{ text: string }>;
+          }
+        ).content[0]!.text;
+      });
+
+      const errorsBlock = previewText.split("## WARNINGS")[0]!;
+      expect(errorsBlock).toContain("[E4]");
+      expect(errorsBlock).not.toContain("[E6]");
+      expect(errorsBlock).not.toContain("[E3]");
+
       expect(commitText).toContain("Commit refused");
-      expect(commitText).toContain("1 error(s) the grammar forbids");
-      expect(commitText).toContain("[E6]");
-      expect(commitText).not.toContain("[E3]");
-      expect(commitText).toContain("1 further error(s) inside your writable set are turn-TYPE debts");
-
+      expect(commitText).toContain("[E4]");
+      expect(commitText).not.toContain("[E6]");
       expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
     } finally {
       db?.close();

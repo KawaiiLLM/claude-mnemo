@@ -44,7 +44,7 @@ import {
  * is built AFTER the transition has already landed. This prompt is built
  * ONCE, before the run starts — the worklist does not exist yet. What replaces
  * it is a description of `finalize`'s own tool result: the frozen worklist,
- * writable set, removed-side debts and lane-member snapshots arrive as DATA at
+ * writable set and lane-member snapshots arrive as DATA at
  * the moment the run's own `finalize` call succeeds, and the edge-pass duties
  * below tell the run how to work them once they do. No fact this prompt could
  * not know in advance is asserted about them.
@@ -252,7 +252,7 @@ export function renderNoteSettlementUnifiedPrompt(
     "You run the TOPIC PASS first: audit each turn's own record and draw this",
     "window's topic lines as lanes. Call `finalize` once that work is done —",
     "it is your TRANSITION, not your end. It hands back data only (your frozen",
-    "worklist, your writable set, any removed-side debts, the lane member",
+    "worklist, your writable set, the lane member",
     "snapshots) and every instruction for what to do with that data is already",
     "in this prompt, below. From your first tool call AFTER `finalize`",
     "succeeds, you are in the EDGE PASS: the turns' notes, types, tags and lane",
@@ -288,14 +288,15 @@ export function renderNoteSettlementUnifiedPrompt(
     "You can see how each turn's claims actually turned out, which decision a",
     "later turn overturned, and which arc a turn belongs to — none of which the",
     "writing side could know at the time. Driven by the worklist `finalize`",
-    // MAIN-AGENT-EDGES TICKET 06: the frame names the three acts and the two
-    // surviving debts; "pre-existing bare drafts reconciled per pair" went
+    // MAIN-AGENT-EDGES TICKET 06: the frame names the three acts and the
+    // surviving debt; "pre-existing bare drafts reconciled per pair" went
     // with the draft itself (one pair, one row; a blank side is legal where
-    // the endpoint's lane set decides it).
+    // the endpoint's lane set decides it), and ticket 14 took the side-citer
+    // debt with the repair channel it belonged to.
     "handed back: lane by lane, in its own order, over the members it froze",
     "and the one read you already made; then one crossing pass over lanes",
-    "that genuinely link; then the debts that come with the handover — the",
-    "writable delta's citers discharged, and edges whose endpoints have no",
+    "that genuinely link; then the one debt that comes with the handover —",
+    "edges whose endpoints have no",
     "task at all retracted with cause.",
     "",
     "## Your authority",
@@ -432,12 +433,11 @@ export function renderNoteSettlementUnifiedPrompt(
     // resume prompt's; step 5 says what `finalize` prints and step 6 hands
     // over to the block.
     "5. READ `finalize`'s own result: it names your frozen worklist lane by",
-    "   lane, each lane's frozen members, any removed-side debts, any",
-    "   homeless dispositions, and the two READ DELTAS — the writable delta",
-    "   and the context delta. Nothing recomputed after this point can widen",
-    "   it — a turn that joins a lane later is not one of its members for this",
-    "   run.",
-    "6. Run the edge pass exactly as taught below — read the delta union",
+    "   lane, each lane's frozen members, any homeless dispositions, and the",
+    "   READ DELTA — the context delta. Nothing recomputed after this point",
+    "   can widen it — a turn that joins a lane later is not one of its",
+    "   members for this run.",
+    "6. Run the edge pass exactly as taught below — read the context delta",
     "   once, then DECLARE, FILL and REVIEW over the worklist, lane by lane in",
     "   its own order, with ONE crossing pass over lanes that genuinely link.",
     "",

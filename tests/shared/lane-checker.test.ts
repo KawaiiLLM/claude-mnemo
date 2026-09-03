@@ -1255,7 +1255,7 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
     "## Report 4c -- time-order violations (the DAG guarantee)",
     "(none)",
     "",
-    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the per-row half of the same fact -- neither blocks commit)",
     "2 unattributed cluster(s) of 4+ turns:",
     "  36 turns joined by edges with no lane on either side: T900,T902,T903,T904,T905,T911,T930,T931,T932,T936,T942,T947,T948,T949,T959,T960,T961,T962,T963,T964 (showing first 20)",
     "  4 turns joined by edges with no lane on either side: T991,T993,T994,T995",
@@ -1287,7 +1287,7 @@ describe("the golden fixture's warning-side render is byte-stable", () => {
         "1 error(s)\n",
     )).toBe(true);
     expect(text).toContain(
-      "  [E6] anchor T902 -- T902 --use--> T900: DRAFT edge -- the head side names no lane (the tail side is {})",
+      "  [E6] anchor T902 -- T902 --use--> T900: AMBIGUOUS side -- the head endpoint sits in several lanes (the tail side is {})",
     );
     expect(text).not.toContain("[E3]");
     expect(text).not.toContain("[E4]");

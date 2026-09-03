@@ -3084,36 +3084,37 @@ describe("staged settlement — the grant principal is (job, generation), not th
   });
 });
 
-describe("staged settlement — relation-only authority on a removed-side citer", () => {
-  const removedSideOnly = (turnId: number) =>
-    new Map([[turnId, new Set(["removed-side-citer" as const])]]);
-
-  /** ACCEPTANCE 5: a removed-side citer's note-field write is refused. */
-  test("every note field is refused on a turn whose only provenance is removed-side-citer", () => {
+/**
+ * MAIN-AGENT-EDGES TICKET 14. This describe was "relation-only authority on a
+ * removed-side citer": it pinned that a turn whose ONLY provenance was
+ * `removed-side-citer` had every note field refused, that its relation write
+ * still landed, and that a turn holding an ordinary class too took the union.
+ *
+ * The class is deleted with the repair channel it served (ruling
+ * S15069/T2465-T2466), and so is its twin `derived-side-citer` — there is no
+ * relations-only provenance left to build a fixture from. What survives, and is
+ * pinned here, is the SEAM: the per-provenance gate still asks
+ * `settlementTurnPermissions` rather than assuming, and every surviving class
+ * answers with full authority.
+ */
+describe("staged settlement — the per-provenance field gate, with no relations-only class left", () => {
+  test("every ordinary provenance carries FIELD authority — the note write lands", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
-    const context = baseContext(job, {
-      reviewableTurnIds: new Set([t1]),
-      writableProvenance: removedSideOnly(t1),
-    });
-    const ref = `S${sessionDbId}/T1`;
-
-    for (const input of [
-      { turn: ref, title: "a title" },
-      { turn: ref, content: "some content" },
-      { turn: ref, insight: "an insight" },
-      { turn: ref, type: ["fix"], mode: { type: "write" } },
-      { turn: ref, tags: [FIXTURE_SEGMENT_TAG, "lane-a"], mode: { tags: "write" } },
-    ] as SettlementTurnWriteInput[]) {
-      const result = write(context, input, NOW);
-      expect(result.ok).toBe(false);
-      expect(result.ok === false && result.message).toContain("RELATIONS ONLY");
+    for (const provenance of ["window", "lookback", "closure"] as const) {
+      const context = baseContext(job, {
+        reviewableTurnIds: new Set([t1]),
+        writableProvenance: new Map([[t1, new Set([provenance])]]),
+      });
+      const result = write(
+        context,
+        { turn: `S${sessionDbId}/T1`, type: ["fix"], mode: { type: "write" } },
+        NOW,
+      );
+      expect({ provenance, ok: result.ok }).toEqual({ provenance, ok: true });
     }
-    // Nothing landed: the refusal is a whole-call rejection, not a per-field yield.
-    const turn = getTurnById(db, t1)!;
-    expect(turn.title).toBeNull();
-    expect(turn.type).toEqual([]);
+    expect(getTurnById(db, t1)!.type).toEqual(["fix"]);
   });
 
   test("a relation write on the same turn is NOT refused by the authority check", () => {
@@ -3125,7 +3126,7 @@ describe("staged settlement — relation-only authority on a removed-side citer"
     const job = claimWindow(sessionDbId, 1, 2);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1, t2]),
-      writableProvenance: removedSideOnly(t1),
+      writableProvenance: new Map([[t1, new Set(["window" as const])]]),
     });
 
     const result = write(
@@ -3144,18 +3145,19 @@ describe("staged settlement — relation-only authority on a removed-side citer"
 
   /**
    * REVIEWER GUARDRAIL 1 (spec §Further Notes): the provenance model is a
-   * permission UNION, never the old mutually-exclusive three-way. A turn that
-   * is BOTH an ordinary window member and a removed-side citer keeps full
-   * field authority.
+   * permission UNION, never the old mutually-exclusive three-way. With one
+   * authority level left the union is trivially true, and it is pinned so that
+   * a class added tomorrow has to state its authority in
+   * `settlementWritePermissions` rather than in a caller.
    */
-  test("window + removed-side provenance takes the UNION and keeps field authority", () => {
+  test("a turn holding TWO ordinary classes takes the union and keeps field authority", () => {
     const sessionDbId = seedSession();
     const t1 = seedTurn(sessionDbId, 1);
     const job = claimWindow(sessionDbId, 1, 1);
     const context = baseContext(job, {
       reviewableTurnIds: new Set([t1]),
       writableProvenance: new Map([
-        [t1, new Set(["window" as const, "removed-side-citer" as const])],
+        [t1, new Set(["window" as const, "lookback" as const])],
       ]),
     });
 

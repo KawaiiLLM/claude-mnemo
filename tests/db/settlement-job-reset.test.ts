@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 
-import { resetNoteSettlementJobToStageOne } from "../../src/db/settlement-job-invalidation";
+import { resetNoteSettlementJobToStageOne } from "../../src/db/note-settlement";
 
 /**
  * The ADDITIVE (pre-stage) shape of `note_settlement_jobs`: the table as it

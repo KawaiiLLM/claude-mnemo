@@ -291,9 +291,14 @@ function reportSection(text: string, heading: string): string {
 }
 
 /** Every `[E6]` anchor address in a text, sorted — the same parse for the preview's render and for the commit refusal's. */
-function draftErrorAnchors(text: string): string[] {
+/**
+ * MAIN-AGENT-EDGES TICKET 14: the moving finding is an E4, not an E6. E6 is a
+ * WARNING now (ruling S15069/T2465-T2466) and never appears on a refusal, so a
+ * fixture built on one could no longer move the commit's answer at all.
+ */
+function blockingErrorAnchors(text: string): string[] {
   const anchors: string[] = [];
-  const pattern = /\[E6\] (?:anchor )?(S\d+\/T\d+)/g;
+  const pattern = /\[E4\] (?:anchor )?(S\d+\/T\d+)/g;
   let match = pattern.exec(text);
   while (match !== null) {
     anchors.push(match[1]!);
@@ -490,11 +495,11 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
    * THE REASON THE TICKET REJECTS A COMPUTED-ONCE SNAPSHOT, stated as a test.
    *
    * The run's writable set here is the whole fixture, so every finding below is
-   * this window's own. A DRAFT edge is minted between two tool calls and
-   * retracted between two more, and at each instant the preview's error set and
-   * the commit's verdict are read at their real seams and compared:
+   * this window's own. An INVALID declaration is minted between two tool calls
+   * and retracted between two more, and at each instant the preview's error set
+   * and the commit's verdict are read at their real seams and compared:
    *
-   *   instant A (dirty) — preview names `[E6] S/T8`; commit REFUSES over the
+   *   instant A (dirty) — preview names `[E4] S/T8`; commit REFUSES over the
    *                       same anchor.
    *   instant B (clean) — preview names none; commit SUCCEEDS.
    *
@@ -512,22 +517,27 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
       const fixture = seedEvaluatorFixture(db);
       const writable = [...fixture.outsideTurnIds, ...fixture.windowTurnIds];
       const [, w2] = fixture.windowTurnIds as [number, number];
-      // MAIN-AGENT-EDGES D1 ("one pair, one row"): this draft has to land on a
-      // pair the fixture has NOT already written. It used to be `w2 -> w1`,
-      // which the fixture seeds with both sides on `window-lane`; a second
-      // write onto that pair no longer mints a row — it promotes the stored one
-      // in place and leaves both stored sides exactly as they are, so no draft
-      // ever appeared and E6 had nothing to name. `w2 -> o6` is free, and the
+      // MAIN-AGENT-EDGES D1 ("one pair, one row"): this row has to land on a
+      // pair the fixture has NOT already written. `w2 -> o6` is free, and the
       // anchor this test asserts on is the CITING turn either way.
       const o6 = fixture.outsideTurnIds[5]!;
-      const draft = {
+      const invalidPair = {
         citing: { kind: "turn" as const, id: w2 },
         cited: { kind: "turn" as const, id: o6 },
-        relationClass: "verify" as const,
-        provenance: "asserted" as const,
-        // Both sides unsettled — a DRAFT edge, which is E6.
-        tailTag: "",
-        headTag: "",
+      };
+      // TICKET 14: an E4 — a stored tail side naming a lane its own endpoint
+      // does not carry. Written past `writeMemoryEdges` on purpose: the write
+      // gate refuses this shape, and E4 is precisely the rule re-checked over
+      // STOCK, which is what a later tag edit leaves behind.
+      const mintInvalidDeclaration = (): void => {
+        db!
+          .query<unknown, [number, number, number]>(
+            `INSERT INTO memory_edges
+               (citing_kind, citing_id, cited_kind, cited_id, provenance,
+                tail_tag, head_tag, relation_class, relation_coverage, created_at_epoch)
+             VALUES ('turn', ?, 'turn', ?, 'asserted', 'no-such-lane', '', 'verify', '', ?)`,
+          )
+          .run(w2, o6, NOW);
       };
 
       const previews: string[][] = [];
@@ -547,25 +557,25 @@ describe("settlement-gate-taxonomy ticket 03 — preview and terminal verdict ag
           ).content[0]!.text;
 
         // ---- THE WRITE that makes the database move -----------------------
-        writeMemoryEdges(db!, [draft], NOW);
+        mintInvalidDeclaration();
 
         // ---- INSTANT A: dirty ---------------------------------------------
-        previews.push(draftErrorAnchors(await laneCheck()));
+        previews.push(blockingErrorAnchors(await laneCheck()));
         const refusal = await commit();
         expect(refusal).toContain("Commit refused");
-        verdicts.push(draftErrorAnchors(refusal));
+        verdicts.push(blockingErrorAnchors(refusal));
 
         // ---- THE SECOND WRITE, in the opposite direction ------------------
         // MAIN-AGENT-EDGES D4 (ruling T2432 P1): a retraction is PAIR-addressed
         // and deletes every row of the pair. The relation word and the two side
         // tags left the address entirely — they were never a discriminator a
         // caller could be trusted to have read correctly.
-        retractMemoryEdges(db!, [{ citing: draft.citing, cited: draft.cited }]);
+        retractMemoryEdges(db!, [invalidPair]);
 
         // ---- INSTANT B: clean ---------------------------------------------
-        previews.push(draftErrorAnchors(await laneCheck()));
+        previews.push(blockingErrorAnchors(await laneCheck()));
         finalCommit = await commit();
-        verdicts.push(draftErrorAnchors(finalCommit));
+        verdicts.push(blockingErrorAnchors(finalCommit));
       });
 
       const anchor = `S${fixture.sessionDbId}/T8`;

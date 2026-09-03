@@ -5,7 +5,7 @@ import type {
   LaneComponentReport,
   LaneCouplingReport,
   LaneCrossSegmentWarning,
-  LaneErrorClass,
+  LaneFindingClass,
   LaneMember,
   LaneOutOfVocabularyEdge,
   LaneProliferationWarning,
@@ -44,12 +44,17 @@ import { estimateTokens } from "../utils/token-estimate";
  *
  * ## The error/warning split (tag-mandate tickets 03/04, narrowed by v12 ticket 11)
  *
- * Both surfaces lead with an ERRORS block — states the grammar forbids,
- * E3/E4/E6, each naming its ANCHOR turn — visually separated from everything
+ * Both surfaces lead with an ERRORS block — the GRAMMAR FINDINGS, E3/E4/E6,
+ * each naming its ANCHOR turn — visually separated from everything
  * below it, which is the WARNING side (connectivity, coupling, bypass
  * candidates, time-order, attribution, and the stock facts no report admits).
+ * Not every member of that block blocks: E6 is a warning by CLASS
+ * (`LaneWarningClass` — an ambiguous side is legal, ruling S15069/T2465-T2466)
+ * and E3 by AUTHORITY (`worker/note-settlement-finding-class.ts`), and the
+ * settlement render splits the block by asking that one rule per instance
+ * rather than by reading this header.
  *
- * E6 (a DRAFT edge, ticket 20) prints in BOTH blocks' subjects and that is
+ * E6 (an AMBIGUOUS side) prints in BOTH blocks' subjects and that is
  * deliberate: the ERRORS block lists it per row, and D9's unattributed-cluster
  * warning below counts the both-sides-empty subset of the same rows as a
  * cluster. The attribution section says so in its own heading, so a reader
@@ -452,24 +457,27 @@ function renderLaneError(
         error.tags.join(",") +
         "}: " +
         error.missing
-          .map((miss) => '"' + miss.tag + "\" missing from the " + miss.endpoint + " turn's tags")
+          .map(
+            (miss) =>
+              '"' + miss.tag + "\" is not among the " + miss.endpoint + " turn's own lanes",
+          )
           .join("; ")
       );
     case "E6":
-      // The SIDE is the whole finding (ticket 20), so it is spelled in words
-      // rather than as a tag list: "which end is missing" is the difference
-      // between settling a row and settling the other half of one. The settled
-      // half's lane is printed when there is one, because the repair for a
-      // half-settled edge usually IS that same lane on the other end.
+      // The SIDE is the whole finding, so it is spelled in words rather than as
+      // a tag list: "which end is ambiguous" is the difference between
+      // declaring a row and declaring the other half of one. The settled half's
+      // lane is printed when there is one, because the declaration a reader
+      // reaches for usually IS that same lane on the other end.
       return (
         head +
         renderEdgeArrow(error.citingId, error.relation, error.citedId, addresses) +
-        ": DRAFT edge -- " +
+        ": AMBIGUOUS side -- " +
         (error.unsettledSides.length === 2
-          ? "neither side names a lane"
+          ? "neither endpoint answers which lane"
           : "the " +
             error.unsettledSides[0]! +
-            " side names no lane (the " +
+            " endpoint sits in several lanes (the " +
             (error.unsettledSides[0] === "tail" ? "head" : "tail") +
             " side is {" +
             error.tags.join(",") +
@@ -623,7 +631,7 @@ export function renderLaneCheckerReports(
 
   sections.push("");
   sections.push(
-    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+    "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the per-row half of the same fact -- neither blocks commit)",
   );
   if (result.unattributedClusters.count === 0) {
     sections.push("(no unattributed clusters)");
@@ -1162,7 +1170,7 @@ function buildLaneCheckerBlocks(
   blocks.push(
     renderBlock(
       "",
-      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the half that blocks commit)",
+      "## Attribution -- unattributed clusters + lane proliferation (warnings; settlement's own debt, never enforced -- a cluster's edges are ALSO listed one by one as E6 above, which is the per-row half of the same fact -- neither blocks commit)",
     ),
   );
   if (result.unattributedClusters.count === 0) {
@@ -1397,8 +1405,8 @@ const CROSSING_ARROW = "⇐"; // reference-line crossing
 const ERROR_GLYPH = "✗";
 
 /** Anchor turn id -> the distinct error classes anchored there, ascending — the digraph's per-member mark, and the reason an anchor is DATA and not prose. */
-function errorClassesByAnchor(errors: readonly LaneCheckerError[]): Map<number, LaneErrorClass[]> {
-  const byAnchor = new Map<number, Set<LaneErrorClass>>();
+function errorClassesByAnchor(errors: readonly LaneCheckerError[]): Map<number, LaneFindingClass[]> {
+  const byAnchor = new Map<number, Set<LaneFindingClass>>();
   for (const error of errors) {
     let bucket = byAnchor.get(error.anchorId);
     if (bucket === undefined) {

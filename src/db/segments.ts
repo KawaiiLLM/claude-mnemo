@@ -1238,15 +1238,6 @@ export interface WriteMembershipTagsInput {
   callerNormalizesAttribution?: boolean;
   /** The writer id the normalisation's own stamps and receipts carry — the acting VERB's id (`lane:clear`, …). Defaults to `input.writer`, then to the anonymous writer. */
   normalizationWriter?: string;
-  /**
-   * The settlement job whose tag projection this write IS (main-agent-edges
-   * ticket 04). Forwarded verbatim to
-   * `normalizeIncidentAttribution`'s `settlementJobId`: it records the PRE
-   * resolution of every incident side to that job's transition scratch, and it
-   * exempts that job from its own structural invalidation. Omitted for every
-   * write outside a settlement run — see the seam's own doc comment.
-   */
-  settlementJobId?: number;
 }
 
 /**
@@ -1285,23 +1276,13 @@ export function writeMembershipTags(
 
   const index = segmentTagIndex(db);
   const refusals: MembershipWriteRefusal[] = [];
-  // THE PRE-STATE, captured before the first `UPDATE` — the "before" half of
-  // the derived-side closure (main-agent-edges D6). Taken ONLY when a
-  // settlement job is named, because that is the only path that consumes it:
-  // a membership write outside a settlement run has no closure to build, and
-  // the read is a whole batched lane-facts load per call.
-  //
-  // PEER FINDING F3b, closed here by construction rather than by ordering: a
-  // caller that mutates the LANE REGISTRY before calling this primitive (task
-  // merge relocates `lanes` rows first, ~1a below) would hand the closure a
-  // pre-state in which the old qualified lane has already vanished. No such
-  // caller names a settlement job, so no such snapshot is taken. A future
-  // caller that does must capture its own pre-state ABOVE its registry write
-  // and pass it in, not rely on this line.
-  const previousLaneFacts =
-    input.settlementJobId === undefined || input.callerNormalizesAttribution
-      ? undefined
-      : loadEndpointLaneFacts(db, writes.map((write) => write.turnId));
+  // NO PRE-STATE IS CAPTURED HERE (main-agent-edges ticket 14). The batched
+  // lane-facts load that used to run before the first `UPDATE` had exactly one
+  // reader — the derived-side closure, which existed to hand a newly-ambiguous
+  // side a repair channel. Ruling S15069/T2465-T2466 removed the channel, so
+  // the capture, `input.settlementJobId` and peer finding F3b's ordering trap
+  // (a caller that moves the lane REGISTRY before calling this primitive) are
+  // all gone: no reader, no snapshot, nothing to get out of order.
 
   for (const write of writes) {
     const target = derivedTarget(index, write.tags);
@@ -1398,10 +1379,6 @@ export function writeMembershipTags(
   const attribution = normalizeIncidentAttribution(db, changedTurnIds, {
     writer: input.normalizationWriter ?? input.writer ?? ANONYMOUS_WRITER,
     nowEpoch,
-    previousLaneFacts,
-    ...(input.settlementJobId !== undefined
-      ? { settlementJobId: input.settlementJobId }
-      : {}),
   });
   return { ok: true, operation, changedTurnIds, membership, attribution };
 }
@@ -2467,20 +2444,22 @@ export interface SegmentMergeReceipt {
    * WHAT THE MOVE COST THE EDGES (main-agent-edges ticket 04, peer finding
    * F3b). A task move changes every moved turn's owning task, so a declaration
    * that named a lane of the SOURCE stops being among its endpoint's tags and
-   * `normalizeIncidentAttribution` clears it — and a side nobody can attribute
-   * afterwards is either kept for a live settlement run or deleted outright.
-   * The primitive reported all of that and this receipt dropped it on the
-   * floor, so a caller reading a `merged` receipt could not tell a move that
-   * touched no edge from one that deleted several.
+   * `normalizeIncidentAttribution` clears it. The primitive reported all of
+   * that and this receipt dropped it on the floor, so a caller reading a
+   * `merged` receipt could not tell a move that touched no edge from one that
+   * folded several colliding rows together.
    *
-   * Three counts and the job list, never the rows: the rows themselves are in
+   * `edgesDeleted` counts ONLY the collision fold (two physical rows that
+   * became one logical edge the moment both declarations were cleared). A side
+   * that merely resolves `ambiguous` deletes nothing — ticket 14, ruling
+   * S15069/T2465-T2466 — so there is no invalidated-job list here either.
+   *
+   * Three counts, never the rows: the rows themselves are in
    * `edge_attribution_receipts`, which is where a rollback would read them.
    */
   declarationsCleared: number;
   edgesDeleted: number;
   citersStamped: number;
-  /** Settlement jobs the move sent back to stage 1 because it made a side inside their reach ambiguous. */
-  invalidatedJobIds: readonly number[];
 }
 
 export type SegmentMergeOutcome =
@@ -3039,7 +3018,6 @@ export function mergeSegments(
       declarationsCleared: attribution?.clearedDeclarations.length ?? 0,
       edgesDeleted: attribution?.deletedEdges.length ?? 0,
       citersStamped: attribution?.stampedCiterIds.length ?? 0,
-      invalidatedJobIds: attribution?.invalidatedJobIds ?? [],
     },
   };
 }

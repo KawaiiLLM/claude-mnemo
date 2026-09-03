@@ -25,8 +25,8 @@ import {
   NOTE_SETTLEMENT_LEASE_MS,
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   reclaimExpiredNoteSettlementClaims,
+  resetNoteSettlementJobToStageOne,
 } from "./note-settlement";
-import { resetNoteSettlementJobToStageOne } from "./settlement-job-invalidation";
 import { reindexTurnFromDb } from "./search";
 import {
   snapshotWriteGateSequence,

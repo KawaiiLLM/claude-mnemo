@@ -569,12 +569,19 @@ describe("no teaching surface still states the retired tag mandate", () => {
 
   describe("retraction mirrors are unchanged by the withdrawal", () => {
     for (const field of ["retractUse", "retractCorrect"] as const) {
-      test(`${field} still documents the bare-address form`, () => {
+      test(`${field} still documents the bare-address form, and states the PAIR rule`, () => {
         const description = settlementNoteInputShape[field].description ?? "";
-        // The retraction line's own words: a bare entry retracts the unsettled
-        // row. A legacy draft row must stay deletable, whatever the assertion
-        // side does.
-        expect(description).toContain("a bare entry retracts the unsettled row");
+        // MAIN-AGENT-EDGES TICKET 14 (peer finding P1-10). The retired sentence
+        // was "a bare entry retracts the unsettled row, a two-sided one
+        // retracts exactly that lane placement" — true only under the
+        // pre-cutover model where one pair could hold several physical rows.
+        // Retraction is pair-addressed and a pair holds one row, so a two-sided
+        // entry narrows nothing.
+        expect(description).not.toContain("a bare entry retracts the unsettled row");
+        expect(description).not.toContain("retracts exactly that lane placement");
+        expect(description).toContain("the ADDRESS IS THE PAIR");
+        expect(description).toContain("Side tags are ignored here");
+        expect(description).toContain("bare-address-or-`{turn, tailTag, headTag}` form");
         expect(description).not.toContain("MUST");
         expect(description).not.toContain("continuation names its lane");
       });

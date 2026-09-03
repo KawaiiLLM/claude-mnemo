@@ -559,10 +559,21 @@ const PUBLIC_RETRACTION_FORM_LINE =
 
 // The retraction mirrors' own one-sentence note — identical across every
 // mirror, since the form is uniform regardless of which word it retracts.
+//
+// P1-10 (main-agent-edges ticket 14): this line used to say "a bare entry
+// retracts the unsettled row, a two-sided one retracts exactly that lane
+// placement", which was true under the pre-cutover model where one pair could
+// hold several physical rows, one per placement. Ticket 03 made retraction
+// PAIR-ADDRESSED and the cutover left one row per pair, so a two-sided entry
+// does not scope the deletion to a placement — it deletes the pair's whole
+// edge, exactly as a bare entry does. Teaching otherwise invites a caller to
+// send sides believing they narrow what is destroyed.
 const RETRACTION_TAG_FORM_LINE =
-  "Same bare-address-or-`{turn, tailTag, headTag}` form as the relation field: a " +
-  "bare entry retracts the unsettled row, a two-sided one retracts exactly that " +
-  "lane placement.";
+  "Same bare-address-or-`{turn, tailTag, headTag}` form as the relation field, " +
+  "but the ADDRESS IS THE PAIR: one pair carries one edge, so any entry naming " +
+  "that pair retracts the whole edge. Side tags are ignored here — a two-sided " +
+  "entry retracts no less than a bare one, and there is no per-placement " +
+  "retraction to ask for.";
 
 
 // PROPERTY ORDER IS LOAD-BEARING (write-gate-hardening ticket 01). Zod keeps

@@ -213,43 +213,31 @@ describe("normalizeIncidentAttribution", () => {
     expect(result.deletedEdges).toEqual([]);
   });
 
-  test("a side that resolves AMBIGUOUS after the clears is deleted and receipted — the default `onAmbiguous`", () => {
+  /**
+   * THE REPLACED RULE (main-agent-edges ticket 14). This test used to read "a
+   * side that resolves AMBIGUOUS after the clears is deleted and receipted",
+   * and its neighbour pinned an `onAmbiguous` hook a caller could override to
+   * `keep`. Ruling S15069/T2465-T2466 made the KEEP the only behaviour and
+   * removed the hook, so the assertions are inverted and the second test is
+   * gone with the parameter it exercised.
+   */
+  test("a side that resolves AMBIGUOUS is KEPT, unreceipted, with nothing to configure", () => {
     const citing = addTurn(1, ["the-task", "alpha"]);
     const cited = addTurn(2, ["the-task", "alpha"]);
     addSegmentMembers(db, segmentId, [citing, cited], 10);
     const edgeId = addEdge(citing, cited, "", "");
 
     // The citing turn joins a second lane: nobody ever said which one the
-    // edge is in, and now nobody can.
+    // edge is in, and nothing derives it any more. That is a WARNING.
     setTags(citing, ["the-task", "alpha", "beta"]);
     const result = normalizeIncidentAttribution(db, [citing], { writer: "note:tags", nowEpoch: NOW });
 
-    expect(edgeRow(edgeId)).toBeNull();
-    expect(result.deletedEdges).toEqual([{ edgeId, citingId: citing, citedId: cited, side: "tail" }]);
-    expect(receipts()).toEqual([
-      { action: "delete-edge", side: "tail", edgeRowId: edgeId, writer: "note:tags" },
-    ]);
-  });
-
-  test("`ctx.onAmbiguous` can answer `keep` — the seam ships DELETE, ticket 04 puts a live-job branch in front of it", () => {
-    const citing = addTurn(1, ["the-task", "alpha"]);
-    const cited = addTurn(2, ["the-task", "alpha"]);
-    addSegmentMembers(db, segmentId, [citing, cited], 10);
-    const edgeId = addEdge(citing, cited, "", "");
-    setTags(citing, ["the-task", "alpha", "beta"]);
-
-    const seen: string[] = [];
-    const result = normalizeIncidentAttribution(db, [citing], {
-      writer: "note:tags",
-      nowEpoch: NOW,
-      onAmbiguous: (edge, side) => {
-        seen.push(`${edge.id}:${side}`);
-        return "keep";
-      },
-    });
-    expect(seen).toEqual([`${edgeId}:tail`]);
     expect(edgeRow(edgeId)).not.toBeNull();
+    expect(edgeRow(edgeId)!.tailTag).toBe("");
     expect(result.deletedEdges).toEqual([]);
+    expect(result.clearedDeclarations).toEqual([]);
+    // No receipt either: nothing happened to receipt.
+    expect(receipts()).toEqual([]);
   });
 
   test("only sides whose OWN endpoint moved are re-judged — one lane's change never touches another lane's edge", () => {
@@ -392,7 +380,14 @@ describe("lane lifecycle verbs go through the seam", () => {
     ).toEqual({ tailTag: "", headTag: "" });
   });
 
-  test("`clearLane` deletes only what it makes UNATTRIBUTABLE — a member still in another lane loses its edge", () => {
+  /**
+   * REPLACED (main-agent-edges ticket 14). This test read "`clearLane` deletes
+   * only what it makes UNATTRIBUTABLE — a member still in another lane loses
+   * its edge". Ruling S15069/T2465-T2466: it loses nothing. The declaration is
+   * still CLEARED (the lane it named is gone), and the side that results is
+   * left ambiguous for a reader to render and for settlement to declare.
+   */
+  test("`clearLane` clears the declaration and KEEPS the edge — an ambiguous side is a warning", () => {
     insertLane(db, segmentId, "doomed", 10);
     insertLane(db, segmentId, "kept", 10);
     insertLane(db, segmentId, "third", 10);
@@ -400,20 +395,28 @@ describe("lane lifecycle verbs go through the seam", () => {
     const citing = addTurn(1, ["the-task", "doomed", "kept", "third"]);
     const cited = addTurn(2, ["the-task", "doomed"]);
     addSegmentMembers(db, segmentId, [citing, cited], 10);
-    addEdge(citing, cited, "doomed", "doomed");
+    const edgeId = addEdge(citing, cited, "doomed", "doomed");
 
     const outcome = runWriteTransaction(db, () => clearLane(db, segmentId, "doomed", 900));
     expect(outcome.kind).toBe("cleared");
     if (outcome.kind !== "cleared") return;
-    expect(outcome.receipt.edgesDeleted).toBe(1);
-    expect(edgeCount()).toBe(0);
+    expect(outcome.receipt.edgesDeleted).toBe(0);
+    expect(edgeCount()).toBe(1);
+    // Both stored sides are cleared: the word left both endpoints.
+    expect(
+      db
+        .query<{ tailTag: string; headTag: string }, [number]>(
+          "SELECT tail_tag AS tailTag, head_tag AS headTag FROM memory_edges WHERE id = ?",
+        )
+        .get(edgeId),
+    ).toEqual({ tailTag: "", headTag: "" });
     expect(
       db
         .query<{ n: number }, []>(
           "SELECT COUNT(*) AS n FROM edge_attribution_receipts WHERE action = 'delete-edge'",
         )
         .get()!.n,
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("`clearLane` takes no `force` and never blocks: there is no destructive outcome left to gate", () => {
