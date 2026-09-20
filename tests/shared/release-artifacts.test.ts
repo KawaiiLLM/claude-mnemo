@@ -71,7 +71,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.30.0", () => {
+  test("release metadata is consistently bumped to 0.30.1", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -106,11 +106,11 @@ describe("release artifacts", () => {
     // constant, not two. `settlementSdkQuery` is the only one left.
     expect(existsSync("src/worker/diary-sdk-query.ts")).toBe(false);
 
-    expect(packageJson.version).toBe("0.30.0");
-    expect(pluginManifest.version).toBe("0.30.0");
-    expect(marketplace.metadata?.version).toBe("0.30.0");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.30.0");
-    expect(settlementSdkQuery).toContain('version: "0.30.0"');
+    expect(packageJson.version).toBe("0.30.1");
+    expect(pluginManifest.version).toBe("0.30.1");
+    expect(marketplace.metadata?.version).toBe("0.30.1");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.30.1");
+    expect(settlementSdkQuery).toContain('version: "0.30.1"');
   });
 
   /**
