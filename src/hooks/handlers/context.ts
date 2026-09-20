@@ -20,6 +20,7 @@ import type { DreamMemoryStore } from "../../diary/memory-store";
 import { renderSessionStartPersonaInjection } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
 import { bumpWriterEpoch, sessionWriterId } from "../../db/write-gate";
+import { loadConfig, type MnemoConfig } from "../../shared/config";
 import {
   notifyWorkerTrigger,
   type WorkerClientDeps,
@@ -30,6 +31,8 @@ export interface ReadOnlyContextHandlerDependencies {
     DreamMemoryStore,
     "dataRoot" | "readInjectionDocuments"
   >;
+  /** Injected for tests; defaults to `loadConfig()`. Only the `rubric` section reads it. */
+  config?: MnemoConfig;
 }
 
 export interface ContextHandlerDependencies
@@ -189,11 +192,17 @@ export function createReadOnlyContextHandler(
   return async function handleReadOnlyContextHook(
     _input: NormalizedHookInput,
   ): Promise<HookResult> {
-    // The Memory Rubric's own slot — pure prose, no db, no gating; its own
-    // ~10K hook budget so the roster's growth can never collapse it (or be
-    // collapsed by it) into Claude Code's 2KB persisted preview.
+    // The Memory Rubric's own slot — pure prose, no db; its own ~10K hook
+    // budget so the roster's growth can never collapse it (or be collapsed by
+    // it) into Claude Code's 2KB persisted preview. The one gate it does have
+    // is quiet mode: PART TWO (action principles) has nothing to say when
+    // there is no note obligation to act on.
     if (section === "rubric") {
-      return { continue: true, hookSpecificOutput: renderRubricBlock() };
+      const quiet = (dependencies.config ?? loadConfig()).quiet;
+      return {
+        continue: true,
+        hookSpecificOutput: renderRubricBlock(quiet),
+      };
     }
 
     // "persona" is the only section left here that reads anything, and what it

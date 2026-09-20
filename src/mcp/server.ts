@@ -8,6 +8,7 @@ import {
   deriveProcessIdentityKeys,
   getMnemoSessionIdForProcessSession,
 } from "../db/process-session-map";
+import { loadConfig, type MnemoConfig } from "../shared/config";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
@@ -39,6 +40,14 @@ export interface CreateMcpServerOptions {
    * channel but the real MCP process.
    */
   resolveCallerSessionId?: () => number | null;
+  /**
+   * Quiet-mode override, so a test never has to touch the real HOME to
+   * exercise this. `config` wins if both are given; either wins over the
+   * real `loadConfig()` read below. Undefined on both is the real config —
+   * the only case any production caller hits.
+   */
+  config?: MnemoConfig;
+  quiet?: boolean;
 }
 
 /**
@@ -89,42 +98,56 @@ function startParentHeartbeat(intervalMs = 30_000): NodeJS.Timeout {
   return timer;
 }
 
+/**
+ * A handler present in `toolHandlers` is registered; one absent is not — that
+ * is the whole quiet-mode contract (`note`/`remember` never reach
+ * `tools/list`). Every existing caller supplies all four, so this is a
+ * widening, not a behaviour change for them.
+ */
 export function registerMainMcpTools(
   server: ToolRegistrationTarget,
-  toolHandlers: MainMcpToolHandlers,
+  toolHandlers: Partial<MainMcpToolHandlers>,
 ): void {
-  server.registerTool(
-    "recall",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.recall,
-      inputSchema: recallInputSchema,
-    },
-    (args) => toolHandlers.recall(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "timeline",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.timeline,
-      inputSchema: timelineInputSchema,
-    },
-    (args) => toolHandlers.timeline(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "note",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.note,
-      inputSchema: noteInputSchema,
-    },
-    (args) => toolHandlers.note(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "remember",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.remember,
-      inputSchema: rememberInputSchema,
-    },
-    (args) => toolHandlers.remember(args as Record<string, unknown>),
-  );
+  if (toolHandlers.recall) {
+    server.registerTool(
+      "recall",
+      {
+        description: MNEMO_TOOL_DESCRIPTIONS.recall,
+        inputSchema: recallInputSchema,
+      },
+      (args) => toolHandlers.recall!(args as Record<string, unknown>),
+    );
+  }
+  if (toolHandlers.timeline) {
+    server.registerTool(
+      "timeline",
+      {
+        description: MNEMO_TOOL_DESCRIPTIONS.timeline,
+        inputSchema: timelineInputSchema,
+      },
+      (args) => toolHandlers.timeline!(args as Record<string, unknown>),
+    );
+  }
+  if (toolHandlers.note) {
+    server.registerTool(
+      "note",
+      {
+        description: MNEMO_TOOL_DESCRIPTIONS.note,
+        inputSchema: noteInputSchema,
+      },
+      (args) => toolHandlers.note!(args as Record<string, unknown>),
+    );
+  }
+  if (toolHandlers.remember) {
+    server.registerTool(
+      "remember",
+      {
+        description: MNEMO_TOOL_DESCRIPTIONS.remember,
+        inputSchema: rememberInputSchema,
+      },
+      (args) => toolHandlers.remember!(args as Record<string, unknown>),
+    );
+  }
 }
 
 export function createMcpServer(
@@ -150,11 +173,21 @@ export function createMcpServer(
     ...options.handlers,
   };
 
-  const toolHandlers: MainMcpToolHandlers = {
+  const quiet =
+    options.quiet ?? options.config?.quiet ?? loadConfig().quiet;
+
+  // Quiet: `note` and `remember` are not built and not registered — absent
+  // from `tools/list`, not merely stubbed. `recall`/`timeline` are unaffected
+  // ("reads ... continue").
+  const toolHandlers: Partial<MainMcpToolHandlers> = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
-    note: mergedHandlers.note ?? createStubHandler("note"),
-    remember: mergedHandlers.remember ?? createStubHandler("remember"),
+    ...(quiet
+      ? {}
+      : {
+          note: mergedHandlers.note ?? createStubHandler("note"),
+          remember: mergedHandlers.remember ?? createStubHandler("remember"),
+        }),
   };
 
   registerMainMcpTools(server, toolHandlers);

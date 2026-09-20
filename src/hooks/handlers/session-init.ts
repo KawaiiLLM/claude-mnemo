@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
 import { listOwedNoteTurns } from "../../db/note-debt";
+import { loadConfig, type MnemoConfig } from "../../shared/config";
 import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
@@ -49,6 +50,13 @@ export interface SessionInitDependencies {
   captureRepairMaxLines?: number;
   /** Injected for tests; defaults to the real process environment. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Injected for tests; defaults to `loadConfig()`, read fresh inside the
+   * handler (not hoisted to module scope) — a hook is one process per event,
+   * so there is no cross-process cache to worry about, only a reminder that
+   * this must not become one.
+   */
+  config?: MnemoConfig;
 }
 
 function createPendingTurn(
@@ -104,6 +112,7 @@ export function createSessionInitHandler(
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const env = dependencies.env ?? process.env;
+  const config = dependencies.config ?? loadConfig();
 
   return async function handleSessionInitHook(
     input: NormalizedHookInput,
@@ -266,7 +275,9 @@ export function createSessionInitHandler(
       // below, paid only when a segment is attached — an idle/unattached
       // session pays nothing here.
       let laneThresholdText: string | null = null;
-      if (!isSubagent && turnId !== null) {
+      // Quiet: "no note obligation, no reminders" — none of this block's
+      // queries run, and none of its output renders below.
+      if (!isSubagent && !config.quiet && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
 
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
@@ -342,6 +353,17 @@ export function createSessionInitHandler(
     });
 
     if (isSubagent) {
+      return {
+        continue: true,
+        suppressOutput: true,
+      };
+    }
+
+    // Quiet: capture already happened above (the turn row exists exactly as
+    // it would without quiet) — only the emitted lines are gone. No
+    // current-turn address, no relief, no maintenance reminder, no
+    // lane-threshold reminder.
+    if (config.quiet) {
       return {
         continue: true,
         suppressOutput: true,

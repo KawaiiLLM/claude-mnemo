@@ -24,6 +24,7 @@ import {
 import { createPromptDispatchHandler } from "../../src/hooks/handlers/prompt-dispatch";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import type { NormalizedHookInput } from "../../src/hooks/types";
+import { DEFAULT_CONFIG } from "../../src/shared/config";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -1169,5 +1170,73 @@ describe("lane-count pressure reminder (staged-settlement ticket 09)", () => {
     const result = await handler(createInput({ prompt: "turn 1" }));
 
     expect(result.hookSpecificOutput ?? "").not.toContain("mnemo lane threshold:");
+  });
+});
+
+// Quiet mode: "no note obligation, no reminders ... reads and capture
+// continue" — the turn row is still created, but nothing is ever emitted.
+describe("quiet mode (session-init)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("still inserts the turn row and returns suppressOutput with no hookSpecificOutput", async () => {
+    const handler = createSessionInitHandler({
+      db,
+      config: { ...DEFAULT_CONFIG, quiet: true },
+    });
+
+    const result = await handler(
+      createInput({ prompt: "Diagnose the auth race" }),
+    );
+
+    const session = getSessionByContentId(db, "session-1");
+    const turn = getTurn(db, session!.id, 1);
+
+    expect(result).toEqual({ continue: true, suppressOutput: true });
+    expect(result.hookSpecificOutput).toBeUndefined();
+    expect(turn?.status).toBe("active");
+    expect(turn?.userPrompt).toBe("Diagnose the auth race");
+  });
+
+  test("suppresses the relief block and reminders too, even when they would otherwise fire", async () => {
+    const handler = createSessionInitHandler({
+      db,
+      config: { ...DEFAULT_CONFIG, quiet: true },
+    });
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      transcriptPath: null,
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const segment = createSegment(db, { title: "quiet-lane", nowEpoch: 1000 });
+    attachSegmentToSession(db, session.id, segment.id, 1000);
+    for (let i = 0; i < LANE_THRESHOLD_DECLARED_LANE_COUNT; i += 1) {
+      insertLane(db, segment.id, `lane-${i}`, 1000);
+    }
+
+    const result = await handler(createInput({ prompt: "turn 1" }));
+
+    expect(result).toEqual({ continue: true, suppressOutput: true });
+  });
+
+  test("without quiet, the current-turn line is still present (unchanged default)", async () => {
+    const handler = createSessionInitHandler({ db });
+    const result = await handler(createInput({ prompt: "turn 1" }));
+
+    expect(result.hookSpecificOutput).toContain("mnemo current turn:");
   });
 });

@@ -31,6 +31,21 @@ export interface MnemoConfig {
    */
   settlementEnabled: boolean;
   /**
+   * One global switch: "no note obligation, no reminders, no model spend;
+   * reads and capture continue." Concretely, quiet turns OFF: the session-init
+   * hook's current-turn address, relief block, remember-maintenance reminder
+   * and lane-threshold reminder (all suppressed, though the turn row is still
+   * created); the SessionStart rubric's PART TWO action principles (only the
+   * concepts half — the one settlement shares — still renders); the `note`
+   * and `remember` MCP tools (not registered at all); and, via the
+   * `settlementEnabled` resolution below, every settlement dispatch (no
+   * window is ever planned, so the process that calls a model never runs).
+   * It keeps ON: `recall`/`timeline` reads, transcript capture, the Stop
+   * hook's worker trigger, and tool-use observation — nothing here is a data
+   * change, only fewer obligations and no spend.
+   */
+  quiet: boolean;
+  /**
    * P2 era boundary (spec D11/D12), and the single cutover switch. A turn
    * created at or after this epoch has the main agent's note as its official
    * record, renders through the segment spine, and is settled; everything
@@ -159,6 +174,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
+  quiet: false,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -303,6 +319,8 @@ function clampConfig(
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
 
+  const quiet = resolveBoolean(config.quiet, DEFAULT_CONFIG.quiet);
+
   return {
     workerIdleShutdownMs: clampInteger(
       config.workerIdleShutdownMs,
@@ -310,10 +328,14 @@ function clampConfig(
       86_400_000,
       DEFAULT_CONFIG.workerIdleShutdownMs,
     ),
+    // Quiet forces settlement off at the loader (not one more gate alongside
+    // the six existing ones): the effective value below is what every one of
+    // settlement's own checks reads, so none of them changes.
     settlementEnabled: resolveBoolean(
       config.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled,
-    ),
+    ) && !quiet,
+    quiet,
     // Anything that is not a positive whole epoch reads as "no era yet" rather
     // than as an epoch of 0, which would put every turn on the new path.
     eraCutoffEpoch: normalizeEraCutoffEpoch(config.eraCutoffEpoch),

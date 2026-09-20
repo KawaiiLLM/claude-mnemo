@@ -162,6 +162,100 @@ describe("registerMainMcpTools", () => {
       registerToolSpy.mockRestore();
     }
   });
+
+  // Quiet mode: "no note obligation" means `note`/`remember` never reach
+  // `tools/list` at all — not merely stubbed out.
+  test("registerMainMcpTools registers only the handlers it is given", () => {
+    const registrations: ToolRegistration[] = [];
+
+    registerMainMcpTools(
+      {
+        registerTool(name, config, handler) {
+          registrations.push({ name, config, handler });
+        },
+      },
+      {
+        recall: mock(() => ({ content: [{ type: "text", text: "recall" }] })),
+        timeline: mock(() => ({ content: [{ type: "text", text: "timeline" }] })),
+      },
+    );
+
+    expect(registrations.map((registration) => registration.name)).toEqual([
+      "recall",
+      "timeline",
+    ]);
+  });
+
+  test("createMcpServer in quiet mode registers exactly recall and timeline", async () => {
+    const registrations: ToolRegistration[] = [];
+    const registerToolSpy = spyOn(McpServer.prototype, "registerTool").mockImplementation(
+      function (
+        this: McpServer,
+        name: string,
+        config: ToolRegistration["config"],
+        handler: ToolRegistration["handler"],
+      ) {
+        registrations.push({ name, config, handler });
+        return this;
+      },
+    );
+
+    try {
+      createMcpServer({
+        quiet: true,
+        handlers: {
+          recall: mock(async () => ({ content: [{ type: "text" as const, text: "recall" }] })),
+          timeline: mock(async () => ({ content: [{ type: "text" as const, text: "timeline" }] })),
+          note: mock(async () => ({ content: [{ type: "text" as const, text: "note" }] })),
+          remember: mock(async () => ({ content: [{ type: "text" as const, text: "remember" }] })),
+        },
+      });
+
+      expect(registrations.map((registration) => registration.name)).toEqual([
+        "recall",
+        "timeline",
+      ]);
+      expect(registrations).toHaveLength(2);
+    } finally {
+      registerToolSpy.mockRestore();
+    }
+  });
+
+  test("createMcpServer without quiet (default) still registers all four (unchanged default)", async () => {
+    const registrations: ToolRegistration[] = [];
+    const registerToolSpy = spyOn(McpServer.prototype, "registerTool").mockImplementation(
+      function (
+        this: McpServer,
+        name: string,
+        config: ToolRegistration["config"],
+        handler: ToolRegistration["handler"],
+      ) {
+        registrations.push({ name, config, handler });
+        return this;
+      },
+    );
+
+    try {
+      createMcpServer({
+        quiet: false,
+        handlers: {
+          recall: mock(async () => ({ content: [{ type: "text" as const, text: "recall" }] })),
+          timeline: mock(async () => ({ content: [{ type: "text" as const, text: "timeline" }] })),
+          note: mock(async () => ({ content: [{ type: "text" as const, text: "note" }] })),
+          remember: mock(async () => ({ content: [{ type: "text" as const, text: "remember" }] })),
+        },
+      });
+
+      expect(registrations.map((registration) => registration.name)).toEqual([
+        "recall",
+        "timeline",
+        "note",
+        "remember",
+      ]);
+    } finally {
+      registerToolSpy.mockRestore();
+    }
+  });
 });
 
 /**

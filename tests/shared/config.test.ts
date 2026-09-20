@@ -433,4 +433,35 @@ describe("shared config", () => {
       },
     );
   });
+
+  // Quiet mode: one global key that also forces settlement off at the
+  // loader, so none of settlement's own six gates has to change.
+  describe("quiet", () => {
+    test("defaults to false, with settlement left on, when the file is absent", () => {
+      expect(loadConfig("/definitely-missing").quiet).toBe(false);
+      expect(loadConfig("/definitely-missing").settlementEnabled).toBe(true);
+    });
+
+    test("defaults to false when the file is present but empty", () => {
+      const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+      mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+      writeFileSync(`${home}/.claude-mnemo/config.json`, JSON.stringify({}));
+
+      expect(loadConfig(home).quiet).toBe(false);
+      expect(loadConfig(home).settlementEnabled).toBe(true);
+    });
+
+    test("quiet:true forces settlementEnabled effective-false even when the file also says settlementEnabled:true", () => {
+      const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+      mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+      writeFileSync(
+        `${home}/.claude-mnemo/config.json`,
+        JSON.stringify({ quiet: true, settlementEnabled: true }),
+      );
+
+      const config = loadConfig(home);
+      expect(config.quiet).toBe(true);
+      expect(config.settlementEnabled).toBe(false);
+    });
+  });
 });

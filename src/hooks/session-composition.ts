@@ -7,7 +7,10 @@ import {
   type SegmentRosterFeedOptions,
 } from "../mcp/recall";
 import { buildSegmentFrontierSection } from "../mcp/timeline";
-import { renderMainAgentRubricBlock } from "../shared/memory-rubric";
+import {
+  renderMainAgentRubricBlock,
+  renderMemoryRubricConceptsBlock,
+} from "../shared/memory-rubric";
 
 /**
  * SessionStart's per-attached-segment blocks and the fixed roster block
@@ -268,7 +271,15 @@ export function renderSegmentRosterBlock(
  * same ticket for the related reason: what it carried was a call contract,
  * and call contracts live on the tool description.
  */
-export function renderRubricBlock(): string {
-  return enforceHardCharLimit(renderMainAgentRubricBlock());
+/**
+ * `quiet` swaps in the concepts-only half — the same block settlement uses —
+ * and drops PART TWO (the main agent's own action principles): quiet means no
+ * note obligation, so the block that tells the main agent how to act on that
+ * obligation has nothing to say.
+ */
+export function renderRubricBlock(quiet = false): string {
+  return enforceHardCharLimit(
+    quiet ? renderMemoryRubricConceptsBlock() : renderMainAgentRubricBlock(),
+  );
 }
 

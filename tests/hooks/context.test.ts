@@ -7,6 +7,7 @@ import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { createContextHandler, createReadOnlyContextHandler } from "../../src/hooks/handlers/context";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
+import { DEFAULT_CONFIG } from "../../src/shared/config";
 
 /**
  * The bare `context` SessionStart command's own concerns (ticket 10): the
@@ -294,5 +295,31 @@ describe("SessionStart:rubric — the rubric ships through its own slot", () => 
     expect(result.hookSpecificOutput).toContain("## Segment roster");
     expect(result.hookSpecificOutput).not.toContain("mnemo-memory-rubric");
     freshDb.close();
+  });
+
+  // Quiet mode: PART TWO (main-agent action principles) has nothing to say
+  // when there is no note obligation to act on — only the concepts half
+  // (the one settlement shares) still renders.
+  test("quiet: renders the concepts block only — no actions attribute, no PART TWO heading", async () => {
+    const handler = createReadOnlyContextHandler(
+      { config: { ...DEFAULT_CONFIG, quiet: true } },
+      "rubric",
+    );
+    const result = await handler(createInput({ sessionId: "any" }));
+
+    expect(result.continue).toBe(true);
+    expect(result.hookSpecificOutput).toContain("<mnemo-memory-rubric");
+    expect(result.hookSpecificOutput).toContain("**tags**:归属有两个来源");
+    expect(result.hookSpecificOutput).not.toContain('actions="');
+    expect(result.hookSpecificOutput).not.toContain("行动原则");
+    expect(result.hookSpecificOutput).not.toContain("## 记录 —— 管好每一轮");
+  });
+
+  test("without quiet, both the actions attribute and PART TWO heading are present (unchanged default)", async () => {
+    const handler = createReadOnlyContextHandler({}, "rubric");
+    const result = await handler(createInput({ sessionId: "any" }));
+
+    expect(result.hookSpecificOutput).toContain('actions="');
+    expect(result.hookSpecificOutput).toContain("## 记录 —— 管好每一轮");
   });
 });
