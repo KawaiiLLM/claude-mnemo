@@ -347,6 +347,7 @@ var DEFAULT_CONFIG = {
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
+  quiet: false,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -427,6 +428,7 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
     );
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
+  const quiet = resolveBoolean(config2.quiet, DEFAULT_CONFIG.quiet);
   return {
     workerIdleShutdownMs: clampInteger(
       config2.workerIdleShutdownMs,
@@ -434,10 +436,14 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
       864e5,
       DEFAULT_CONFIG.workerIdleShutdownMs
     ),
+    // Quiet forces settlement off at the loader (not one more gate alongside
+    // the six existing ones): the effective value below is what every one of
+    // settlement's own checks reads, so none of them changes.
     settlementEnabled: resolveBoolean(
       config2.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled
-    ),
+    ) && !quiet,
+    quiet,
     // Anything that is not a positive whole epoch reads as "no era yet" rather
     // than as an epoch of 0, which would put every turn on the new path.
     eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
@@ -577,7 +583,7 @@ function loadConfigEraCutoff() {
 }
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.30.0-mtlayzia" : "dev";
+var BUILD_ID = true ? "0.30.0-mua0wbwc" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -16843,6 +16849,11 @@ function computeHash(text) {
 var MEMORY_RUBRIC_CONCEPTS_HASH = computeHash(MEMORY_RUBRIC_CONCEPTS_TEXT);
 var MEMORY_RUBRIC_MAIN_ACTIONS_HASH = computeHash(MEMORY_RUBRIC_MAIN_ACTIONS_TEXT);
 var MEMORY_RUBRIC_CLOSE_TAG = "</mnemo-memory-rubric>";
+function renderMemoryRubricConceptsBlock() {
+  const open2 = `<mnemo-memory-rubric version="${MEMORY_RUBRIC_VERSION}" concepts="${MEMORY_RUBRIC_CONCEPTS_HASH}">`;
+  return `${open2}
+${MEMORY_RUBRIC_CONCEPTS_TEXT}${MEMORY_RUBRIC_CLOSE_TAG}`;
+}
 function renderMainAgentRubricBlock() {
   const open2 = `<mnemo-memory-rubric version="${MEMORY_RUBRIC_VERSION}" concepts="${MEMORY_RUBRIC_CONCEPTS_HASH}" actions="${MEMORY_RUBRIC_MAIN_ACTIONS_HASH}">`;
   return `${open2}
@@ -16917,8 +16928,10 @@ ${readerOutputAtBudget(
 function renderSegmentRosterBlock(db, options = {}) {
   return enforceHardCharLimit(renderSegmentRosterFeed(db, options));
 }
-function renderRubricBlock() {
-  return enforceHardCharLimit(renderMainAgentRubricBlock());
+function renderRubricBlock(quiet = false) {
+  return enforceHardCharLimit(
+    quiet ? renderMemoryRubricConceptsBlock() : renderMainAgentRubricBlock()
+  );
 }
 
 // src/db/pending-queue.ts
@@ -17216,7 +17229,11 @@ function buildContextOutput(db, input, eraCutoffEpoch) {
 function createReadOnlyContextHandler(dependencies, section) {
   return async function handleReadOnlyContextHook(_input) {
     if (section === "rubric") {
-      return { continue: true, hookSpecificOutput: renderRubricBlock() };
+      const quiet = (dependencies.config ?? loadConfig()).quiet;
+      return {
+        continue: true,
+        hookSpecificOutput: renderRubricBlock(quiet)
+      };
     }
     if (!dependencies.memoryStore) {
       return { continue: true };
@@ -33008,6 +33025,7 @@ function createSessionInitHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const env = dependencies.env ?? process.env;
+  const config2 = dependencies.config ?? loadConfig();
   return async function handleSessionInitHook(input) {
     if (!input.sessionId || !input.cwd || !input.prompt) {
       return {
@@ -33083,7 +33101,7 @@ function createSessionInitHandler(dependencies) {
       let reliefText = null;
       let rememberReminderText = null;
       let laneThresholdText = null;
-      if (!isSubagent && turnId !== null) {
+      if (!isSubagent && !config2.quiet && turnId !== null) {
         const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
         if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
           reliefText = renderNoteBacklogRelief(owed);
@@ -33120,6 +33138,12 @@ function createSessionInitHandler(dependencies) {
       };
     });
     if (isSubagent) {
+      return {
+        continue: true,
+        suppressOutput: true
+      };
+    }
+    if (config2.quiet) {
       return {
         continue: true,
         suppressOutput: true

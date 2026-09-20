@@ -37150,6 +37150,7 @@ var DEFAULT_CONFIG = {
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
+  quiet: false,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -37230,6 +37231,7 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
     );
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
+  const quiet = resolveBoolean(config3.quiet, DEFAULT_CONFIG.quiet);
   return {
     workerIdleShutdownMs: clampInteger(
       config3.workerIdleShutdownMs,
@@ -37237,10 +37239,14 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, rawNote
       864e5,
       DEFAULT_CONFIG.workerIdleShutdownMs
     ),
+    // Quiet forces settlement off at the loader (not one more gate alongside
+    // the six existing ones): the effective value below is what every one of
+    // settlement's own checks reads, so none of them changes.
     settlementEnabled: resolveBoolean(
       config3.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled
-    ),
+    ) && !quiet,
+    quiet,
     // Anything that is not a positive whole epoch reads as "no era yet" rather
     // than as an epoch of 0, which would put every turn on the new path.
     eraCutoffEpoch: normalizeEraCutoffEpoch(config3.eraCutoffEpoch),

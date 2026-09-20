@@ -156,7 +156,7 @@ var import_node_os3 = require("node:os");
 var import_node_path8 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.30.0-mtlayzia" : "dev";
+var BUILD_ID = true ? "0.30.0-mua0wbwc" : "dev";
 
 // src/db/build-state.ts
 function readInitializerBuild(db) {
@@ -1851,6 +1851,7 @@ var DEFAULT_CONFIG = {
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
+  quiet: false,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -1931,6 +1932,7 @@ function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteS
     );
     noteSettlementCapTurns = noteSettlementThresholdTurns;
   }
+  const quiet = resolveBoolean(config.quiet, DEFAULT_CONFIG.quiet);
   return {
     workerIdleShutdownMs: clampInteger(
       config.workerIdleShutdownMs,
@@ -1938,10 +1940,14 @@ function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteS
       864e5,
       DEFAULT_CONFIG.workerIdleShutdownMs
     ),
+    // Quiet forces settlement off at the loader (not one more gate alongside
+    // the six existing ones): the effective value below is what every one of
+    // settlement's own checks reads, so none of them changes.
     settlementEnabled: resolveBoolean(
       config.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled
-    ),
+    ) && !quiet,
+    quiet,
     // Anything that is not a positive whole epoch reads as "no era yet" rather
     // than as an epoch of 0, which would put every turn on the new path.
     eraCutoffEpoch: normalizeEraCutoffEpoch(config.eraCutoffEpoch),

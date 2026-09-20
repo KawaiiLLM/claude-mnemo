@@ -232,10 +232,6 @@ export function renderMemoryRubricConceptsBlock(): string {
  * so the two renderings share those bytes by construction rather than by a
  * test's goodwill.
  */
-/**
- * Quiet-mode routing lives in `session-composition.ts`'s `renderRubricBlock`,
- * not here — this module stays a pure renderer with no config dependency.
- */
 export function renderMainAgentRubricBlock(): string {
   const open =
     `<mnemo-memory-rubric version="${MEMORY_RUBRIC_VERSION}" ` +

@@ -165,7 +165,7 @@ describe("registerMainMcpTools", () => {
 
   // Quiet mode: "no note obligation" means `note`/`remember` never reach
   // `tools/list` at all — not merely stubbed out.
-  test("registerMainMcpTools registers only the handlers it is given", () => {
+  test("registerMainMcpTools under quiet registers the two readers only", () => {
     const registrations: ToolRegistration[] = [];
 
     registerMainMcpTools(
@@ -177,7 +177,10 @@ describe("registerMainMcpTools", () => {
       {
         recall: mock(() => ({ content: [{ type: "text", text: "recall" }] })),
         timeline: mock(() => ({ content: [{ type: "text", text: "timeline" }] })),
+        note: mock(() => ({ content: [{ type: "text", text: "note" }] })),
+        remember: mock(() => ({ content: [{ type: "text", text: "remember" }] })),
       },
+      { quiet: true },
     );
 
     expect(registrations.map((registration) => registration.name)).toEqual([

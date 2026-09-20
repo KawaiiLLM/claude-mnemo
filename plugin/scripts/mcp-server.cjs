@@ -6803,6 +6803,260 @@ var require_dist = __commonJS({
   }
 });
 
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
+  if (cutoffEpoch === null || cutoffEpoch === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
+    params: [cutoffEpoch]
+  };
+}
+var ERA_GRANT_COLUMN;
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+    ERA_GRANT_COLUMN = "era_granted_at_epoch";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os.homedir)()) {
+  return (0, import_node_path.join)(homePath, ".claude-mnemo", "config.json");
+}
+function resolveAgentModel(fieldName, value, fallback, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`
+  );
+  return fallback;
+}
+function resolveMaxThinkingTokens(fieldName, value, logger) {
+  if (value === null || value === void 0) {
+    return null;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using null.`
+  );
+  return null;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteSettlementModel, logger) {
+  const noteSettlementThresholdTurns = clampInteger(
+    config2.noteSettlementThresholdTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementThresholdTurns
+  );
+  let noteSettlementCapTurns = clampInteger(
+    config2.noteSettlementCapTurns,
+    1,
+    500,
+    DEFAULT_CONFIG.noteSettlementCapTurns
+  );
+  if (noteSettlementCapTurns < noteSettlementThresholdTurns) {
+    logger.warn(
+      `[claude-mnemo] noteSettlementCapTurns (${noteSettlementCapTurns}) is below noteSettlementThresholdTurns (${noteSettlementThresholdTurns}); raising the cap to match.`
+    );
+    noteSettlementCapTurns = noteSettlementThresholdTurns;
+  }
+  const quiet = resolveBoolean(config2.quiet, DEFAULT_CONFIG.quiet);
+  return {
+    workerIdleShutdownMs: clampInteger(
+      config2.workerIdleShutdownMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.workerIdleShutdownMs
+    ),
+    // Quiet forces settlement off at the loader (not one more gate alongside
+    // the six existing ones): the effective value below is what every one of
+    // settlement's own checks reads, so none of them changes.
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ) && !quiet,
+    quiet,
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveAgentModel(
+      "dreamAgentModel",
+      rawDreamAgentModel,
+      DEFAULT_DREAM_AGENT_MODEL,
+      logger
+    ),
+    dreamAgentMaxThinkingTokens: resolveMaxThinkingTokens(
+      "dreamAgentMaxThinkingTokens",
+      config2.dreamAgentMaxThinkingTokens,
+      logger
+    ),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    ),
+    noteSettlementModel: resolveAgentModel(
+      "noteSettlementModel",
+      rawNoteSettlementModel,
+      DEFAULT_NOTE_SETTLEMENT_MODEL,
+      logger
+    ),
+    noteSettlementMaxThinkingTokens: resolveMaxThinkingTokens(
+      "noteSettlementMaxThinkingTokens",
+      config2.noteSettlementMaxThinkingTokens,
+      logger
+    ),
+    noteSettlementThresholdTurns,
+    noteSettlementCapTurns,
+    noteSettlementBackfillMaxTurns: clampInteger(
+      config2.noteSettlementBackfillMaxTurns,
+      1,
+      1e4,
+      DEFAULT_CONFIG.noteSettlementBackfillMaxTurns
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    const configuredNoteSettlementModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "noteSettlementModel"
+    ) ? raw.noteSettlementModel : DEFAULT_NOTE_SETTLEMENT_MODEL;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, configuredNoteSettlementModel, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+var import_node_fs, import_node_os, import_node_path, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_WORKER_IDLE_SHUTDOWN_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
+    "use strict";
+    import_node_fs = require("node:fs");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ];
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_WORKER_IDLE_SHUTDOWN_MS = 60 * 60 * 1e3;
+    DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
+    DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
+    DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
+    DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
+    DEFAULT_CONFIG = {
+      workerIdleShutdownMs: DEFAULT_WORKER_IDLE_SHUTDOWN_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      quiet: false,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentMaxThinkingTokens: null,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1,
+      noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
+      noteSettlementMaxThinkingTokens: null,
+      noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
+      noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
+      noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
+    };
+  }
+});
+
 // src/shared/type-vocabulary.ts
 function isMemoryType(value) {
   return typeof value === "string" && MEMORY_TYPES.includes(value);
@@ -6888,7 +7142,7 @@ var init_type_vocabulary = __esm({
 function resolveDatabasePath(explicitPath) {
   const candidatePath = explicitPath || process.env.CLAUDE_MNEMO_DB_PATH || DEFAULT_DB_PATH;
   if (candidatePath.startsWith("~/")) {
-    return (0, import_node_path.join)((0, import_node_os.homedir)(), candidatePath.slice(2));
+    return (0, import_node_path2.join)((0, import_node_os2.homedir)(), candidatePath.slice(2));
   }
   return candidatePath;
 }
@@ -6896,10 +7150,10 @@ function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
 function transcriptRootPath() {
-  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
+  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude", "projects");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
-  return (0, import_node_path.join)(
+  return (0, import_node_path2.join)(
     transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
@@ -6908,16 +7162,16 @@ function resolveTranscriptPath(projectPath, sessionId) {
 function resolveSessionTranscriptPath(session) {
   return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
-var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
+var import_node_os2, import_node_path2, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
     "use strict";
-    import_node_os = require("node:os");
-    import_node_path = require("node:path");
-    DATA_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude-mnemo");
-    DEFAULT_DB_PATH = (0, import_node_path.join)(DATA_DIR, "claude-mnemo.db");
-    WORKER_PID_PATH = (0, import_node_path.join)(DATA_DIR, "worker.pid");
-    WORKER_STARTING_PATH = (0, import_node_path.join)(DATA_DIR, "worker.starting");
+    import_node_os2 = require("node:os");
+    import_node_path2 = require("node:path");
+    DATA_DIR = (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
+    DEFAULT_DB_PATH = (0, import_node_path2.join)(DATA_DIR, "claude-mnemo.db");
+    WORKER_PID_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.pid");
+    WORKER_STARTING_PATH = (0, import_node_path2.join)(DATA_DIR, "worker.starting");
   }
 });
 
@@ -6939,9 +7193,9 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
-  if (!(0, import_node_fs.existsSync)(parentDirectory)) {
-    (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
+  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
+  if (!(0, import_node_fs2.existsSync)(parentDirectory)) {
+    (0, import_node_fs2.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
 function normalizeNonNegativeMilliseconds(value, name) {
@@ -7037,12 +7291,12 @@ function runHookWriteTransaction(db, fn, options = {}) {
     }
   }
 }
-var import_node_fs, import_node_path2, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
+var import_node_fs2, import_node_path3, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
-    import_node_fs = require("node:fs");
-    import_node_path2 = require("node:path");
+    import_node_fs2 = require("node:fs");
+    import_node_path3 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
@@ -8002,254 +8256,6 @@ var init_turn_tags = __esm({
         this.name = "MalformedTurnTagsError";
       }
       raw;
-    };
-  }
-});
-
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
-}
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-function eraVisibleMemberSqlClause(alias, cutoffEpoch) {
-  if (cutoffEpoch === null || cutoffEpoch === void 0) {
-    return { clause: "", params: [] };
-  }
-  return {
-    clause: `(${alias}.created_at_epoch >= ? OR COALESCE(${alias}.${ERA_GRANT_COLUMN}, 0) > 0)`,
-    params: [cutoffEpoch]
-  };
-}
-var ERA_GRANT_COLUMN;
-var init_segment_era = __esm({
-  "src/segment-era.ts"() {
-    "use strict";
-    ERA_GRANT_COLUMN = "era_granted_at_epoch";
-  }
-});
-
-// src/shared/config.ts
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function resolveAgentModel(fieldName, value, fallback, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using ${fallback}.`
-  );
-  return fallback;
-}
-function resolveMaxThinkingTokens(fieldName, value, logger) {
-  if (value === null || value === void 0) {
-    return null;
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid ${fieldName} ${JSON.stringify(value)}; using null.`
-  );
-  return null;
-}
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, rawNoteSettlementModel, logger) {
-  const noteSettlementThresholdTurns = clampInteger(
-    config2.noteSettlementThresholdTurns,
-    1,
-    500,
-    DEFAULT_CONFIG.noteSettlementThresholdTurns
-  );
-  let noteSettlementCapTurns = clampInteger(
-    config2.noteSettlementCapTurns,
-    1,
-    500,
-    DEFAULT_CONFIG.noteSettlementCapTurns
-  );
-  if (noteSettlementCapTurns < noteSettlementThresholdTurns) {
-    logger.warn(
-      `[claude-mnemo] noteSettlementCapTurns (${noteSettlementCapTurns}) is below noteSettlementThresholdTurns (${noteSettlementThresholdTurns}); raising the cap to match.`
-    );
-    noteSettlementCapTurns = noteSettlementThresholdTurns;
-  }
-  return {
-    workerIdleShutdownMs: clampInteger(
-      config2.workerIdleShutdownMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.workerIdleShutdownMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveAgentModel(
-      "dreamAgentModel",
-      rawDreamAgentModel,
-      DEFAULT_DREAM_AGENT_MODEL,
-      logger
-    ),
-    dreamAgentMaxThinkingTokens: resolveMaxThinkingTokens(
-      "dreamAgentMaxThinkingTokens",
-      config2.dreamAgentMaxThinkingTokens,
-      logger
-    ),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    ),
-    noteSettlementModel: resolveAgentModel(
-      "noteSettlementModel",
-      rawNoteSettlementModel,
-      DEFAULT_NOTE_SETTLEMENT_MODEL,
-      logger
-    ),
-    noteSettlementMaxThinkingTokens: resolveMaxThinkingTokens(
-      "noteSettlementMaxThinkingTokens",
-      config2.noteSettlementMaxThinkingTokens,
-      logger
-    ),
-    noteSettlementThresholdTurns,
-    noteSettlementCapTurns,
-    noteSettlementBackfillMaxTurns: clampInteger(
-      config2.noteSettlementBackfillMaxTurns,
-      1,
-      1e4,
-      DEFAULT_CONFIG.noteSettlementBackfillMaxTurns
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
-  }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    const configuredNoteSettlementModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "noteSettlementModel"
-    ) ? raw.noteSettlementModel : DEFAULT_NOTE_SETTLEMENT_MODEL;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, configuredNoteSettlementModel, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_WORKER_IDLE_SHUTDOWN_MS, DEFAULT_NOTE_SETTLEMENT_MODEL, DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS, DEFAULT_NOTE_SETTLEMENT_CAP_TURNS, DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS, DEFAULT_CONFIG;
-var init_config = __esm({
-  "src/shared/config.ts"() {
-    "use strict";
-    import_node_fs2 = require("node:fs");
-    import_node_os2 = require("node:os");
-    import_node_path3 = require("node:path");
-    init_segment_era();
-    KNOWN_DREAM_AGENT_MODELS = [
-      "opus",
-      "sonnet",
-      "haiku",
-      "claude-opus-4-8",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5"
-    ];
-    DEFAULT_DREAM_AGENT_MODEL = "opus";
-    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_WORKER_IDLE_SHUTDOWN_MS = 60 * 60 * 1e3;
-    DEFAULT_NOTE_SETTLEMENT_MODEL = "claude-sonnet-5";
-    DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS = 50;
-    DEFAULT_NOTE_SETTLEMENT_CAP_TURNS = 50;
-    DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS = 100;
-    DEFAULT_CONFIG = {
-      workerIdleShutdownMs: DEFAULT_WORKER_IDLE_SHUTDOWN_MS,
-      // On by default because it is a kill switch, not the cutover switch: with no
-      // era cutoff configured this changes nothing at all.
-      settlementEnabled: true,
-      eraCutoffEpoch: null,
-      dreamAgentEnabled: false,
-      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-      dreamAgentMaxThinkingTokens: null,
-      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-      dreamAgentBacklogLimit: 1,
-      noteSettlementModel: DEFAULT_NOTE_SETTLEMENT_MODEL,
-      noteSettlementMaxThinkingTokens: null,
-      noteSettlementThresholdTurns: DEFAULT_NOTE_SETTLEMENT_THRESHOLD_TURNS,
-      noteSettlementCapTurns: DEFAULT_NOTE_SETTLEMENT_CAP_TURNS,
-      noteSettlementBackfillMaxTurns: DEFAULT_NOTE_SETTLEMENT_BACKFILL_MAX_TURNS
     };
   }
 });
@@ -12395,7 +12401,7 @@ var BUILD_ID;
 var init_build_id = __esm({
   "src/shared/build-id.ts"() {
     "use strict";
-    BUILD_ID = true ? "0.30.0-mtlayzia" : "dev";
+    BUILD_ID = true ? "0.30.0-mua0wbwc" : "dev";
   }
 });
 
@@ -40938,6 +40944,9 @@ function getMnemoSessionIdForProcessSession(db, identityKey) {
   ).get(identityKey)?.sessionId ?? null;
 }
 
+// src/mcp/server.ts
+init_config();
+
 // src/mcp/memory-filter.ts
 var RECALL_TURN_FIELD_NAMES = [
   "title",
@@ -53431,7 +53440,7 @@ function startParentHeartbeat(intervalMs = 3e4) {
   timer.unref();
   return timer;
 }
-function registerMainMcpTools(server, toolHandlers) {
+function registerMainMcpTools(server, toolHandlers, options = {}) {
   server.registerTool(
     "recall",
     {
@@ -53448,6 +53457,9 @@ function registerMainMcpTools(server, toolHandlers) {
     },
     (args) => toolHandlers.timeline(args)
   );
+  if (options.quiet) {
+    return;
+  }
   server.registerTool(
     "note",
     {
@@ -53490,7 +53502,9 @@ function createMcpServer(options = {}) {
     note: mergedHandlers.note ?? createStubHandler("note"),
     remember: mergedHandlers.remember ?? createStubHandler("remember")
   };
-  registerMainMcpTools(server, toolHandlers);
+  registerMainMcpTools(server, toolHandlers, {
+    quiet: options.quiet ?? loadConfig().quiet
+  });
   return server;
 }
 async function startMcpServer(options = {}) {
